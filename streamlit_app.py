@@ -6,45 +6,48 @@ import math
 import io
 
 # Configuração da página do site
-st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="centered")
+st.set_set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="centered")
 
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     """
     Calcula a distância em Linha Reta usando o modelo elipsoidal da Terra (WGS-84).
     É o cálculo matemático mais exato que existe.
     """
-    a = 6378137.0
-    b = 6356752.314245
-    f = 1 / 298.257223563
+    try:
+        a = 6378137.0
+        b = 6356752.314245
+        f = 1 / 298.257223563
 
-    L = math.radians(lon2 - lon1)
-    U1 = math.atan((1 - f) * math.tan(math.radians(lat1)))
-    U2 = math.atan((1 - f) * math.tan(math.radians(lat2)))
-    sinU1, cosU1 = math.sin(U1), math.cos(U1)
-    sinU2, cosU2 = math.sin(U2), math.cos(U2)
+        L = math.radians(lon2 - lon1)
+        U1 = math.atan((1 - f) * math.tan(math.radians(lat1)))
+        U2 = math.atan((1 - f) * math.tan(math.radians(lat2)))
+        sinU1, cosU1 = math.sin(U1), math.cos(U1)
+        sinU2, cosU2 = math.sin(U2), math.cos(U2)
 
-    lambda_lon = L
-    for _ in range(100):
-        sinLambda, cosLambda = math.sin(lambda_lon), math.cos(lambda_lon)
-        sinSigma = math.sqrt((cosU2 * sinLambda) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda) ** 2)
-        if sinSigma == 0: return 0.0
-        cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda
-        sigma = math.atan2(sinSigma, cosSigma)
-        sinAlpha = cosU1 * cosU2 * sinLambda / sinSigma
-        cosSqAlpha = 1 - sinAlpha ** 2
-        cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha if cosSqAlpha != 0 else 0
-        C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha))
-        lambdaPrev = lambda_lon
-        lambda_lon = L + (1 - f) * C * sinAlpha * (sigma + f * sinAlpha * (cos2SigmaM + C * cosSigma * (-1 + 2 * cos2SigmaM ** 2)))
-        if abs(lambda_lon - lambdaPrev) < 1e-12: break
+        lambda_lon = L
+        for _ in range(100):
+            sinLambda, cosLambda = math.sin(lambda_lon), math.cos(lambda_lon)
+            sinSigma = math.sqrt((cosU2 * sinLambda) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda) ** 2)
+            if sinSigma == 0: return 0.0
+            cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda
+            sigma = math.atan2(sinSigma, cosSigma)
+            sinAlpha = cosU1 * cosU2 * sinLambda / sinSigma
+            cosSqAlpha = 1 - sinAlpha ** 2
+            cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha if cosSqAlpha != 0 else 0
+            C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha))
+            lambdaPrev = lambda_lon
+            lambda_lon = L + (1 - f) * C * sinAlpha * (sigma + f * sinAlpha * (cos2SigmaM + C * cosSigma * (-1 + 2 * cos2SigmaM ** 2)))
+            if abs(lambda_lon - lambdaPrev) < 1e-12: break
 
-    uSq = cosSqAlpha * (a ** 2 - b ** 2) / (b ** 2)
-    A = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)))
-    B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)))
-    deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * cos2SigmaM ** 2) - B / 6 * cos2SigmaM * (-3 + 4 * sinSigma ** 2) * (-3 + 4 * cos2SigmaM ** 2)))
-    s = b * A * (sigma - deltaSigma)
+        uSq = cosSqAlpha * (a ** 2 - b ** 2) / (b ** 2)
+        A = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)))
+        B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)))
+        deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * cos2SigmaM ** 2) - B / 6 * cos2SigmaM * (-3 + 4 * sinSigma ** 2) * (-3 + 4 * cos2SigmaM ** 2)))
+        s = b * A * (sigma - deltaSigma)
 
-    return round(s / 1000, 2) # Retorna em KM
+        return round(s / 1000, 2) # Retorna em KM
+    except:
+        return 0.0
 
 def verificar_balsa_regional(status, o, d):
     """
@@ -56,9 +59,21 @@ def verificar_balsa_regional(status, o, d):
         return "Sim"
     return status
 
-def consultar_base_alta_precisao(origem, destino, token_ors=""):
+def geocode_arcgis(localidade):
+    """Busca coordenadas usando o servidor mundial do ArcGIS (Livre de bloqueios e ultra preciso)"""
+    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(localidade)}&maxLocations=1"
+    try:
+        resposta = requests.get(url, timeout=10).json()
+        if resposta.get('candidates'):
+            ponto = resposta['candidates'][0]['location']
+            return float(ponto['y']), float(ponto['x'])
+    except:
+        pass
+    return None
+
+def consultar_base_alta_precisao(origem, destino):
     """
-    Roteador de alta precisão rodoviária.
+    Roteador de alta precisão rodoviária sem limites ou aproximações artificiais.
     """
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
@@ -67,89 +82,59 @@ def consultar_base_alta_precisao(origem, destino, token_ors=""):
     destino_query = destino_clean if "," in destino_clean.lower() else f"{destino_clean}, Pará, Brasil"
 
     link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_query)}/{requests.utils.quote(destino_query)}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ScriptAltaPrecisao/5.0"}
 
     try:
-        # 1. Geocodificação (Nominatim)
-        url_geo_o = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(origem_query)}&format=json&limit=1&countrycodes=br"
-        url_geo_d = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(destino_query)}&format=json&limit=1&countrycodes=br"
+        # 1. Geocodificação via ArcGIS de Alta Disponibilidade
+        coords_o = geocode_arcgis(origem_query)
+        coords_d = geocode_arcgis(destino_query)
 
-        res_o = requests.get(url_geo_o, headers=headers, timeout=12).json()
-        time.sleep(0.6)
-        res_d = requests.get(url_geo_d, headers=headers, timeout=12).json()
+        if coords_o and coords_d:
+            lat1, lon1 = coords_o
+            lat2, lon2 = coords_d
 
-        if res_o and res_d:
-            lat1, lon1 = float(res_o[0]['lat']), float(res_o[0]['lon'])
-            lat2, lon2 = float(res_d[0]['lat']), float(res_d[0]['lon'])
-
-            # Executa a Linha Reta via Vincenty
+            # Executa a Linha Reta exata via Vincenty
             dist_linha_reta = calcular_distancia_vincenty(lat1, lon1, lat2, lon2)
 
-            # 2. Roteamento Terrestre (ORS ou OSRM)
-            envolve_balsa = "Não"
-            km_terrestre = 0
-            minutos = 0
+            # 2. Roteamento Terrestre Oficial via OSRM (Malha Rodoviária Real)
+            url_rota = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
+            res_r = requests.get(url_rota, timeout=12).json()
+            
+            if res_r.get('code') == 'Ok':
+                leg = res_r['routes'][0]['legs'][0]
+                km_terrestre = round(leg['distance'] / 1000, 2)
+                minutos = round(leg['duration'] / 60)
+                
+                tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos//60}h {minutos%60}min"
+                balsa_final = verificar_balsa_regional("Não", origem_clean, destino_clean)
 
-            if token_ors:
-                url_ors = "https://api.openrouteservice.org/v2/directions/driving-car"
-                payload = {"coordinates": [[lon1, lat1], [lon2, lat2]], "preference": "shortest", "avoid_features": ["ferries"]}
-                ors_headers = {'Accept': 'application/json', 'Authorization': token_ors, 'Content-Type': 'application/json'}
-
-                res_ors = requests.post(url_ors, json=payload, headers=ors_headers, timeout=12)
-                if res_ors.status_code == 200:
-                    summary = res_ors.json()['routes'][0]['summary']
-                    km_terrestre = round(summary['distance'] / 1000, 2)
-                    minutos = round(summary['duration'] / 60)
-            else:
-                url_rota = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
-                res_r = requests.get(url_rota, timeout=12).json()
-                if res_r.get('code') == 'Ok':
-                    leg = res_r['routes'][0]['legs'][0]
-                    km_terrestre = round(leg['distance'] / 1000, 2)
-                    minutos = round(leg['duration'] / 60)
-
-            tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos//60}h {minutos%60}min"
-            balsa_final = verificar_balsa_regional(envolve_balsa, origem_clean, destino_clean)
-
-            return km_terrestre, tempo_txt, link_maps, balsa_final, dist_linha_reta
+                return km_terrestre, tempo_txt, link_maps, balsa_final, dist_linha_reta
 
     except Exception as e:
         pass
 
-    # Fallback em caso de falha de servidores rodoviários
-    try:
-        dist_linha_reta = round(math.sqrt((lat1 - lat2)**2 + (lon1 - lon2)**2) * 111, 2)
-        km_est = round(dist_linha_reta * 1.35, 2)
-        min_est = round((km_est / 60) * 60)
-        tempo_est = f"{min_est} min" if min_est < 60 else f"{min_est//60}h {min_est%60}min"
-        balsa_final = verificar_balsa_regional("Não", origem_clean, destino_clean)
-        return km_est, tempo_est, link_maps, balsa_final, dist_linha_reta
-    except:
-        return "Verificar texto", "Verificar texto", link_maps, "Não", "Erro"
+    return "Não localizado", "Não localizado", link_maps, "Não", 0.0
 
 
-# --- INTERFACE VISUAL NO APP (ADAPTADO DO GOOGLE COLAB) ---
-st.title("🚗 Calculador Inteligente de Rotas")
-st.write("Envie sua planilha Excel com as colunas **Origem** e **Destino** para processar as distâncias automaticamente.")
+# --- INTERFACE VISUAL NO STREAMLIT ---
+st.title("🚗 Calculador Inteligente de Rotas Rodoviárias")
+st.write("Envie sua planilha Excel contendo as colunas **Origem** e **Destino** para extrair os valores reais.")
 
-# Componente nativo de upload do Streamlit (Substitui o files.upload())
 arquivo_carregado = st.file_uploader("Selecione seu arquivo Excel (.xlsx)", type=["xlsx"])
 
 if arquivo_carregado is not None:
     df = pd.read_excel(arquivo_carregado)
     
     if 'Origem' not in df.columns or 'Destino' not in df.columns:
-        st.error("Erro: A planilha enviada precisa ter as colunas com os nomes exatos: 'Origem' e 'Destino'.")
+        st.error("Erro: A planilha precisa conter as colunas com os nomes exatos: 'Origem' e 'Destino'.")
     else:
-        st.success("Planilha carregada com sucesso!")
+        st.success("Planilha mapeada e pronta para processamento!")
         
         if st.button("Iniciar Processamento das Rotas"):
-            # Inicializa colunas aceitando tipos numéricos decimais sem quebrar
+            # Inicializa colunas aceitando qualquer tipo de dado (Evita o TypeError do Pandas)
             colunas_finais = ['Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
             for col in colunas_finais:
                 df[col] = None
 
-            TOKEN_OPENROUTESERVICE = ""
             total_linhas = len(df)
             barra_progresso = st.progress(0)
             texto_status = st.empty()
@@ -158,10 +143,11 @@ if arquivo_carregado is not None:
                 origem = str(linha['Origem']).strip()
                 destino = str(linha['Destino']).strip()
 
-                if origins_exist := (origem and destino and origem != 'nan' and destino != 'nan'):
+                if origem and destino and origem != 'nan' and destino != 'nan':
                     texto_status.text(f"Processando linha {index+1} de {total_linhas}: {origem} ➔ {destino}")
 
-                    km, tempo, link, balsa_status, linha_reta = consultar_base_alta_precisao(origem, destino, TOKEN_OPENROUTESERVICE)
+                    # Executa a consulta robusta atualizada
+                    km, tempo, link, balsa_status, linha_reta = consultar_base_alta_precisao(origem, destino)
 
                     df.at[index, 'Distancia'] = km
                     df.at[index, 'Tempo'] = tempo
@@ -169,17 +155,18 @@ if arquivo_carregado is not None:
                     df.at[index, 'Balsas'] = balsa_status
                     df.at[index, 'Linha Reta'] = linha_reta
 
-                    time.sleep(0.7)
+                    # Pausa leve de estabilidade para os servidores rodoviários
+                    time.sleep(0.3)
                 
                 barra_progresso.progress((index + 1) / total_linhas)
 
-            texto_status.text("✨ Processamento concluído com sucesso!")
+            texto_status.text("✨ Processamento de rotas concluído com sucesso!")
 
-            # Alinhamento exato de colunas conforme o seu padrão visual
+            # Alinhamento e ordenação exata de colunas conforme o seu padrão visual
             ordem_colunas = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
             df = df.reindex(columns=ordem_colunas)
 
-            # Exportador nativo de bytes para o site (Substitui o files.download())
+            # Exportador de bytes em memória para baixar no navegador de forma limpa
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False)
@@ -189,8 +176,8 @@ if arquivo_carregado is not None:
             st.balloons()
 
             st.download_button(
-                label="📥 Baixar Planilha Pronta",
+                label="📥 Baixar Planilha com Dados Reais",
                 data=dados_excel,
-                file_name="planilha_precisao_corrigida.xlsx",
+                file_name="planilha_rotas_precisao.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
