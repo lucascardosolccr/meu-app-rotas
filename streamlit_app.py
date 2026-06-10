@@ -5,8 +5,8 @@ import time
 import math
 import io
 
-# Configuração da página do site
-st.set_set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="centered")
+# Configuração da página do site (CORRIGIDO: set escrito apenas uma vez)
+st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="centered")
 
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     """
@@ -144,7 +144,7 @@ if arquivo_carregado is not None:
                 destino = str(linha['Destino']).strip()
 
                 if origem and destino and origem != 'nan' and destino != 'nan':
-                    texto_status.text(f"Processando linha {index+1} de {total_linhas}: {origem} ➔ {destino}")
+                    texto_status.text(f"Calculando {index+1}/{total_linhas}: {origem} ➔ {destino}")
 
                     # Executa a consulta robusta atualizada
                     km, tempo, link, balsa_status, linha_reta = consultar_base_alta_precisao(origem, destino)
