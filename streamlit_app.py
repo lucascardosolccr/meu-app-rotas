@@ -6,7 +6,7 @@ import math
 import io
 
 # 🔑 INSIRA A SUA CHAVE DE API DO GOOGLE MAPS ENTRE AS ASPAS ABAIXO:
-CHAVE_GOOGLE_FIXA = "SUA_CHAVE_AQUI"
+CHAVE_GOOGLE_FIXA = "AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60"
 
 # Configuração da página do site
 st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="centered")
