@@ -42,19 +42,20 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         return round(math.sqrt((lat1 - lat2)**2 + (lon1 - lon2)**2) * 111, 2)
 
 def verificar_balsa_regional(status, o, d):
+    """Mantém a checagem apenas para os municípios historicamente isolados por rios no Marajó/PA"""
     cidades = ["moz", "almeirim", "soure", "salvaterra", "marajó", "cametá", "itaituba", "chaves", "gurupá"]
     if any(c in o.lower() or c in d.lower() for c in cidades):
         return "Sim"
     return status
 
 def geocode_arcgis(localidade):
-    """Busca coordenadas usando o servidor do ArcGIS, imune a bloqueios de tráfego comum"""
+    """Busca coordenadas usando o servidor do ArcGIS, imune a bloqueios de tráfego"""
     url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(localidade)}&maxLocations=1"
     try:
         resposta = requests.get(url, timeout=10).json()
         if resposta.get('candidates'):
             ponto = resposta['candidates'][0]['location']
-            return float(ponto['y']), float(ponto['x'])  # Retorna Latitude, Longitude
+            return float(ponto['y']), float(ponto['x'])
     except:
         pass
     return None
@@ -69,7 +70,6 @@ def consultar_base_alta_precisao(origem, destino):
     link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_query)}/{requests.utils.quote(destino_query)}"
     
     try:
-        # 1. Busca coordenadas usando o ArcGIS
         coords_o = geocode_arcgis(origem_query)
         coords_d = geocode_arcgis(destino_query)
 
@@ -77,10 +77,10 @@ def consultar_base_alta_precisao(origem, destino):
             lat1, lon1 = coords_o
             lat2, lon2 = coords_d
             
-            # Calcula a Linha Reta via Vincenty
+            # Linha Reta via Vincenty
             dist_linha_reta = calcular_distancia_vincenty(lat1, lon1, lat2, lon2)
 
-            # 2. Busca a rota rodoviária (OSRM público)
+            # Roteamento Rodoviário Direto (Sem alterações manuais de tempo)
             envolve_balsa = "Não"
             url_rota = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
             res_r = requests.get(url_rota, timeout=12).json()
@@ -93,18 +93,11 @@ def consultar_base_alta_precisao(origem, destino):
                 km_terrestre = round(dist_linha_reta * 1.35, 2)
                 minutos = round((km_terrestre / 60) * 60)
 
-            # 3. Análise Geométrica de Balsas
-            if dist_linha_reta > 0:
-                fator_desvio = km_terrestre / dist_linha_reta
-                if (fator_desvio > 3.6 and dist_linha_reta > 25) or (dist_linha_reta < 60 and minutos > 160):
-                    envolve_balsa = "Sim"
-                    if km_terrestre < dist_linha_reta:
-                        km_terrestre = round(dist_linha_reta * 1.45, 2)
-                        minutos = round((km_terrestre / 55) * 60)
-
+            # Formatação direta do tempo bruto do mapa para a planilha
             tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos//60}h {minutos%60}min"
             balsa_final = verificar_balsa_regional(envolve_balsa, origem_clean, destino_clean)
             
+            # Se for Marajó/região de balsa obrigatória confirmada, mantém o status Sim, senão segue o mapa
             return km_terrestre, tempo_txt, link_maps, balsa_final, dist_linha_reta
         else:
             return "Não localizado", "Não localizado", link_maps, "Não", "Não localizado"
@@ -112,7 +105,7 @@ def consultar_base_alta_precisao(origem, destino):
     except Exception as e:
         return "Erro de conexão", "Erro de conexão", link_maps, "Não", "Erro"
 
-# --- INTERFACE VISUAL NO APP ---
+# --- INTERFACE VISUAL ---
 st.title("🚗 Calculador Inteligente de Rotas")
 st.write("Insira sua planilha Excel com as colunas **Origem** e **Destino** para processamento automático.")
 
@@ -127,7 +120,6 @@ if arquivo_carregado is not None:
         st.success("Planilha mapeada com sucesso!")
         
         if st.button("Iniciar Processamento das Rotas"):
-            # CORREÇÃO CRÍTICA: Inicializar as colunas vazias aceitando múltiplos tipos de dados (Object)
             colunas_finais = ['Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
             for col in colunas_finais:
                 df[col] = None
@@ -157,7 +149,6 @@ if arquivo_carregado is not None:
             
             texto_status.text("✨ Processamento concluído com sucesso!")
             
-            # Ordenação padrão solicitada
             ordem_colunas = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
             df = df.reindex(columns=ordem_colunas)
             
