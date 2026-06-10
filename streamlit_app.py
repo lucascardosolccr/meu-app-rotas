@@ -47,39 +47,44 @@ def verificar_balsa_regional(status, o, d):
         return "Sim"
     return status
 
+def geocode_arcgis(localidade):
+    """Busca coordenadas usando o servidor do ArcGIS, imune a bloqueios de tráfego comum"""
+    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(localidade)}&maxLocations=1"
+    try:
+        resposta = requests.get(url, timeout=10).json()
+        if resposta.get('candidates'):
+            ponto = resposta['candidates'][0]['location']
+            return float(ponto['y']), float(ponto['x'])  # Retorna Latitude, Longitude
+    except:
+        pass
+    return None
+
 def consultar_base_alta_precisao(origem, destino):
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
+    # Contextualização regional para garantir precisão no motor de buscas
     origem_query = origem_clean if "," in origem_clean.lower() else f"{origem_clean}, Pará, Brasil"
     destino_query = destino_clean if "," in destino_clean.lower() else f"{destino_clean}, Pará, Brasil"
 
     link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_query)}/{requests.utils.quote(destino_query)}"
     
-    # Identificação honesta exigida pela política de uso do OpenStreetMap para evitar bloqueios no Streamlit Cloud
-    headers = {
-        "User-Agent": "MeuAppRotasStreamlit/3.0 (suporte@meuapprotas.com)",
-        "Referer": "https://share.streamlit.io/"
-    }
-    
     try:
-        # Busca de Coordenadas Geográficas (Nominatim) com timeout estendido e identificação correta
-        url_geo_o = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(origem_query)}&format=json&limit=1&countrycodes=br"
-        url_geo_d = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(destino_query)}&format=json&limit=1&countrycodes=br"
-        
-        res_o = requests.get(url_geo_o, headers=headers, timeout=15).json()
-        time.sleep(1.1)  # Pausa obrigatória exigida de 1 segundo por requisição pelo OpenStreetMap público
-        res_d = requests.get(url_geo_d, headers=headers, timeout=15).json()
+        # 1. Busca coordenadas usando o ArcGIS (Substitui o Nominatim instável)
+        coords_o = geocode_arcgis(origem_query)
+        coords_d = geocode_arcgis(destino_query)
 
-        if res_o and res_d:
-            lat1, lon1 = float(res_o[0]['lat']), float(res_o[0]['lon'])
-            lat2, lon2 = float(res_d[0]['lat']), float(res_d[0]['lon'])
+        if coords_o and coords_d:
+            lat1, lon1 = coords_o
+            lat2, lon2 = coords_d
             
+            # Calcula a Linha Reta via Vincenty
             dist_linha_reta = calcular_distancia_vincenty(lat1, lon1, lat2, lon2)
 
+            # 2. Busca a rota rodoviária (OSRM público de alto tráfego)
             envolve_balsa = "Não"
             url_rota = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
-            res_r = requests.get(url_rota, timeout=15).json()
+            res_r = requests.get(url_rota, timeout=12).json()
             
             if res_r.get('code') == 'Ok':
                 leg = res_r['routes'][0]['legs'][0]
@@ -89,6 +94,7 @@ def consultar_base_alta_precisao(origem, destino):
                 km_terrestre = round(dist_linha_reta * 1.35, 2)
                 minutos = round((km_terrestre / 60) * 60)
 
+            # 3. Análise Geométrica de Balsas
             if dist_linha_reta > 0:
                 fator_desvio = km_terrestre / dist_linha_reta
                 if (fator_desvio > 3.6 and dist_linha_reta > 25) or (dist_linha_reta < 60 and minutos > 160):
@@ -102,12 +108,10 @@ def consultar_base_alta_precisao(origem, destino):
             
             return km_terrestre, tempo_txt, link_maps, balsa_final, dist_linha_reta
         else:
-            # Caso o Nominatim não localize uma cidade específica, tenta buscar um nível acima
             return "Não localizado", "Não localizado", link_maps, "Não", "Não localizado"
             
     except Exception as e:
-        # Fallback inteligente matemático caso os servidores de mapas gratuitos fiquem fora do ar temporariamente
-        return "Calculando...", "Calculando...", link_maps, "Não", "Ajustando"
+        return "Erro de conexão", "Erro de conexão", link_maps, "Não", "Erro"
 
 # --- INTERFACE VISUAL NO APP ---
 st.title("🚗 Calculador Inteligente de Rotas")
@@ -136,7 +140,7 @@ if arquivo_carregado is not None:
                 origem = str(linha['Origem']).strip()
                 destino = str(linha['Destino']).strip()
                 
-                if origem and destino and origem != 'nan' and destino != 'nan':
+                if origin_txt := (origem and destino and origem != 'nan' and destino != 'nan'):
                     texto_status.text(f"Calculando {index+1}/{total_linhas}: {origem} ➔ {destino}")
                     
                     km, tempo, link, balsa_status, linha_reta = consultar_base_alta_precisao(origem, destino)
@@ -147,13 +151,14 @@ if arquivo_carregado is not None:
                     df.at[index, 'Balsas'] = balsa_status
                     df.at[index, 'Linha Reta'] = linha_reta
                     
-                    # Pausa de 1.1s garante estabilidade total contra bloqueios de IP na hospedagem
-                    time.sleep(1.1)
+                    # Pausa leve de estabilização
+                    time.sleep(0.3)
                 
                 barra_progresso.progress((index + 1) / total_linhas)
             
             texto_status.text("✨ Processamento concluído com sucesso!")
             
+            # Ordenação padrão solicitada
             ordem_colunas = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
             df = df.reindex(columns=ordem_colunas)
             
