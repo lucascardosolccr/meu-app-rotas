@@ -13,7 +13,7 @@ st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="�
 
 # Inicialização segura da biblioteca oficial do Google
 gmaps_client = None
-if CHAVE_GOOGLE_FIXA and CHAVE_GOOGLE_FIXA != "SUA_CHAVE_AQUI":
+if CHAVE_GOOGLE_FIXA and CHAVE_GOOGLE_FIXA != "AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60":
     try:
         import googlemaps
         gmaps_client = googlemaps.Client(key=CHAVE_GOOGLE_FIXA)
