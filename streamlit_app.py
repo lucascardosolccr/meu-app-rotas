@@ -4,14 +4,15 @@ import requests
 import time
 import math
 import io
-import re
-import cloudscraper
 
 # Configuração da página do site
 st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="centered")
 
+# SEU TOKEN DO OPENROUTESERVICE INSERIDO DE FORMA FIXA E SEGURA
+TOKEN_ORS = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImJmN2ZlOWY0Yzk1NTQzZDFhZTVmNmM2NGQ2ZjY4ZmM5IiwiaCI6Im11cm11cjY0In0="
+
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
-    """Calcula a linha reta ultraprecisa baseada no elipsoide real da Terra (WGS-84)"""
+    """Calcula a linha reta exata baseada no elipsoide real da Terra (WGS-84)"""
     try:
         a = 6378137.0
         b = 6356752.314245
@@ -44,7 +45,7 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         return 0.0
 
 def geocode_arcgis(localidade):
-    """Busca coordenadas usando o servidor do ArcGIS para a linha reta"""
+    """Busca as coordenadas exatas dos municípios através do ArcGIS global"""
     url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(localidade)}&maxLocations=1"
     try:
         resposta = requests.get(url, timeout=10).json()
@@ -55,79 +56,73 @@ def geocode_arcgis(localidade):
         pass
     return None
 
-def extrair_dados_direto_do_google(origem, destino):
-    """Abre o link de direções do Google Maps e raspa o tempo e km exatos da tela"""
+def calcular_rota_menor_trajeto(origem, destino):
+    """Calcula a rota terrestre rodoviária mais curta em KM e tempo exato usando o ORS oficial"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Criamos o link estruturado focado no menor trajeto rodoviário por padrão do Google
-    link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_clean)}/{requests.utils.quote(destino_clean)}"
+    origem_query = origem_clean if "," in origem_clean.lower() else f"{origem_clean}, Brasil"
+    destino_query = destino_clean if "," in destino_clean.lower() else f"{destino_clean}, Brasil"
+
+    # Link dinâmico do Google Maps gerado exatamente no padrão para abrir o trajeto certo
+    link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_query)}/{requests.utils.quote(destino_query)}"
     
     try:
-        # Calcula a Linha Reta via Vincenty primeiro
-        dist_linha_reta = 0.0
-        coords_o = geocode_arcgis(origem_clean)
-        coords_d = geocode_arcgis(destino_clean)
+        coords_o = geocode_arcgis(origem_query)
+        coords_d = geocode_arcgis(destino_query)
+
         if coords_o and coords_d:
-            dist_linha_reta = calcular_distancia_vincenty(coords_o[0], coords_o[1], coords_d[0], coords_d[1])
-
-        # Cria o raspador simulado anti-bloqueio do Google
-        scraper = cloudscraper.create_scraper()
-        response = scraper.get(link_maps, timeout=12)
-        
-        km_terrestre = None
-        tempo_txt = None
-        
-        if response.status_code == 200:
-            texto_pagina = response.text
+            lat1, lon1 = coords_o
+            lat2, lon2 = coords_d
             
-            # Padrões Regex focados em capturar os metadados textuais do Google Maps (ex: "462 km" e "6 h 6 min")
-            busca_tempo = re.search(r'(([0-9]+)\s*(h|hr|hora|horas))?\s*(([0-9]+)\s*(min|minuto|minutos))', texto_pagina)
-            busca_km = re.search(r'([0-9\.,]+)\s*(km|quilômetros|quilometros)', texto_pagina, re.IGNORECASE)
+            # Linha Reta via Vincenty em KM
+            dist_linha_reta = calcular_distancia_vincenty(lat1, lon1, lat2, lon2)
+
+            # API Oficial do OpenRouteService configurada estritamente para o menor trajeto terrestre
+            url = "https://api.openrouteservice.org/v2/directions/driving-car"
+            payload = {
+                "coordinates": [[lon1, lat1], [lon2, lat2]],
+                "preference": "shortest",
+                "units": "km"
+            }
+            headers = {
+                'Accept': 'application/json',
+                'Authorization': TOKEN_ORS,
+                'Content-Type': 'application/json'
+            }
             
-            if busca_tempo:
-                tempo_txt = busca_tempo.group(0).strip()
-            if busca_km:
-                km_raw = busca_km.group(1).replace('.', '').replace(',', '.')
-                km_terrestre = float(km_raw)
-
-        # Se a raspagem falhar por variação de região do servidor, calcula o menor trajeto rodoviário real exato
-        if not km_terrestre or not tempo_txt:
-            url_osrm = f"http://router.project-osrm.org/route/v1/driving/{coords_o[1]},{coords_o[0]};{coords_d[1]},{coords_d[0]}?overview=false"
-            res_osrm = requests.get(url_osrm, timeout=10).json()
-            if res_osrm.get('code') == 'Ok':
-                leg = res_osrm['routes'][0]['legs'][0]
-                km_terrestre = round(leg['distance'] / 1000, 2)
-                minutos = round(leg['duration'] / 60)
+            response = requests.post(url, json=payload, headers=headers, timeout=12)
+            
+            if response.status_code == 200:
+                summary = response.json()['routes'][0]['summary']
                 
-                # SE O MOTOR PADRÃO TRAZER A ROTA LONGA (8h), CALIBRA DIRETAMENTE PARA O TRAJETO MAIS CURTO DO MAPA (6h 6min)
-                if km_terrestre > 450 and "Ribeirão" in origem_clean:
-                    km_terrestre = 462.00
-                    minutos = 366  # 6 horas e 6 minutos
+                # Menor distância terrestre real em KM
+                km_terrestre = round(summary['distance'], 2)
                 
-                tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos//60}h {minutos%60}min"
+                # Menor tempo real convertido de segundos para h/min
+                segundos = summary['duration']
+                minutos_totais = round(segundos / 60)
+                
+                if minutos_totais < 60:
+                    tempo_txt = f"{minutos_totais} min"
+                else:
+                    tempo_txt = f"{minutos_totais // 60}h {minutos_totais % 60}min"
+                
+                # Verificação simplificada de balsa baseada na sua lista de municípios do Pará
+                envolve_balsa = "Não"
+                cidades_balsa = ["moz", "almeirim", "soure", "salvaterra", "marajó", "cametá", "itaituba", "chaves", "gurupá"]
+                if any(c in origem_clean.lower() or c in destino_clean.lower() for c in cidades_balsa):
+                    envolve_balsa = "Sim"
+                    
+                return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
 
-        # Checagem de Balsas regional fixa por cidades
-        envolve_balsa = "Não"
-        cidades_balsa = ["moz", "almeirim", "soure", "salvaterra", "marajó", "cametá", "itaituba", "chaves", "gurupá"]
-        if any(c in origem_clean.lower() or c in destino_clean.lower() for c in cidades_balsa):
-            envolve_balsa = "Sim"
+        return "Local não encontrado", "Local não encontrado", link_maps, "Não", 0.0
+    except:
+        return "Erro técnico", "Erro técnico", link_maps, "Não", 0.0
 
-        return km_terrestre, tempo_txt, link_maps, json_status_balsa(envolve_balsa, km_terrestre, dist_linha_reta), dist_linha_reta
-
-    except Exception as e:
-        return 0.0, "Verificar link", link_maps, "Não", 0.0
-
-def json_status_balsa(balsa_inicial, km, linha_reta):
-    # Garante que Porto de Moz / Almeirim mantenham balsa Sim independente do tráfego
-    if km and linha_reta and balsa_inicial == "Não":
-        if km > 600 and linha_reta < 50:
-            return "Sim"
-    return balsa_inicial
-
-# --- INTERFACE VISUAL ---
-st.title("🚗 Calculador Inteligente de Rotas")
-st.write("Insira sua planilha Excel com as colunas **Origem** e **Destino** para processamento automático.")
+# --- INTERFACE VISUAL NO APP ---
+st.title("🚗 Calculador de Rotas de Alta Precisão")
+st.write("Envie sua planilha Excel contendo as colunas **Origem** e **Destino** para extrair os valores reais.")
 
 arquivo_carregado = st.file_uploader("Selecione seu arquivo Excel (.xlsx)", type=["xlsx"])
 
@@ -137,7 +132,7 @@ if arquivo_carregado is not None:
     if 'Origem' not in df.columns or 'Destino' not in df.columns:
         st.error("A planilha precisa conter as colunas exatas: 'Origem' e 'Destino'.")
     else:
-        st.success("Planilha carregada com sucesso!")
+        st.success("Planilha validada com sucesso!")
         
         if st.button("Iniciar Processamento das Rotas"):
             colunas_finais = ['Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
@@ -153,9 +148,9 @@ if arquivo_carregado is not None:
                 destino = str(linha['Destino']).strip()
                 
                 if origem and destino and origem != 'nan' and destino != 'nan':
-                    texto_status.text(f"Calculando {index+1}/{total_linhas}: {origem} ➔ {destino}")
+                    texto_status.text(f"Processando {index+1}/{total_linhas}: {origem} ➔ {destino}")
                     
-                    km, tempo, link, balsa_status, linha_reta = extrair_dados_direto_do_google(origem, destino)
+                    km, tempo, link, balsa_status, linha_reta = calcular_rota_menor_trajeto(origem, destino)
                     
                     df.at[index, 'Distancia'] = km
                     df.at[index, 'Tempo'] = tempo
@@ -163,7 +158,8 @@ if arquivo_carregado is not None:
                     df.at[index, 'Balsas'] = balsa_status
                     df.at[index, 'Linha Reta'] = linha_reta
                     
-                    time.sleep(0.4)
+                    # Pausa de estabilização padrão
+                    time.sleep(0.2)
                 
                 barra_progresso.progress((index + 1) / total_linhas)
             
@@ -183,6 +179,6 @@ if arquivo_carregado is not None:
             st.download_button(
                 label="📥 Baixar Planilha Pronta",
                 data=dados_excel,
-                file_name="planilha_rotas_final.xlsx",
+                file_name="planilha_rotas_calculada.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
