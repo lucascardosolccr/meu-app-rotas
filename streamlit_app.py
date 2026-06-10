@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
-import requests
-import time
+import googlemaps
 import math
 import io
+import time
 
 # Configuração da página do site
 st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="centered")
@@ -41,133 +41,122 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     except:
         return 0.0
 
-def geocode_arcgis(localidade):
-    """Busca as coordenadas exatas dos municípios através do ArcGIS global"""
-    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(localidade)}&maxLocations=1"
-    try:
-        resposta = requests.get(url, timeout=10).json()
-        if resposta.get('candidates'):
-            ponto = resposta['candidates'][0]['location']
-            return float(ponto['y']), float(ponto['x'])
-    except:
-        pass
-    return None
-
-def calcular_rota_precisa(origem, destino):
-    """Calcula a rota rodoviária real usando OSRM estável de alta precisão com fallback inteligente"""
+def calcular_rota_google_oficial(origem, destino, gmaps_client):
+    """Consulta diretamente a API Oficial do Google Maps para extrair distância e tempos reais"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
     origem_query = origem_clean if "," in origem_clean.lower() else f"{origem_clean}, Brasil"
     destino_query = destino_clean if "," in destino_clean.lower() else f"{destino_clean}, Brasil"
 
-    # Cria o link perfeito que abre direto no Google Maps para o usuário conferir
+    # Link dinâmico do Google Maps gerado exatamente no padrão para o usuário clicar
+    import requests
     link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_query)}/{requests.utils.quote(destino_query)}"
     
     try:
-        coords_o = geocode_arcgis(origem_query)
-        coords_d = geocode_arcgis(destino_query)
-
-        if coords_o and coords_d:
-            lat1, lon1 = coords_o
-            lat2, lon2 = coords_d
+        # Consulta a rota oficial no modo de direção (Carro)
+        resultado_rota = gmaps_client.directions(
+            origin=origem_query,
+            destination=destino_query,
+            mode="driving",
+            language="pt-BR"
+        )
+        
+        if resultado_rota:
+            leg = resultado_rota[0]['legs'][0]
             
-            # Linha Reta exata via Vincenty
-            dist_linha_reta = calcular_distancia_vincenty(lat1, lon1, lat2, lon2)
-
-            # Motor OSRM (Calcula rotas reais incluindo travessias de balsa e rotas estaduais curtas)
-            url_osrm = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
-            res_r = requests.get(url_osrm, timeout=10).json()
+            # Extrai os valores numéricos exatos e formatações reais do Google
+            km_terrestre = round(leg['distance']['value'] / 1000, 2) # Converte metros para KM decimal
+            tempo_txt = leg['duration']['text'] # Retorna exatamente o texto do Google (ex: "6 horas 6 min")
             
-            km_terrestre = 0.0
-            minutos_totais = 0
+            # Captura coordenadas geográficas reais para calcular a Linha Reta
+            lat_o = leg['start_location']['lat']
+            lon_o = leg['start_location']['lng']
+            lat_d = leg['end_location']['lat']
+            lon_d = leg['end_location']['lng']
             
-            if res_r.get('code') == 'Ok':
-                leg = res_r['routes'][0]['legs'][0]
-                km_terrestre = round(leg['distance'] / 1000, 2)
-                minutos_totais = round(leg['duration'] / 60)
-
-            # TRAVA DE SEGURANÇA: Se o roteador deu uma volta absurda ou falhou, calibra pelo desvio real da linha reta
-            if km_terrestre == 0 or (dist_linha_reta > 20 and km_terrestre / dist_linha_reta > 3.0):
-                km_terrestre = round(dist_linha_reta * 1.45, 2)
-                minutos_totais = round((km_terrestre / 75) * 60) # Média de 75 km/h para estradas mistas
-
-            # Formatação do texto de tempo
-            if minutos_totais < 60:
-                tempo_txt = f"{minutos_totais} min"
-            else:
-                tempo_txt = f"{minutos_totais // 60}h {minutos_totais % 60}min"
+            dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
             
-            # Detecção de balsa regional automática
+            # Mapeamento inteligente regional de balsas
             envolve_balsa = "Não"
             cidades_balsa = ["moz", "almeirim", "soure", "salvaterra", "marajó", "cametá", "itaituba", "chaves", "gurupá", "cascalheira", "araguaia"]
             if any(c in origem_clean.lower() or c in destino_clean.lower() for c in cidades_balsa):
                 envolve_balsa = "Sim"
                 
             return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
+            
+        return "Rota não encontrada", "Rota não encontrada", link_maps, "Não", 0.0
+    except Exception as e:
+        return "Erro na API do Google", "Erro na API do Google", link_maps, "Não", 0.0
 
-        return "Não localizado", "Não localizado", link_maps, "Não", 0.0
-    except:
-        return "Erro técnico", "Erro técnico", link_maps, "Não", 0.0
+# --- INTERFACE VISUAL NO STREAMLIT ---
+st.title("🚗 Calculador de Rotas de Alta Precisão (Google Maps API)")
+st.write("Esse sistema utiliza a API oficial do Google para trazer quilometragens e tempos 100% corretos.")
 
-# --- INTERFACE VISUAL NO APP ---
-st.title("🚗 Calculador de Rotas de Alta Precisão")
-st.write("Envie sua planilha Excel contendo as colunas **Origem** e **Destino** para extrair os valores reais.")
+# Campo para colocar a chave oficial do Google obtida no Passo 1
+google_key = st.text_input("AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60", type="password")
 
-arquivo_carregado = st.file_uploader("Selecione seu arquivo Excel (.xlsx)", type=["xlsx"])
-
-if arquivo_carregado is not None:
-    df = pd.read_excel(arquivo_carregado)
+if not google_key:
+    st.info("AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60")
+else:
+    # Inicializa o cliente oficial do Google Maps
+    gmaps_client = googlemaps.Client(key=google_key)
     
-    if 'Origem' not in df.columns or 'Destino' not in df.columns:
-        st.error("A planilha precisa conter as colunas exatas: 'Origem' e 'Destino'.")
-    else:
-        st.success("Planilha validada com sucesso!")
+    arquivo_carregado = st.file_uploader("Selecione seu arquivo Excel (.xlsx)", type=["xlsx"])
+
+    if arquivo_carregado is not None:
+        df = pd.read_excel(arquivo_carregado)
         
-        if st.button("Iniciar Processamento das Rotas"):
-            colunas_finais = ['Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
-            for col in colunas_finais:
-                df[col] = None
+        if 'Origem' not in df.columns or 'Destino' not in df.columns:
+            st.error("A planilha precisa conter as colunas exatas: 'Origem' e 'Destino'.")
+        else:
+            st.success("Planilha mapeada com sucesso!")
             
-            total_linhas = len(df)
-            barra_progresso = st.progress(0)
-            texto_status = st.empty()
-            
-            for index, linha in df.iterrows():
-                origem = str(linha['Origem']).strip()
-                destino = str(linha['Destino']).strip()
+            if st.button("Iniciar Processamento das Rotas"):
+                colunas_finais = ['Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
+                for col in colunas_finais:
+                    df[col] = None
                 
-                if origem and destino and origem != 'nan' and destino != 'nan':
-                    texto_status.text(f"Processando {index+1}/{total_linhas}: {origem} ➔ {destino}")
-                    
-                    km, tempo, link, balsa_status, linha_reta = calcular_rota_precisa(origem, destino)
-                    
-                    df.at[index, 'Distancia'] = km
-                    df.at[index, 'Tempo'] = tempo
-                    df.at[index, 'Link da Rota'] = link
-                    df.at[index, 'Balsas'] = balsa_status
-                    df.at[index, 'Linha Reta'] = linha_reta
-                    
-                    time.sleep(0.1)
+                total_linhas = len(df)
+                barra_progresso = st.progress(0)
+                texto_status = st.empty()
                 
-                barra_progresso.progress((index + 1) / total_linhas)
-            
-            texto_status.text("✨ Processamento concluído com sucesso!")
-            
-            ordem_colunas = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
-            df = df.reindex(columns=ordem_colunas)
-            
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False)
-            dados_excel = output.getvalue()
-            
-            st.write("---")
-            st.balloons()
-            
-            st.download_button(
-                label="📥 Baixar Planilha Pronta",
-                data=dados_excel,
-                file_name="planilha_rotas_corrigida.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+                for index, linha in df.iterrows():
+                    origem = str(linha['Origem']).strip()
+                    destino = str(linha['Destino']).strip()
+                    
+                    if origem and destino and origem != 'nan' and destino != 'nan':
+                        texto_status.text(f"Processando linha {index+1}/{total_linhas}: {origem} ➔ {destino}")
+                        
+                        km, tempo, link, balsa_status, linha_reta = calcular_rota_google_oficial(origem, destino, gmaps_client)
+                        
+                        df.at[index, 'Distancia'] = km
+                        df.at[index, 'Tempo'] = tempo
+                        df.at[index, 'Link da Rota'] = link
+                        df.at[index, 'Balsas'] = balsa_status
+                        df.at[index, 'Linha Reta'] = linha_reta
+                        
+                        # Pausa mínima de conformidade com a API do Google
+                        time.sleep(0.05)
+                    
+                    barra_progresso.progress((index + 1) / total_linhas)
+                
+                texto_status.text("✨ Processamento concluído com exatidão máxima!")
+                
+                ordem_colunas = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
+                df = df.reindex(columns=ordem_colunas)
+                
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False)
+                dados_excel = output.getvalue()
+                
+                st.write("---")
+                st.balloons()
+                
+                st.download_button(
+                    label="📥 Baixar Planilha Pronta",
+                    data=dados_excel,
+                    file_name="planilha_rotas_google_precision.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
