@@ -8,6 +8,20 @@ import io
 # Configuração da página do site
 st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="centered")
 
+# 🔑 SE VOCÊ QUISER USAR O GOOGLE OFICIAL, COLE SUA CHAVE DENTRO DAS ASPAS ABAIXO:
+# Se deixar vazio "", o sistema usará o motor gratuito de alta precisão automaticamente.
+CHAVE_GOOGLE_FIXA = "AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60"
+
+# Tenta carregar a biblioteca do Google se a chave estiver preenchida
+if CHAVE_GOOGLE_FIXA:
+    try:
+        import googlemaps
+        gmaps_client = googlemaps.Client(key=CHAVE_GOOGLE_FIXA)
+    except:
+        gmaps_client = None
+else:
+    gmaps_client = None
+
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     """Calcula a linha reta exata baseada no elipsoide real da Terra (WGS-84)"""
     try:
@@ -54,16 +68,16 @@ def geocode_arcgis(localidade):
     return None
 
 def calcular_rota_precisa(origem, destino, uf_origem="", uf_destino=""):
-    """Calcula a rota rodoviária real usando OSRM de alta precisão com inteligência de contexto de estado"""
+    """Calcula a rota rodoviária real usando a melhor estratégia disponível com inteligência geográfica"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Monta a busca inteligente garantindo que o estado (ex: TO, MT, GO) seja anexado para evitar conflito de nomes
+    # Adiciona contexto inteligente para evitar confusão de cidades homônimas (ex: Taguatinga, TO)
     origem_query = origem_clean
     if uf_origem and str(uf_origem).strip().lower() != 'nan':
         origem_query += f", {str(uf_origem).strip()}"
     elif "brasil" not in origem_clean.lower() and "," not in origem_clean:
-        origem_query += ", Tocantins, Brasil" # Fallback padrão regional para o seu cenário
+        origem_query += ", Tocantins, Brasil"
         
     destino_query = destino_clean
     if uf_destino and str(uf_destino).strip().lower() != 'nan':
@@ -71,9 +85,23 @@ def calcular_rota_precisa(origem, destino, uf_origem="", uf_destino=""):
     elif "brasil" not in destino_clean.lower() and "," not in destino_clean:
         destino_query += ", Tocantins, Brasil"
 
-    # Link dinâmico perfeito para abrir direto no Google Maps
     link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_query)}/{requests.utils.quote(destino_query)}"
     
+    # ESTRATÉGIA 1: SE HOUVER CLIENTE DO GOOGLE ATIVO, USA A API OFICIAL DO GOOGLE MAPS
+    if gmaps_client:
+        try:
+            resultado_rota = gmaps_client.directions(origin=origem_query, destination=destino_query, mode="driving", language="pt-BR")
+            if resultado_rota:
+                leg = resultado_rota[0]['legs'][0]
+                km_terrestre = round(leg['distance']['value'] / 1000, 2)
+                tempo_txt = leg['duration']['text']
+                dist_linha_reta = calcular_distancia_vincenty(leg['start_location']['lat'], leg['start_location']['lng'], leg['end_location']['lat'], leg['end_location']['lng'])
+                envolve_balsa = "Sim" if any(c in origem_clean.lower() or c in destino_clean.lower() for c in ["cascalheira", "araguaia", "marajó"]) else "Não"
+                return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
+        except:
+            pass
+
+    # ESTRATÉGIA 2: MOTOR GRATUITO DE ALTA PRECISÃO (OSRM + ARCGIS)
     try:
         coords_o = geocode_arcgis(origem_query)
         coords_d = geocode_arcgis(destino_query)
@@ -82,10 +110,8 @@ def calcular_rota_precisa(origem, destino, uf_origem="", uf_destino=""):
             lat1, lon1 = coords_o
             lat2, lon2 = coords_d
             
-            # Linha Reta exata via Vincenty
             dist_linha_reta = calcular_distancia_vincenty(lat1, lon1, lat2, lon2)
 
-            # Motor OSRM Oficial
             url_osrm = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
             res_r = requests.get(url_osrm, timeout=10).json()
             
@@ -97,18 +123,16 @@ def calcular_rota_precisa(origem, destino, uf_origem="", uf_destino=""):
                 km_terrestre = round(leg['distance'] / 1000, 2)
                 minutos_totais = round(leg['duration'] / 60)
 
-            # Sistema de segurança inteligente contra falhas ou distâncias absurdas
+            # Trava de segurança inteligente regional
             if km_terrestre == 0 or (dist_linha_reta > 15 and km_terrestre / dist_linha_reta > 3.0):
                 km_terrestre = round(dist_linha_reta * 1.28, 2)
                 minutos_totais = round((km_terrestre / 70) * 60)
 
-            # Formatação exata do texto de tempo
             if minutos_totais < 60:
                 tempo_txt = f"{minutos_totais} min"
             else:
                 tempo_txt = f"{minutos_totais // 60}h {minutos_totais % 60}min"
             
-            # Detecção automática de balsas
             envolve_balsa = "Não"
             cidades_balsa = ["moz", "almeirim", "soure", "salvaterra", "marajó", "cametá", "itaituba", "chaves", "gurupá", "cascalheira", "araguaia"]
             if any(c in origem_clean.lower() or c in destino_clean.lower() for c in cidades_balsa):
@@ -121,8 +145,8 @@ def calcular_rota_precisa(origem, destino, uf_origem="", uf_destino=""):
         return "Erro técnico", "Erro técnico", link_maps, "Não", 0.0
 
 # --- INTERFACE VISUAL NO APP ---
-st.title("🚗 Calculador de Rotas Inteligentes")
-st.write("Envie sua planilha Excel contendo as colunas **Origem** e **Destino** para extrair os valores reais.")
+st.title("🚗 Calculador Inteligente de Rotas")
+st.write("Mapeamento rodoviário e logístico automatizado. Envie seu arquivo Excel abaixo.")
 
 arquivo_carregado = st.file_uploader("Selecione seu arquivo Excel (.xlsx)", type=["xlsx"])
 
@@ -139,7 +163,7 @@ if arquivo_carregado is not None:
             for col in colunas_finais:
                 df[col] = None
             
-            # Detecta se existem colunas de estado na planilha para usá-las como auxiliar de precisão
+            # Detecta se existem colunas extras de estado
             col_uf_o = next((c for c in df.columns if c.lower() in ['uf_origem', 'uf origem', 'estado origem', 'origem_uf']), None)
             col_uf_d = next((c for c in df.columns if c.lower() in ['uf_destino', 'uf destino', 'estado destino', 'destino_uf']), None)
 
@@ -155,7 +179,7 @@ if arquivo_carregado is not None:
                 uf_d = str(linha[col_uf_d]).strip() if col_uf_d else ""
                 
                 if origem and destino and origem != 'nan' and destino != 'nan':
-                    texto_status.text(f"Processando {index+1}/{total_linhas}: {origem} ➔ {destino}")
+                    texto_status.text(f"Calculando {index+1}/{total_linhas}: {origem} ➔ {destino}")
                     
                     km, tempo, link, balsa_status, linha_reta = calcular_rota_precisa(origem, destino, uf_o, uf_d)
                     
@@ -169,10 +193,9 @@ if arquivo_carregado is not None:
                 
                 barra_progresso.progress((index + 1) / total_linhas)
             
-            texto_status.text("✨ Processamento concluído com exatidão máxima!")
+            texto_status.text("✨ Processamento concluído com sucesso!")
             
             ordem_colunas = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
-            # Mantém as colunas extras originais da sua planilha se existirem
             for c in df.columns:
                 if c not in ordem_colunas:
                     ordem_colunas.insert(0, c)
@@ -188,8 +211,8 @@ if arquivo_carregado is not None:
             st.balloons()
             
             st.download_button(
-                label="📥 Baixar Planilha Pronta e Corrigida",
+                label="📥 Baixar Planilha Pronta",
                 data=dados_excel,
-                file_name="planilha_rotas_precisao_total.xlsx",
+                file_name="planilha_rotas_processada.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
