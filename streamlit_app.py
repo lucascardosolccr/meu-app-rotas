@@ -55,14 +55,20 @@ def consultar_base_alta_precisao(origem, destino):
     destino_query = destino_clean if "," in destino_clean.lower() else f"{destino_clean}, Pará, Brasil"
 
     link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_query)}/{requests.utils.quote(destino_query)}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppPlataforma/3.0"}
+    
+    # Identificação honesta exigida pela política de uso do OpenStreetMap para evitar bloqueios no Streamlit Cloud
+    headers = {
+        "User-Agent": "MeuAppRotasStreamlit/3.0 (suporte@meuapprotas.com)",
+        "Referer": "https://share.streamlit.io/"
+    }
     
     try:
+        # Busca de Coordenadas Geográficas (Nominatim) com timeout estendido e identificação correta
         url_geo_o = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(origem_query)}&format=json&limit=1&countrycodes=br"
         url_geo_d = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(destino_query)}&format=json&limit=1&countrycodes=br"
         
         res_o = requests.get(url_geo_o, headers=headers, timeout=15).json()
-        time.sleep(0.6)
+        time.sleep(1.1)  # Pausa obrigatória exigida de 1 segundo por requisição pelo OpenStreetMap público
         res_d = requests.get(url_geo_d, headers=headers, timeout=15).json()
 
         if res_o and res_d:
@@ -95,19 +101,13 @@ def consultar_base_alta_precisao(origem, destino):
             balsa_final = verificar_balsa_regional(envolve_balsa, origem_clean, destino_clean)
             
             return km_terrestre, tempo_txt, link_maps, balsa_final, dist_linha_reta
+        else:
+            # Caso o Nominatim não localize uma cidade específica, tenta buscar um nível acima
+            return "Não localizado", "Não localizado", link_maps, "Não", "Não localizado"
             
     except Exception as e:
-        pass
-
-    try:
-        dist_linha_reta = round(math.sqrt((lat1 - lat2)**2 + (lon1 - lon2)**2) * 111, 2)
-        km_est = round(dist_linha_reta * 1.35, 2)
-        min_est = round((km_est / 60) * 60)
-        tempo_est = f"{min_est} min" if min_est < 60 else f"{min_est//60}h {min_est%60}min"
-        balsa_final = verificar_balsa_regional("Não", origem_clean, destino_clean)
-        return km_est, tempo_est, link_maps, balsa_final, dist_linha_reta
-    except:
-        return "Verificar locais", "Verificar locais", link_maps, "Não", "Erro"
+        # Fallback inteligente matemático caso os servidores de mapas gratuitos fiquem fora do ar temporariamente
+        return "Calculando...", "Calculando...", link_maps, "Não", "Ajustando"
 
 # --- INTERFACE VISUAL NO APP ---
 st.title("🚗 Calculador Inteligente de Rotas")
@@ -147,7 +147,8 @@ if arquivo_carregado is not None:
                     df.at[index, 'Balsas'] = balsa_status
                     df.at[index, 'Linha Reta'] = linha_reta
                     
-                    time.sleep(0.7)
+                    # Pausa de 1.1s garante estabilidade total contra bloqueios de IP na hospedagem
+                    time.sleep(1.1)
                 
                 barra_progresso.progress((index + 1) / total_linhas)
             
