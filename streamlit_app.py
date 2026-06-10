@@ -94,10 +94,10 @@ st.title("🚗 Calculador de Rotas de Alta Precisão (Google Maps API)")
 st.write("Esse sistema utiliza a API oficial do Google para trazer quilometragens e tempos 100% corretos.")
 
 # Campo para colocar a chave oficial do Google obtida no Passo 1
-google_key = st.text_input("AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60", type="password")
+google_key = st.text_input("Insira sua Google Maps API Key:", type="password")
 
 if not google_key:
-    st.info("AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60")
+    st.info("🔑 Por favor, insira sua Chave de API do Google Maps para liberar o processamento da planilha.")
 else:
     # Inicializa o cliente oficial do Google Maps
     gmaps_client = googlemaps.Client(key=google_key)
