@@ -5,7 +5,7 @@ import time
 import math
 import io
 
-# Configuração da página do site
+# Configuração visual da página do site
 st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="centered")
 
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
@@ -136,11 +136,12 @@ def consultar_base_alta_precisao(origem, destino, token_ors=""):
     except:
         return "Verificar texto", "Verificar texto", link_maps, "Não", "Erro"
 
-# --- INTERFACE GRÁFICA DO SITE (STREAMLIT) ---
+
+# --- INTERFACE GRÁFICA INTERNET (STREAMLIT) ---
 st.title("🚗 Calculador Inteligente de Rotas")
 st.write("Envie sua planilha Excel com as colunas **Origem** e **Destino** para processar as distâncias automaticamente.")
 
-# Componente visual para arrastar o arquivo
+# Componente nativo do site para arrastar a planilha (Substitui o files.upload)
 arquivo_carregado = st.file_uploader("Arraste ou selecione seu arquivo Excel (.xlsx)", type=["xlsx"])
 
 if arquivo_carregado is not None:
@@ -162,10 +163,9 @@ if arquivo_carregado is not None:
             barra_progresso = st.progress(0)
             texto_status = st.empty()
             
-            # Variável para Token opcional do OpenRouteService (pode manter vazio para usar o OSRM livre)
-            TOKEN_OPENROUTESERVICE = ""
+            TOKEN_OPENROUTESERVICE = "" # Pode manter em branco para usar a rota OSRM padrão livre
             
-            # Loop de processamento com barra de carregamento visual
+            # Loop de processamento com barra de carregamento visual na tela do site
             for index, linha in df.iterrows():
                 origem = str(linha['Origem']).strip()
                 destino = str(linha['Destino']).strip()
@@ -183,28 +183,28 @@ if arquivo_carregado is not None:
                     
                     time.sleep(0.7)
                 
-                # Atualiza a barra de progresso do site dinamicamente
+                # Atualiza a barra de carregamento do site dinamicamente
                 barra_progresso.progress((index + 1) / total_linhas)
             
             texto_status.text("✨ Processamento concluído com sucesso!")
             
-            # Alinhamento exato de colunas conforme o seu padrão visual da foto:
+            # Alinhamento exato de colunas conforme o seu padrão visual original
             ordem_colunas = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
             df = df.reindex(columns=ordem_colunas)
             
-            # Transforma a planilha final em memória para o botão de download do site
+            # Transforma a planilha final em bytes na memória (Substitui o df.to_excel físico)
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False)
             dados_excel = output.getvalue()
             
             st.write("---")
-            st.balloons() # Efeito visual comemorativo na tela
+            st.balloons() # Efeito de balões subindo na tela do site!
             
-            # Botão verde para baixar a planilha pronta
+            # Botão de download nativo do site (Substitui o files.download)
             st.download_button(
                 label="📥 Baixar Planilha Pronta",
                 data=dados_excel,
-                file_name="planilha_rotas_calculada.xlsx",
+                file_name="planilha_precisao_corrigida.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
