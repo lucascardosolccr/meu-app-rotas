@@ -63,14 +63,13 @@ def consultar_base_alta_precisao(origem, destino):
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Contextualização regional para garantir precisão no motor de buscas
     origem_query = origem_clean if "," in origem_clean.lower() else f"{origem_clean}, Pará, Brasil"
     destino_query = destino_clean if "," in destino_clean.lower() else f"{destino_clean}, Pará, Brasil"
 
     link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_query)}/{requests.utils.quote(destino_query)}"
     
     try:
-        # 1. Busca coordenadas usando o ArcGIS (Substitui o Nominatim instável)
+        # 1. Busca coordenadas usando o ArcGIS
         coords_o = geocode_arcgis(origem_query)
         coords_d = geocode_arcgis(destino_query)
 
@@ -81,7 +80,7 @@ def consultar_base_alta_precisao(origem, destino):
             # Calcula a Linha Reta via Vincenty
             dist_linha_reta = calcular_distancia_vincenty(lat1, lon1, lat2, lon2)
 
-            # 2. Busca a rota rodoviária (OSRM público de alto tráfego)
+            # 2. Busca a rota rodoviária (OSRM público)
             envolve_balsa = "Não"
             url_rota = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
             res_r = requests.get(url_rota, timeout=12).json()
@@ -128,9 +127,10 @@ if arquivo_carregado is not None:
         st.success("Planilha mapeada com sucesso!")
         
         if st.button("Iniciar Processamento das Rotas"):
+            # CORREÇÃO CRÍTICA: Inicializar as colunas vazias aceitando múltiplos tipos de dados (Object)
             colunas_finais = ['Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
             for col in colunas_finais:
-                df[col] = ""
+                df[col] = None
             
             total_linhas = len(df)
             barra_progresso = st.progress(0)
@@ -140,7 +140,7 @@ if arquivo_carregado is not None:
                 origem = str(linha['Origem']).strip()
                 destino = str(linha['Destino']).strip()
                 
-                if origin_txt := (origem and destino and origem != 'nan' and destino != 'nan'):
+                if origem and destino and origem != 'nan' and destino != 'nan':
                     texto_status.text(f"Calculando {index+1}/{total_linhas}: {origem} ➔ {destino}")
                     
                     km, tempo, link, balsa_status, linha_reta = consultar_base_alta_precisao(origem, destino)
@@ -151,7 +151,6 @@ if arquivo_carregado is not None:
                     df.at[index, 'Balsas'] = balsa_status
                     df.at[index, 'Linha Reta'] = linha_reta
                     
-                    # Pausa leve de estabilização
                     time.sleep(0.3)
                 
                 barra_progresso.progress((index + 1) / total_linhas)
