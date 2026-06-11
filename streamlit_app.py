@@ -1,4 +1,4 @@
-import streamlit st
+import streamlit as st
 import pandas as pd
 import requests
 import time
@@ -169,7 +169,6 @@ def calcular_rota_universal(origem, destino):
             minutos_restantes = minutos_totais % 60
             tempo_txt = f"{horas} h {minutos_restantes} min" if minutos_restantes > 0 else f"{horas} h"
             
-        # RETORNO CORRIGIDO: Tupla limpa sem atribuições nomeadas inválidas
         return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
 
     except Exception:
