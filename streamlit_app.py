@@ -52,7 +52,9 @@ def extrair_dados_reais_google(origem, destino):
             km_puro = float(km_txt.replace('.', '').replace(',', '.'))
             
             # --- DETECÇÃO REFINADA DE BALSAS SEM FALSOS POSITIVOS ---
+            # Isola instruções procedimentais de rota para anular falso positivo em nomes de pontes ou avenidas urbanas
             envolve_balsa = "Não"
+            
             padroes_balsa = [
                 r'\"utilizar\s+balsa\b', 
                 r'\"pegar\s+balsa\b', 
@@ -65,7 +67,8 @@ def extrair_dados_reais_google(origem, destino):
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps, Envolve_balsa
+            # CORREÇÃO DO SYNTAXERROR: Retorno limpo higienizado sem parâmetros inválidos ou caracteres residuais
+            return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
         pass
@@ -73,7 +76,7 @@ def extrair_dados_reais_google(origem, destino):
     return None
 
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
-    """Cálculo local da Linha Reta Geodésica baseada no elipsoide real (Vincenty, 1975)"""
+    """Cálculo local da Linha Reta Geodésica (Vincenty, 1975)"""
     try:
         a = 6378137.0
         b = 6356752.314245
@@ -108,20 +111,34 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         return 0.0
 
 def decodificar_localidade_brazil(texto):
-    """Extrai a UF por Regex se houver. Preserva o resto do endereço intacto."""
+    """
+    Filtro de Strings Flexível para capturar a UF das células.
+    Se o endereço for complexo, fragmentado ou um POI, preserva-o por inteiro.
+    """
     texto_str = str(texto).strip()
     match_uf = re.search(r'\b([A-Z]{2})\b', texto_str)
     uf = match_uf.group(1) if match_uf else ""
-    return texto_str, uf
+    
+    if ',' not in texto_str or any(p in texto_str.upper() for p in ['QR ', 'QNL ', 'CONJUNTO', 'CHÁCARA', 'CHACARA', 'UNIVERSIDADE', 'UNICEUB', 'CAMPUS']):
+        nome_municipio = texto_str
+    else:
+        nome_municipio = texto_str.split(',')[0].strip()
+        
+    nome_municipio = re.sub(r'\s+-\s+[A-Z]{2}$', '', nome_municipio) 
+    return nome_municipio, uf
 
 def geocode_ibge_geonames(localidade):
     """
     Geocodificador universal tolerante a CEPs, chácaras e POIs (ArcGIS Server).
     Garante suporte para buscas sem a indicação explícita do estado.
     """
-    endereco_completo, uf = decodificar_localidade_brazil(localidade)
+    municipio, uf = decodificar_localidade_brazil(localidade)
     
-    query = endereco_completo if "brasil" in endereco_completo.lower() else f"{endereco_completo}, Brasil"
+    if uf:
+        query = f"{municipio}, {uf}, Brasil"
+    else:
+        query = f"{municipio}, Brasil" if "BRASIL" not in municipio.upper() else municipio
+        
     url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=5&sourceCountry=BRA"
     
     try:
@@ -133,9 +150,7 @@ def geocode_ibge_geonames(localidade):
                     continue
                 ponto = candidato['location']
                 return float(ponto['y']), float(ponto['x'])
-            
-            ponto = resposta['candidates'][0]['location']
-            return float(ponto['y']), float(ponto['x'])
+            return float(resposta['candidates'][0]['location']['y']), float(resposta['candidates'][0]['location']['x'])
     except Exception:
         pass
     return None
@@ -168,7 +183,6 @@ def calcular_pipeline_logistico(origem, destino):
         km_terrestre = 85.84
         balsa_fallback = "Sim"
 
-    # CORRIGIDO: Modificado 'minutes' para a variável correta em português 'minutos'
     tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
     return km_terrestre, tempo_txt, link_maps_fallback, balsa_fallback, dist_linha_reta
 
@@ -195,9 +209,9 @@ if arquivo_carregado is not None:
             barra_progresso = st.progress(0)
             container_status = st.empty()
             
-            for index, merge_line in df.iterrows():
-                origem = str(merge_line['Origem']).strip()
-                destino = str(merge_line['Destino']).strip()
+            for index, linha in df.iterrows():
+                origem = str(linha['Origem']).strip()
+                destino = str(linha['Destino']).strip()
                 
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
