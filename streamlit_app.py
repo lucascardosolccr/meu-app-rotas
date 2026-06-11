@@ -11,15 +11,6 @@ CHAVE_GOOGLE_FIXA = "AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60"
 # Configuração da página do site
 st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="centered")
 
-# Inicialização segura da biblioteca oficial do Google
-gmaps_client = None
-if CHAVE_GOOGLE_FIXA and CHAVE_GOOGLE_FIXA != "AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60":
-    try:
-        import googlemaps
-        gmaps_client = googlemaps.Client(key=CHAVE_GOOGLE_FIXA)
-    except Exception as e:
-        st.error(f"Erro ao carregar a biblioteca Google Maps: {e}")
-
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     """Calcula a linha reta exata baseada no elipsoide real da Terra (WGS-84)"""
     try:
@@ -53,24 +44,12 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     except:
         return 0.0
 
-def geocode_arcgis(localidade):
-    """Busca as coordenadas exatas dos municípios através do ArcGIS global"""
-    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(localidade)}&maxLocations=1"
-    try:
-        resposta = requests.get(url, timeout=10).json()
-        if resposta.get('candidates'):
-            ponto = resposta['candidates'][0]['location']
-            return float(ponto['y']), float(ponto['x'])
-    except:
-        pass
-    return None
-
-def calcular_rota_precisa(origem, destino, uf_origem="", uf_destino=""):
-    """Calcula a rota rodoviária e o tempo exato priorizando a API oficial do Google Maps"""
+def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""):
+    """Consulta diretamente os servidores do Google Maps via API HTTP para precisão absoluta do link"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Contextualização inteligente de Estados para evitar conflitos de cidades homônimas
+    # Adiciona contexto inteligente de Estado para evitar homônimos (Ex: Taguatinga, TO)
     origem_query = origem_clean
     if uf_origem and str(uf_origem).strip().lower() != 'nan':
         origem_query += f", {str(uf_origem).strip()}"
@@ -83,77 +62,54 @@ def calcular_rota_precisa(origem, destino, uf_origem="", uf_destino=""):
     elif "brasil" not in destino_clean.lower() and "," not in destino_clean:
         destino_query += ", Tocantins, Brasil"
 
-    link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_query)}/{requests.utils.quote(destino_query)}"
+    # Link idêntico ao gerado na interface web do Google Maps
+    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_query)}&destination={requests.utils.quote(destino_query)}&travelmode=driving"
     
-    # ESTRATÉGIA 1: CONSULTA DIRETAMENTE A API OFICIAL DO GOOGLE MAPS (RETORNO EXATO)
-    if gmaps_client:
-        try:
-            resultado_rota = gmaps_client.directions(
-                origin=origem_query,
-                destination=destino_query,
-                mode="driving",
-                language="pt-BR"
-            )
-            if resultado_rota:
-                leg = resultado_rota[0]['legs'][0]
-                km_terrestre = round(leg['distance']['value'] / 1000, 2)
-                tempo_txt = leg['duration']['text'] # Captura o texto exato do Google Maps
-                
-                dist_linha_reta = calcular_distancia_vincenty(
-                    leg['start_location']['lat'], leg['start_location']['lng'],
-                    leg['end_location']['lat'], leg['end_location']['lng']
-                )
-                envolve_balsa = "Sim" if any(c in origem_clean.lower() or c in destino_clean.lower() for c in ["cascalheira", "araguaia", "balsa", "travessia"]) else "Não"
-                return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
-        except:
-            pass
+    # Inicializa variáveis padrão de detecção de balsa
+    envolve_balsa = "Não"
+    palavras_chave_balsa = ["cascalheira", "araguaia", "balsa", "travessia", "moz", "almeirim", "soure", "salvaterra", "marajó", "cametá", "itaituba", "chaves", "gurupá"]
+    if any(p in origem_clean.lower() or p in destino_clean.lower() for p in palavras_chave_balsa):
+        envolve_balsa = "Sim"
 
-    # ESTRATÉGIA 2: MOTOR DE CONTINGÊNCIA COM VELOCIDADE CORRIGIDA (Se a chave do Google falhar)
+    if not CHAVE_GOOGLE_FIXA or CHAVE_GOOGLE_FIXA == "AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60":
+        return "Configure a chave na linha 12", "Chave ausente", link_maps, envolve_balsa, 0.0
+
     try:
-        coords_o = geocode_arcgis(origem_query)
-        coords_d = geocode_arcgis(destino_query)
-
-        if coords_o and coords_d:
-            lat1, lon1 = coords_o
-            lat2, lon2 = coords_d
-            dist_linha_reta = calcular_distancia_vincenty(lat1, lon1, lat2, lon2)
-
-            url_osrm = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
-            res_r = requests.get(url_osrm, timeout=10).json()
+        # Chamada direta HTTP à API do Google Maps configurada para evitar balsas (avoid=ferries)
+        # Isso garante que a Distância e o Tempo venham estritamente pelo melhor trajeto terrestre/rodoviário
+        url = f"https://maps.googleapis.com/maps/api/directions/json?origin={requests.utils.quote(origem_query)}&destination={requests.utils.quote(destino_query)}&mode=driving&avoid=ferries&language=pt-BR&key={CHAVE_GOOGLE_FIXA}"
+        
+        resposta = requests.get(url, timeout=12).json()
+        
+        if resposta.get("status") == "OK" and resposta.get("routes"):
+            leg = resposta["routes"][0]["legs"][0]
             
-            km_terrestre = 0.0
-            if res_r.get('code') == 'Ok':
-                km_terrestre = round(res_r['routes'][0]['legs'][0]['distance'] / 1000, 2)
-
-            if km_terrestre == 0 or (dist_linha_reta > 15 and km_terrestre / dist_linha_reta > 3.0):
-                km_terrestre = round(dist_linha_reta * 1.28, 2)
-
-            # Ajuste fino de velocidade média real das rodovias (65 km/h devido a radares e vias simples)
-            minutos_totais = round((km_terrestre / 65) * 60)
+            # Extração exata e em tempo real dos dados fornecidos pelo Google Maps
+            km_terrestre = round(leg["distance"]["value"] / 1000, 2)
+            tempo_txt = leg["duration"]["text"]
             
-            # Ajuste específico para o trajeto Taguatinga x Arraias caso use contingência
-            if "taguatinga" in origem_clean.lower() and "arraias" in destino_clean.lower():
-                km_terrestre = 136.0
-                minutos_totais = 124  # 2h 4min
-
-            if minutos_totais < 60:
-                tempo_txt = f"{minutos_totais} min"
-            else:
-                tempo_txt = f"{minutos_totais // 60} horas {minutos_totais % 60} min"
+            # Captura de coordenadas para cálculo de Linha Reta auxiliar
+            lat_o = leg["start_location"]["lat"]
+            lon_o = leg["start_location"]["lng"]
+            lat_d = leg["end_location"]["lat"]
+            lon_d = leg["end_location"]["lng"]
+            dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
             
-            envolve_balsa = "Sim" if any(c in origem_clean.lower() or c in destino_clean.lower() for c in ["cascalheira", "araguaia"]) else "Não"
             return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
-
-        return "Não localizado", "Não localizado", link_maps, "Não", 0.0
-    except:
-        return "Erro técnico", "Erro técnico", link_maps, "Não", 0.0
+        else:
+            # Caso o status retorne algum erro de cota ou endereço inválido
+            status_erro = resposta.get("status", "Erro desconhecido")
+            return f"Erro Google ({status_erro})", "Verificar", link_maps, envolve_balsa, 0.0
+            
+    except Exception as e:
+        return "Erro de conexão", "Erro técnico", link_maps, envolve_balsa, 0.0
 
 # --- INTERFACE VISUAL NO APP ---
-st.title("🚗 Calculador de Rotas de Alta Precisão")
-st.write("Processamento logístico em lote integrado diretamente aos servidores oficiais.")
+st.title("🚗 Calculador de Rotas de Alta Precisão (Google Oficial)")
+st.write("Processamento em lote conectado diretamente aos servidores do Google Maps com exclusão de rotas fluviais.")
 
-if CHAVE_GOOGLE_FIXA == "SUA_CHAVE_AQUI" or not CHAVE_GOOGLE_FIXA:
-    st.warning("⚠️ Atenção: A chave de API do Google não foi configurada na linha 12 do script. O sistema está operando no modo de contingência regional.")
+if CHAVE_GOOGLE_FIXA == "AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60" or not CHAVE_GOOGLE_FIXA:
+    st.error("❌ A chave de API do Google não foi configurada! Abra o código e coloque sua chave na linha 12 para que o sistema funcione.")
 
 arquivo_carregado = st.file_uploader("Selecione seu arquivo Excel (.xlsx)", type=["xlsx"])
 
@@ -170,6 +126,7 @@ if arquivo_carregado is not None:
             for col in colunas_finais:
                 df[col] = None
             
+            # Mapeia colunas auxiliares de UF/Estado caso existam na planilha original do usuário
             col_uf_o = next((c for c in df.columns if c.lower() in ['uf_origem', 'uf origem', 'estado origem', 'origem_uf']), None)
             col_uf_d = next((c for c in df.columns if c.lower() in ['uf_destino', 'uf destino', 'estado destino', 'destino_uf']), None)
 
@@ -177,17 +134,17 @@ if arquivo_carregado is not None:
             barra_progresso = st.progress(0)
             texto_status = st.empty()
             
-            for index, SelfLinha in df.iterrows():
-                origem = str(SelfLinha['Origem']).strip()
-                destino = str(SelfLinha['Destino']).strip()
+            for index, linha in df.iterrows():
+                origem = str(linha['Origem']).strip()
+                destino = str(linha['Destino']).strip()
                 
-                uf_o = str(SelfLinha[col_uf_o]).strip() if col_uf_o else ""
-                uf_d = str(SelfLinha[col_uf_d]).strip() if col_uf_d else ""
+                uf_o = str(linha[col_uf_o]).strip() if col_uf_o else ""
+                uf_d = str(linha[col_uf_d]).strip() if col_uf_d else ""
                 
                 if origem and destino and origem != 'nan' and destino != 'nan':
                     texto_status.text(f"Processando linha {index+1}/{total_linhas}: {origem} ➔ {destino}")
                     
-                    km, tempo, link, balsa_status, linha_reta = calcular_rota_precisa(origem, destino, uf_o, uf_d)
+                    km, tempo, link, balsa_status, linha_reta = calcular_rota_definitiva_google(origem, destino, uf_o, uf_d)
                     
                     df.at[index, 'Distancia'] = km
                     df.at[index, 'Tempo'] = tempo
@@ -195,11 +152,12 @@ if arquivo_carregado is not None:
                     df.at[index, 'Balsas'] = balsa_status
                     df.at[index, 'Linha Reta'] = linha_reta
                     
-                    time.sleep(0.05)
+                    # Intervalo mínimo padrão de requisições por segundo
+                    time.sleep(0.04)
                 
                 barra_progresso.progress((index + 1) / total_linhas)
             
-            texto_status.text("✨ Processamento concluído com precisão total!")
+            texto_status.text("✨ Processamento concluído com exatidão máxima do Google!")
             
             ordem_colunas = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
             for c in df.columns:
@@ -217,8 +175,8 @@ if arquivo_carregado is not None:
             st.balloons()
             
             st.download_button(
-                label="📥 Baixar Planilha com Tempos Corrigidos",
+                label="📥 Baixar Planilha Oficial Google Precision",
                 data=dados_excel,
-                file_name="planilha_rotas_tempo_exato.xlsx",
+                file_name="planilha_rotas_google_precision.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
