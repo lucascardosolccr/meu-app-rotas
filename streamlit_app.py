@@ -61,62 +61,64 @@ def geocode_nominatim_estrito(localidade, uf=""):
     return None
 
 def calcular_rota_100_gratis(origem, destino, uf_o="", uf_d=""):
-    """Motor de rotas rodoviárias e de tempo com calibração regional automática"""
+    """Motor de rotas rodoviárias e de tempo com inteligência algorítmica universal"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_clean)}&destination={requests.utils.quote(destino_clean)}&travelmode=driving"
 
     try:
-        # 1. Geolocalização por Estado
+        # 1. Geolocalização via OpenStreetMap
         coords_o = geocode_nominatim_estrito(origem_clean, uf_o)
-        time.sleep(0.6) # Pausa obrigatória exigida pelos servidores gratuitos do OpenStreetMap
+        time.sleep(0.6) # Pausa ética obrigatória do Nominatim
         coords_d = geocode_nominatim_estrito(destino_clean, uf_d)
 
         if coords_o and coords_d:
             lat1, lon1 = coords_o
             lat2, lon2 = coords_d
             
-            # Linha Reta via Vincenty
+            # Linha Reta Geodésica (Vincenty)
             dist_linha_reta = calcular_distancia_vincenty(lat1, lon1, lat2, lon2)
 
-            # 2. Rota Terrestre via OSRM Oficial (Gratuito e sem chaves)
+            # 2. Chamada ao servidor de Rotas Terrestres (OSRM)
             url_osrm = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
             res_r = requests.get(url_osrm, timeout=10).json()
             
             km_terrestre = 0.0
             minutos_totais = 0
+            envolve_balsa = "Não"
             
             if res_r.get('code') == 'Ok':
-                leg = res_r['routes'][0]['legs'][0]
+                route_data = res_r['routes'][0]
+                leg = route_data['legs'][0]
                 km_terrestre = round(leg['distance'] / 1000, 2)
                 minutos_totais = round(leg['duration'] / 60)
-
-            # 3. CAMADA DE INTELIGÊNCIA LOGÍSTICA (Ajuste de Erros Regionais de Tempo/Distância)
-            if "cascalheira" in origem_clean.lower() and "araguaia" in destino_clean.lower():
-                km_terrestre = 462.00
-                minutos_totais = 366
                 
-            elif "taguatinga" in origem_clean.lower() and "arraias" in destino_clean.lower():
-                km_terrestre = 136.00
-                minutos_totais = 124
+                # Detecção de balsa com base nos metadados ou descontinuidades da malha do OSRM
+                if "ferry" in str(route_data).lower():
+                    envolve_balsa = "Sim"
 
-            elif km_terrestre == 0 or (dist_linha_reta > 15 and km_terrestre / dist_linha_reta > 3.0):
-                km_terrestre = round(dist_linha_reta * 1.28, 2)
-                minutos_totais = round((km_terrestre / 68) * 60)
+            # 3. CAMADA DE INTELIGÊNCIA LOGÍSTICA UNIVERSAL (Validação Algorítmica)
+            # Se o servidor falhar ou retornar uma rota menor que a linha reta (erro de malha)
+            if km_terrestre < dist_linha_reta or km_terrestre == 0:
+                # Aplica o fator de circuidade médio das estradas brasileiras (fator de 1.27)
+                km_terrestre = round(dist_linha_reta * 1.27, 2)
+            
+            # Calibração Genérica de Tempo para a Realidade Logística Brasileira
+            # Evita velocidades irreais calculadas pelo OSRM padrão (calcula com base em uma média real de 72 km/h)
+            velocidade_media_estimada = 72.0
+            minutos_estimados = round((km_terrestre / velocidade_media_estimada) * 60)
+            
+            # Se o tempo do OSRM for excessivamente otimista (comum em estradas de terra/simples), calibra para a média real
+            if minutos_totais == 0 or (minutos_totais < (minutos_estimados * 0.85)):
+                minutos_totais = minutos_estimados
 
+            # Formatação final do texto de tempo
             if minutos_totais < 60:
                 tempo_txt = f"{minutos_totais} min"
             else:
                 tempo_txt = f"{minutos_totais // 60} horas {minutos_totais % 60} min"
-            
-            # 4. DETECÇÃO AUTOMÁTICA DE BALSA LOGÍSTICA
-            envolve_balsa = "Não"
-            cidades_balsa = ["moz", "almeirim", "soure", "salvaterra", "marajó", "cametá", "itaituba", "chaves", "gurupá", "cascalheira", "araguaia"]
-            if any(c in origem_clean.lower() or c in destino_clean.lower() for c in cidades_balsa):
-                envolve_balsa = "Sim"
                 
-            # Retorno purificado e estritamente posicional em formato de tupla do Python
             return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
 
         return "Cidade não localizada", "Verificar grafia", link_maps, "Não", 0.0
