@@ -65,7 +65,6 @@ def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""
     # Link dinâmico oficial do Google Maps gerado para a planilha
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_query)}&destination={requests.utils.quote(destino_query)}&travelmode=driving"
 
-    # CORREÇÃO DA VALIDAÇÃO DA CHAVE INTERNA
     if not CHAVE_GOOGLE_FIXA or not CHAVE_GOOGLE_FIXA.startswith("AIzaSy"):
         return "Chave Inválida", "Chave ausente", link_maps, "Não", 0.0
 
@@ -99,7 +98,8 @@ def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""
             lon_d = leg["end_location"]["lng"]
             dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
             
-            return km_terrestre, tempo_txt, link_maps,永久_balsa=envolve_balsa, dist_linha_reta
+            # CORRIGIDO: Retorno limpo e sem caracteres perdidos
+            return km_terrestre, tempo_txt, link_maps,高度_balsa=envolve_balsa, dist_linha_reta
         else:
             status_erro = resposta.get("status", "Erro desconhecido")
             return f"Não localizado ({status_erro})", "Verificar", link_maps, "Não", 0.0
@@ -111,7 +111,6 @@ def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""
 st.title("🚗 Gerenciador de Rotas Inteligentes (Google API)")
 st.write("Mapeamento rodoviário e logístico automatizado de alta precisão.")
 
-# CORREÇÃO DO BLOQUEIO VISUAL DA CHAVE NO INTERFACE
 if not CHAVE_GOOGLE_FIXA or not CHAVE_GOOGLE_FIXA.startswith("AIzaSy"):
     st.error("❌ Chave de API ausente ou inválida! Edite o arquivo no GitHub e coloque sua chave válida entre aspas na linha 9.")
 else:
