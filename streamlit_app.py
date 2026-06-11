@@ -98,8 +98,8 @@ def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""
             lon_d = leg["end_location"]["lng"]
             dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
             
-            # CORRIGIDO: Retorno limpo e sem caracteres perdidos
-            return km_terrestre, tempo_txt, link_maps,高度_balsa=envolve_balsa, dist_linha_reta
+            # RETORNO CORRIGIDO: Variáveis limpas prontas para processamento
+            return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
         else:
             status_erro = resposta.get("status", "Erro desconhecido")
             return f"Não localizado ({status_erro})", "Verificar", link_maps, "Não", 0.0
@@ -144,7 +144,7 @@ else:
                     uf_d = str(linha[col_uf_d]).strip() if col_uf_d else ""
                     
                     if origem and destino and origem != 'nan' and destino != 'nan':
-                        texto_status.text(f"Calculando {index+1}/{total_linhas}: {origem} ➔ {destino}")
+                        st.write(f"Calculando {index+1}/{total_linhas}: {origem} ➔ {destino}")
                         
                         km, tempo, link, balsa_status, linha_reta = calcular_rota_definitiva_google(origem, destino, uf_o, uf_d)
                         
@@ -158,7 +158,7 @@ else:
                     
                     barra_progresso.progress((index + 1) / total_linhas)
                 
-                texto_status.text("✨ Processamento concluído com exatidão máxima!")
+                st.success("✨ Processamento concluído com exatidão máxima!")
                 
                 ordem_colunas = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
                 for c in df.columns:
