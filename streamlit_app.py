@@ -5,7 +5,7 @@ import time
 import math
 import io
 
-# 🔑 SUBSTITUA O TEXTO ABAIXO PELA SUA CHAVE DO GOOGLE (MANTENHA AS ASPAS):
+# 🔑 SUA CHAVE DA API DO GOOGLE MAPS CONFIGURADA DIRETAMENTE AQUI:
 CHAVE_GOOGLE_FIXA = "AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60"
 
 # Configuração da página do site
@@ -65,8 +65,9 @@ def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""
     # Link dinâmico oficial do Google Maps gerado para a planilha
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_query)}&destination={requests.utils.quote(destino_query)}&travelmode=driving"
 
-    if not CHAVE_GOOGLE_FIXA or CHAVE_GOOGLE_FIXA == "AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60":
-        return "Configure a chave na linha 12", "Chave ausente", link_maps, "Não", 0.0
+    # CORREÇÃO DA VALIDAÇÃO DA CHAVE INTERNA
+    if not CHAVE_GOOGLE_FIXA or not CHAVE_GOOGLE_FIXA.startswith("AIzaSy"):
+        return "Chave Inválida", "Chave ausente", link_maps, "Não", 0.0
 
     try:
         # Chamada à API de Direções SEM restringir balsas (para que o Google traga o melhor trajeto real que você vê na tela)
@@ -83,7 +84,6 @@ def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""
             tempo_txt = leg["duration"]["text"]
             
             # 2. DETECÇÃO 100% AUTOMÁTICA DE BALSA VIA API:
-            # Varre os passos (steps) da rota procurando por instruções de balsa/travessia mapeadas pelo Google
             envolve_balsa = "Não"
             for step in leg.get("steps", []):
                 html_instructions = step.get("html_instructions", "").lower()
@@ -99,7 +99,7 @@ def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""
             lon_d = leg["end_location"]["lng"]
             dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
             
-            return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
+            return km_terrestre, tempo_txt, link_maps,永久_balsa=envolve_balsa, dist_linha_reta
         else:
             status_erro = resposta.get("status", "Erro desconhecido")
             return f"Não localizado ({status_erro})", "Verificar", link_maps, "Não", 0.0
@@ -111,73 +111,74 @@ def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""
 st.title("🚗 Gerenciador de Rotas Inteligentes (Google API)")
 st.write("Mapeamento rodoviário e logístico automatizado de alta precisão.")
 
-if CHAVE_GOOGLE_FIXA == "AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60" or not CHAVE_GOOGLE_FIXA:
-    st.error("❌ Chave de API ausente! Edite o arquivo no GitHub e coloque sua chave entre aspas na linha 12.")
+# CORREÇÃO DO BLOQUEIO VISUAL DA CHAVE NO INTERFACE
+if not CHAVE_GOOGLE_FIXA or not CHAVE_GOOGLE_FIXA.startswith("AIzaSy"):
+    st.error("❌ Chave de API ausente ou inválida! Edite o arquivo no GitHub e coloque sua chave válida entre aspas na linha 9.")
+else:
+    arquivo_carregado = st.file_uploader("Selecione seu arquivo Excel (.xlsx)", type=["xlsx"])
 
-arquivo_carregado = st.file_uploader("Selecione seu arquivo Excel (.xlsx)", type=["xlsx"])
-
-if arquivo_carregado is not None:
-    df = pd.read_excel(arquivo_carregado)
-    
-    if 'Origem' not in df.columns or 'Destino' not in df.columns:
-        st.error("A planilha precisa conter as colunas exatas: 'Origem' e 'Destino'.")
-    else:
-        st.success("Planilha validada com sucesso!")
+    if arquivo_carregado is not None:
+        df = pd.read_excel(arquivo_carregado)
         
-        if st.button("Iniciar Processamento das Rotas"):
-            colunas_finais = ['Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
-            for col in colunas_finais:
-                df[col] = None
+        if 'Origem' not in df.columns or 'Destino' not in df.columns:
+            st.error("A planilha precisa conter as colunas exatas: 'Origem' e 'Destino'.")
+        else:
+            st.success("Planilha validada com sucesso! Conexão com o Google Maps Ativa.")
             
-            col_uf_o = next((c for c in df.columns if c.lower() in ['uf_origem', 'uf origem', 'estado origem', 'origem_uf']), None)
-            col_uf_d = next((c for c in df.columns if c.lower() in ['uf_destino', 'uf destino', 'estado destino', 'destino_uf']), None)
+            if st.button("Iniciar Processamento das Rotas"):
+                colunas_finais = ['Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
+                for col in colunas_finais:
+                    df[col] = None
+                
+                col_uf_o = next((c for c in df.columns if c.lower() in ['uf_origem', 'uf origem', 'estado origem', 'origem_uf']), None)
+                col_uf_d = next((c for c in df.columns if c.lower() in ['uf_destino', 'uf destino', 'estado destino', 'destino_uf']), None)
 
-            total_linhas = len(df)
-            barra_progresso = st.progress(0)
-            texto_status = st.empty()
-            
-            for index, linha in df.iterrows():
-                origem = str(linha['Origem']).strip()
-                destino = str(linha['Destino']).strip()
+                total_linhas = len(df)
+                barra_progresso = st.progress(0)
+                texto_status = st.empty()
                 
-                uf_o = str(linha[col_uf_o]).strip() if col_uf_o else ""
-                uf_d = str(linha[col_uf_d]).strip() if col_uf_d else ""
+                for index, linha in df.iterrows():
+                    origem = str(linha['Origem']).strip()
+                    destino = str(linha['Destino']).strip()
+                    
+                    uf_o = str(linha[col_uf_o]).strip() if col_uf_o else ""
+                    uf_d = str(linha[col_uf_d]).strip() if col_uf_d else ""
+                    
+                    if origem and destino and origem != 'nan' and destino != 'nan':
+                        texto_status.text(f"Calculando {index+1}/{total_linhas}: {origem} ➔ {destino}")
+                        
+                        km, tempo, link, balsa_status, linha_reta = calcular_rota_definitiva_google(origem, destino, uf_o, uf_d)
+                        
+                        df.at[index, 'Distancia'] = km
+                        df.at[index, 'Tempo'] = tempo
+                        df.at[index, 'Link da Rota'] = link
+                        df.at[index, 'Balsas'] = balsa_status
+                        df.at[index, 'Linha Reta'] = linha_reta
+                        
+                        time.sleep(0.02)
+                    
+                    barra_progresso.progress((index + 1) / total_linhas)
                 
-                if origem and destino and origem != 'nan' and destino != 'nan':
-                    texto_status.text(f"Calculando {index+1}/{total_linhas}: {origem} ➔ {destino}")
-                    
-                    km, tempo, link, balsa_status, linha_reta = calcular_rota_definitiva_google(origem, destino, uf_o, uf_d)
-                    
-                    df.at[index, 'Distancia'] = km
-                    df.at[index, 'Tempo'] = tempo
-                    df.at[index, 'Link da Rota'] = link
-                    df.at[index, 'Balsas'] = balsa_status
-                    df.at[index, 'Linha Reta'] = linha_reta
-                    
-                    time.sleep(0.02)
+                texto_status.text("✨ Processamento concluído com exatidão máxima!")
                 
-                barra_progresso.progress((index + 1) / total_linhas)
-            
-            texto_status.text("✨ Processamento concluído com exatidão máxima!")
-            
-            ordem_colunas = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
-            for c in df.columns:
-                if c not in ordem_colunas:
-                    ordem_colunas.insert(0, c)
-                    
-            df = df.reindex(columns=ordem_colunas)
-            
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False)
-            dados_excel = output.getvalue()
-            
-            st.write("---")
-            st.balloons()
-            
-            st.download_button(
-                label="📥 Baixar Planilha Oficial Corrigida",
-                data=dados_excel,
-                file_name="planilha_rotas_final.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+                ordem_colunas = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
+                for c in df.columns:
+                    if c not in ordem_colunas:
+                        ordem_colunas.insert(0, c)
+                        
+                df = df.reindex(columns=ordem_colunas)
+                
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False)
+                dados_excel = output.getvalue()
+                
+                st.write("---")
+                st.balloons()
+                
+                st.download_button(
+                    label="📥 Baixar Planilha Oficial Corrigida",
+                    data=dados_excel,
+                    file_name="planilha_rotas_final.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
