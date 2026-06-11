@@ -65,7 +65,8 @@ def extrair_dados_reais_google(origem, destino):
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps,高度=envolve_balsa
+            # RETORNO CORRIGIDO: Removido o lixo de digitação "高度="
+            return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
         pass
@@ -121,7 +122,6 @@ def geocode_ibge_geonames(localidade):
     """
     endereco_completo, uf = decodificar_localidade_brazil(localidade)
     
-    # Adiciona "Brasil" no final de forma limpa para forçar o escopo nacional se já não houver
     query = endereco_completo if "brasil" in endereco_completo.lower() else f"{endereco_completo}, Brasil"
     url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=5&sourceCountry=BRA"
     
@@ -130,13 +130,11 @@ def geocode_ibge_geonames(localidade):
         if resposta.get('candidates'):
             for candidato in resposta['candidates']:
                 endereco_upper = candidato['address'].upper()
-                # Se houver uma UF explícita digitada pelo usuário, aplica validação estrita
                 if uf and not re.search(r'\b' + uf + r'\b', endereco_upper):
                     continue
                 ponto = candidato['location']
                 return float(ponto['y']), float(ponto['x'])
             
-            # Fallback tolerante para locais complexos sem UF correspondida estritamente
             ponto = resposta['candidates'][0]['location']
             return float(ponto['y']), float(ponto['x'])
     except Exception:
@@ -171,7 +169,7 @@ def calcular_pipeline_logistico(origem, destino):
         km_terrestre = 85.84
         balsa_fallback = "Sim"
 
-    tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min"
+    tempo_txt = f"{minutos} min" if minutes < 60 else f"{minutos // 60} h {minutos % 60} min"
     return km_terrestre, tempo_txt, link_maps_fallback, balsa_fallback, dist_linha_reta
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
@@ -223,8 +221,7 @@ if arquivo_carregado is not None:
             ordem_finais = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
             for col_orig in df.columns:
                 if col_orig not in ordem_finais:
-                    col_orig_list = [col_orig]
-                    ordem_finais = col_orig_list + ordem_finais
+                    ordem_finais.insert(0, col_orig)
             df = df.reindex(columns=ordem_finais)
             
             output_buffer = io.BytesIO()
@@ -250,7 +247,7 @@ if arquivo_carregado is not None:
                 st.markdown("""
                 Este software implementa um ecossistema de **Engenharia Reversa de Redes** operando em quatro camadas:
                 1. **Vetorização de Lote:** Extrai os eixos de texto das células da planilha carregada.
-                2. **Mapeamento de API Viva Interna (Camada A):** Dispara requisições ao endpoint corporativo `/preview/directions` do Google Maps. Esse canal encapsula as respostas estruturadas de tráfego que alimentam os dispositivos móveis, extraindo os KMs e os tempos exatos sem precisar simular um navegador pesado no Streamlit Cloud. Ele herda nativamente a inteligência de busca global do Google, mapeando com exatidão endereços granulares (CEPs, chácaras, universidades e quadras) mesmo na ausência de indicação explícita do estado.
+                2. **Mapeamento de API Viva Interna (Camada A):** Dispara requisições ao endpoint corporativo `/preview/directions` do Google Maps. Esse canal encapsula as respostas estruturadas de tráfego que alimentam os dispositivos móveis, extraindo os KMs e os tempos exatos sem precisar simular um navegador pesado no Streamlit Cloud. Ele herda nativamente a inteligência de busca global do Google, mapping com exatidão endereços granulares (CEPs, chácaras, universidades e quadras) mesmo na ausência de indicação explícita do estado.
                 3. **Filtro Espacial ArcGIS:** Organiza as coordenadas globais secundárias restringindo as buscas estritas dentro da malha territorial brasileira (`sourceCountry=BRA`).
                 4. **Vincenty Geodésico:** Computa a linha reta teórica perfeita baseada no elipsoide real da Terra (WGS-84).
                 """)
