@@ -17,6 +17,7 @@ def extrair_dados_reais_google(origem, destino):
     """
     CAMADA BRUTA - Intercepta a API interna de direções assíncronas do Google.
     Puxa a matriz de texto do próprio servidor de tráfego em tempo real.
+    Suporta CEPs, endereços estruturados completos e nomes de estabelecimentos.
     """
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
@@ -51,10 +52,7 @@ def extrair_dados_reais_google(origem, destino):
             km_puro = float(km_txt.replace('.', '').replace(',', '.'))
             
             # --- DETECÇÃO REFINADA DE BALSAS SEM FALSOS POSITIVOS ---
-            # Isola instruções procedimentais de rota para anular falsos positivos em nomes de ruas ou pontes
             envolve_balsa = "Não"
-            
-            # Padrões explícitos e ancorados dentro da malha de instruções do Google Maps para modais fluviais
             padroes_balsa = [
                 r'\"utilizar\s+balsa\b', 
                 r'\"pegar\s+balsa\b', 
@@ -67,7 +65,7 @@ def extrair_dados_reais_google(origem, destino):
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps, envolve_balsa
+            return km_puro, tempo_txt, link_maps,高度=envolve_balsa
             
     except Exception:
         pass
@@ -110,18 +108,21 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         return 0.0
 
 def decodificar_localidade_brazil(texto):
-    """Filtro de Strings por Expressões Regulares para capturar a UF das células"""
+    """Extrai a UF por Regex se houver. Preserva o resto do endereço intacto."""
     texto_str = str(texto).strip()
     match_uf = re.search(r'\b([A-Z]{2})\b', texto_str)
     uf = match_uf.group(1) if match_uf else ""
-    nome_municipio = texto_str.split(',')[0].strip()
-    nome_municipio = re.sub(r'\s+-\s+[A-Z]{2}$', '', nome_municipio) 
-    return nome_municipio, uf
+    return texto_str, uf
 
 def geocode_ibge_geonames(localidade):
-    """Geocodificador de suporte baseado em restrições estritas de estado (ArcGIS Server)"""
-    municipio, uf = decodificar_localidade_brazil(localidade)
-    query = f"{municipio}, {uf}, Brasil" if uf else f"{municipio}, Brasil"
+    """
+    Geocodificador universal tolerante a CEPs, chácaras e POIs (ArcGIS Server).
+    Garante suporte para buscas sem a indicação explícita do estado.
+    """
+    endereco_completo, uf = decodificar_localidade_brazil(localidade)
+    
+    # Adiciona "Brasil" no final de forma limpa para forçar o escopo nacional se já não houver
+    query = endereco_completo if "brasil" in endereco_completo.lower() else f"{endereco_completo}, Brasil"
     url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=5&sourceCountry=BRA"
     
     try:
@@ -129,11 +130,15 @@ def geocode_ibge_geonames(localidade):
         if resposta.get('candidates'):
             for candidato in resposta['candidates']:
                 endereco_upper = candidato['address'].upper()
+                # Se houver uma UF explícita digitada pelo usuário, aplica validação estrita
                 if uf and not re.search(r'\b' + uf + r'\b', endereco_upper):
                     continue
                 ponto = candidato['location']
                 return float(ponto['y']), float(ponto['x'])
-            return float(resposta['candidates'][0]['location']['y']), float(resposta['candidates'][0]['location']['x'])
+            
+            # Fallback tolerante para locais complexos sem UF correspondida estritamente
+            ponto = resposta['candidates'][0]['location']
+            return float(ponto['y']), float(ponto['x'])
     except Exception:
         pass
     return None
@@ -148,7 +153,7 @@ def calcular_pipeline_logistico(origem, destino):
     coords_d = geocode_ibge_geonames(destino_clean)
     dist_linha_reta = calcular_distancia_vincenty(coords_o[0], coords_o[1], coords_d[0], coords_d[1]) if coords_o and coords_d else 0.0
 
-    # 1. Executa a extração da API viva interna do Google Maps (Preserva resultados com paridade)
+    # 1. Executa a extração da API viva interna do Google Maps
     dados_reais = extrair_dados_reais_google(origem_clean, destino_clean)
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
@@ -162,7 +167,7 @@ def calcular_pipeline_logistico(origem, destino):
     balsa_fallback = "Não"
     is_norte = any(uf in origem_clean.upper() or uf in destino_clean.upper() for uf in ["PA", "AM", "AP", "RO", "RR", "AC"])
     if is_norte and (km_terrestre < 120 and dist_linha_reta > 20 and (km_terrestre / dist_linha_reta) < 1.10):
-        minutos = 2940  # Segurança analítica para bacias isoladas (49 h)
+        minutos = 2940  
         km_terrestre = 85.84
         balsa_fallback = "Sim"
 
@@ -218,7 +223,8 @@ if arquivo_carregado is not None:
             ordem_finais = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
             for col_orig in df.columns:
                 if col_orig not in ordem_finais:
-                    ordem_finais.insert(0, col_orig)
+                    col_orig_list = [col_orig]
+                    ordem_finais = col_orig_list + ordem_finais
             df = df.reindex(columns=ordem_finais)
             
             output_buffer = io.BytesIO()
@@ -244,9 +250,9 @@ if arquivo_carregado is not None:
                 st.markdown("""
                 Este software implementa um ecossistema de **Engenharia Reversa de Redes** operando em quatro camadas:
                 1. **Vetorização de Lote:** Extrai os eixos de texto das células da planilha carregada.
-                2. **Mapeamento de API Viva Interna (Camada A):** Dispara requisições ao endpoint corporativo `/preview/directions` do Google Maps. Esse canal encapsula as respostas estruturadas de tráfego que alimentam os dispositivos móveis, extraindo os KMs e os tempos exatos sem precisar simular um navegador pesado no Streamlit Cloud.
-                3. **Filtro Espacial ArcGIS:** Organiza as coordenadas e impede homônimos cruzando dados na malha do país.
-                4. **Vincenty Geodésico:** Computa a linha reta teórica perfeita baseada no elipsoide real da Terra.
+                2. **Mapeamento de API Viva Interna (Camada A):** Dispara requisições ao endpoint corporativo `/preview/directions` do Google Maps. Esse canal encapsula as respostas estruturadas de tráfego que alimentam os dispositivos móveis, extraindo os KMs e os tempos exatos sem precisar simular um navegador pesado no Streamlit Cloud. Ele herda nativamente a inteligência de busca global do Google, mapeando com exatidão endereços granulares (CEPs, chácaras, universidades e quadras) mesmo na ausência de indicação explícita do estado.
+                3. **Filtro Espacial ArcGIS:** Organiza as coordenadas globais secundárias restringindo as buscas estritas dentro da malha territorial brasileira (`sourceCountry=BRA`).
+                4. **Vincenty Geodésico:** Computa a linha reta teórica perfeita baseada no elipsoide real da Terra (WGS-84).
                 """)
                 
             with st.expander("2. Nota de Sincronia de Dados (Planilha vs. Link da Rota)"):
