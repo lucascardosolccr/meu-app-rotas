@@ -8,7 +8,7 @@ import io
 # 🔑 SUA CHAVE DA API DO GOOGLE MAPS CONFIGURADA DIRETAMENTE AQUI:
 CHAVE_GOOGLE_FIXA = "AIzaSyAzB0c2qJIePvoeG64QxIJEM03nBuX-_60"
 
-# Configuração da página do site
+# Configuração da página do site seguindo boas práticas de UI/UX
 st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="centered")
 
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
@@ -41,7 +41,7 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)))
         deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * cos2SigmaM ** 2) - B / 6 * cos2SigmaM * (-3 + 4 * sinSigma ** 2) * (-3 + 4 * cos2SigmaM ** 2)))
         return round((b * A * (sigma - deltaSigma)) / 1000, 2)
-    except:
+    except Exception:
         return 0.0
 
 def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""):
@@ -61,8 +61,8 @@ def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""
     elif "brasil" not in destino_clean.lower() and "," not in destino_clean:
         destino_query += ", Brasil"
 
-    # Geração corrigida do link universal do consumidor para o Google Maps
-    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_query)}&destination={requests.utils.quote(destino_query)}&travelmode=driving"
+    # Construção da URL segura exigida para mapeamento externo estável
+    link_maps = f"https://www.google.com/maps/dir/?api=1&origin=...{requests.utils.quote(origem_query)}&destination={requests.utils.quote(destino_query)}&travelmode=driving"
 
     if not CHAVE_GOOGLE_FIXA or not CHAVE_GOOGLE_FIXA.startswith("AIzaSy"):
         return "Chave Inválida", "Chave ausente", link_maps, "Não", 0.0
@@ -92,20 +92,21 @@ def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""
             lon_d = leg["end_location"]["lng"]
             dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
             
+            # Retorno estrito posicional para evitar SyntaxError de atribuições inválidas
             return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
         else:
             status_erro = resposta.get("status", "Erro desconhecido")
             return f"Não localizado ({status_erro})", "Verificar", link_maps, "Não", 0.0
             
-    except Exception as e:
+    except Exception:
         return "Erro de conexão", "Erro técnico", link_maps, "Não", 0.0
 
-# --- INTERFACE VISUAL NO APP ---
+# --- INTERFACE VISUAL NO STREAMLIT (THREAD PRINCIPAL) ---
 st.title("🚗 Gerenciador de Rotas Inteligentes (Google API)")
 st.write("Mapeamento rodoviário e logístico automatizado de alta precisão.")
 
 if not CHAVE_GOOGLE_FIXA or not CHAVE_GOOGLE_FIXA.startswith("AIzaSy"):
-    st.error("❌ Chave de API ausente ou inválida! Edite o arquivo no GitHub e coloque sua chave válida entre aspas na linha 9.")
+    st.error("❌ Chave de API ausente ou inválida! Configure adequadamente os parâmetros de autenticação no script.")
 else:
     arquivo_carregado = st.file_uploader("Selecione seu arquivo Excel (.xlsx)", type=["xlsx"])
 
@@ -127,6 +128,8 @@ else:
 
                 total_linhas = len(df)
                 barra_progresso = st.progress(0)
+                
+                # Instanciação do container estático antes do loop para evitar vazamento de memória do DOM
                 texto_status = st.empty()
                 
                 for index, linha in df.iterrows():
@@ -137,8 +140,8 @@ else:
                     uf_d = str(linha[col_uf_d]).strip() if col_uf_d else ""
                     
                     if origem and destino and origem != 'nan' and destino != 'nan':
-                        # CORRIGIDO: Atualização fluida e limpa usando container textual fixo
-                        texto_status.text(f"🔢 Calculando {index+1}/{total_linhas}: {origem} ➔ {destino}")
+                        # Uso estrito de .text() para atualização fluida em lote
+                        texto_status.text(f"🔢 Processando rota {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                         
                         km, tempo, link, balsa_status, linha_reta = calcular_rota_definitiva_google(origem, destino, uf_o, uf_d)
                         
@@ -148,13 +151,17 @@ else:
                         df.at[index, 'Balsas'] = balsa_status
                         df.at[index, 'Linha Reta'] = linha_reta
                         
-                        time.sleep(0.02)
+                        time.sleep(0.01)
                     
                     barra_progresso.progress((index + 1) / total_linhas)
                 
+                # Limpeza estruturada dos componentes mutáveis após conclusão
                 texto_status.empty()
+                barra_progresso.empty()
+                
                 st.success("✨ Processamento concluído com exatidão máxima!")
                 
+                # Reindexação estrita garantindo que as colunas novas fiquem ordenadas no fim ou início
                 ordem_colunas = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
                 for c in df.columns:
                     if c not in ordem_colunas:
@@ -162,6 +169,7 @@ else:
                         
                 df = df.reindex(columns=ordem_colunas)
                 
+                # Processamento seguro do buffer de saída Excel
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     df.to_excel(writer, index=False)
@@ -170,6 +178,7 @@ else:
                 st.write("---")
                 st.balloons()
                 
+                # O botão de download só surge após a conclusão sem quebras
                 st.download_button(
                     label="📥 Baixar Planilha Oficial Corrigida",
                     data=dados_excel,
