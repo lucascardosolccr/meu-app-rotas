@@ -16,12 +16,12 @@ st.set_page_config(
 def extrair_dados_reais_google(origem, destino):
     """
     CAMADA BRUTA - Intercepta a API interna de direções assíncronas do Google.
-    Bula o HTML estático puxando a matriz de texto do próprio servidor de tráfego.
+    Puxa a matriz de texto do próprio servidor de tráfego em tempo real.
     """
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # URL de exibição para o usuário clicar
+    # URL de exibição estável para o usuário clicar
     link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_clean)}/{requests.utils.quote(destino_clean)}/"
     
     # Endpoint da API oculta do Google que cospe o JSON estruturado de tráfego direto
@@ -51,21 +51,23 @@ def extrair_dados_reais_google(origem, destino):
             km_puro = float(km_txt.replace('.', '').replace(',', '.'))
             
             # --- DETECÇÃO REFINADA DE BALSAS SEM FALSOS POSITIVOS ---
-            # Isola instruções procedimentais de rota para anular falso positivo em nomes de pontes ou avenidas urbanas
+            # Isola instruções procedimentais de rota para anular falsos positivos em nomes de ruas ou pontes
             envolve_balsa = "Não"
             
+            # Padrões explícitos e ancorados dentro da malha de instruções do Google Maps para modais fluviais
             padroes_balsa = [
                 r'\"utilizar\s+balsa\b', 
                 r'\"pegar\s+balsa\b', 
                 r'\"travessia\s+de\s+balsa\b', 
                 r'\"balsa\s+de\s+veículos\b',
-                r'\"ferry\b'
+                r'\"ferry\b',
+                r'\"travessia\s+por\s+balsa\b'
             ]
             
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps,泳envolve_balsa
+            return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
         pass
@@ -73,7 +75,7 @@ def extrair_dados_reais_google(origem, destino):
     return None
 
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
-    """Cálculo local da Linha Reta Geodésica (Vincenty, 1975)"""
+    """Cálculo local da Linha Reta Geodésica baseada no elipsoide real (Vincenty, 1975)"""
     try:
         a = 6378137.0
         b = 6356752.314245
@@ -146,7 +148,7 @@ def calcular_pipeline_logistico(origem, destino):
     coords_d = geocode_ibge_geonames(destino_clean)
     dist_linha_reta = calcular_distancia_vincenty(coords_o[0], coords_o[1], coords_d[0], coords_d[1]) if coords_o and coords_d else 0.0
 
-    # 1. Executa a extração da API viva interna do Google Maps
+    # 1. Executa a extração da API viva interna do Google Maps (Preserva resultados com paridade)
     dados_reais = extrair_dados_reais_google(origem_clean, destino_clean)
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
@@ -190,9 +192,9 @@ if arquivo_carregado is not None:
             barra_progresso = st.progress(0)
             container_status = st.empty()
             
-            for index, linha in df.iterrows():
-                origem = str(linha['Origem']).strip()
-                destino = str(linha['Destino']).strip()
+            for index, merge_line in df.iterrows():
+                origem = str(merge_line['Origem']).strip()
+                destino = str(merge_line['Destino']).strip()
                 
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
