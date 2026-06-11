@@ -49,7 +49,6 @@ def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Contextualização inteligente de Estados (Ex: Taguatinga, TO)
     origem_query = origem_clean
     if uf_origem and str(uf_origem).strip().lower() != 'nan':
         origem_query += f", {str(uf_origem).strip()}"
@@ -62,27 +61,23 @@ def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""
     elif "brasil" not in destino_clean.lower() and "," not in destino_clean:
         destino_query += ", Brasil"
 
-    # Link dinâmico oficial do Google Maps gerado para a planilha
+    # Geração corrigida do link universal do consumidor para o Google Maps
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_query)}&destination={requests.utils.quote(destino_query)}&travelmode=driving"
 
     if not CHAVE_GOOGLE_FIXA or not CHAVE_GOOGLE_FIXA.startswith("AIzaSy"):
         return "Chave Inválida", "Chave ausente", link_maps, "Não", 0.0
 
     try:
-        # Chamada à API de Direções SEM restringir balsas (para que o Google traga o melhor trajeto real que você vê na tela)
         url = f"https://maps.googleapis.com/maps/api/directions/json?origin={requests.utils.quote(origem_query)}&destination={requests.utils.quote(destino_query)}&mode=driving&language=pt-BR&key={CHAVE_GOOGLE_FIXA}"
-        
         resposta = requests.get(url, timeout=12).json()
         
         if resposta.get("status") == "OK" and resposta.get("routes"):
             rota = resposta["routes"][0]
             leg = rota["legs"][0]
             
-            # 1. Extração exata dos dados reais do Google Maps
             km_terrestre = round(leg["distance"]["value"] / 1000, 2)
             tempo_txt = leg["duration"]["text"]
             
-            # 2. DETECÇÃO 100% AUTOMÁTICA DE BALSA VIA API:
             envolve_balsa = "Não"
             for step in leg.get("steps", []):
                 html_instructions = step.get("html_instructions", "").lower()
@@ -91,14 +86,12 @@ def calcular_rota_definitiva_google(origem, destino, uf_origem="", uf_destino=""
                     envolve_balsa = "Sim"
                     break
             
-            # 3. LINHA RETA INTELIGENTE: Pega as coordenadas oficiais que o Google acabou de validar
             lat_o = leg["start_location"]["lat"]
             lon_o = leg["start_location"]["lng"]
             lat_d = leg["end_location"]["lat"]
             lon_d = leg["end_location"]["lng"]
             dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
             
-            # RETORNO CORRIGIDO: Variáveis limpas prontas para processamento
             return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
         else:
             status_erro = resposta.get("status", "Erro desconhecido")
@@ -144,7 +137,8 @@ else:
                     uf_d = str(linha[col_uf_d]).strip() if col_uf_d else ""
                     
                     if origem and destino and origem != 'nan' and destino != 'nan':
-                        st.write(f"Calculando {index+1}/{total_linhas}: {origem} ➔ {destino}")
+                        # CORRIGIDO: Atualização fluida e limpa usando container textual fixo
+                        texto_status.text(f"🔢 Calculando {index+1}/{total_linhas}: {origem} ➔ {destino}")
                         
                         km, tempo, link, balsa_status, linha_reta = calcular_rota_definitiva_google(origem, destino, uf_o, uf_d)
                         
@@ -158,6 +152,7 @@ else:
                     
                     barra_progresso.progress((index + 1) / total_linhas)
                 
+                texto_status.empty()
                 st.success("✨ Processamento concluído com exatidão máxima!")
                 
                 ordem_colunas = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
