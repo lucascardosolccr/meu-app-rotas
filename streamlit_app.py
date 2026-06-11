@@ -93,7 +93,7 @@ def calcular_rota_100_gratis(origem, destino, uf_o="", uf_d=""):
                 minutos_totais = round(leg['duration'] / 60)
 
             # 3. CAMADA DE INTELIGÊNCIA LOGÍSTICA (Ajuste de Erros Regionais de Tempo/Distância)
-            if "cascalheira" in裝 origem_clean.lower() and "araguaia" in destino_clean.lower():
+            if "cascalheira" in origem_clean.lower() and "araguaia" in destino_clean.lower():
                 km_terrestre = 462.00
                 minutos_totais = 366
                 
@@ -116,8 +116,8 @@ def calcular_rota_100_gratis(origem, destino, uf_o="", uf_d=""):
             if any(c in origem_clean.lower() or c in destino_clean.lower() for c in cidades_balsa):
                 envolve_balsa = "Sim"
                 
-            # CORRIGIDO: Retorno totalmente limpo de variáveis posicionado sem erros de sintaxe
-            return km_terrestre, tempo_txt, link_maps,高度_balsa=envolve_balsa, dist_linha_reta
+            # Retorno purificado e estritamente posicional em formato de tupla do Python
+            return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
 
         return "Cidade não localizada", "Verificar grafia", link_maps, "Não", 0.0
     except Exception:
