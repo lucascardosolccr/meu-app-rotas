@@ -1,4 +1,4 @@
-import streamlit as st
+import streamlit st
 import pandas as pd
 import requests
 import time
@@ -61,38 +61,38 @@ def decodificar_localidade_brazil(texto):
     
     # Limpa o nome do município removendo menções a país, UFs e pontuações sobressalentes
     nome_municipio = texto_str.split(',')[0].strip()
-    nome_municipio = re.sub(r'\s+-\s+[A-Z]{2}$', '', nome_municipio) # Remove sufixos tipo 'Cidade - UF'
+    nome_municipio = re.sub(r'\s+-\s+[A-Z]{2}$', '', nome_municipio) 
     
     return nome_municipio, uf
 
 def geocode_ibge_geonames(localidade):
     """
     Geocodificador de Alta Precisão Nacional.
-    Consulta a base pública do Geonames/ArcGIS estruturando o escopo pela UF extraída.
-    Previne erros de homônimos de municípios vizinhos.
+    Consulta a base pública do ArcGIS filtrando rigorosamente por UF para evitar homônimos.
     """
     municipio, uf = decodificar_localidade_brazil(localidade)
     
-    # Monta uma query limpa e hiper-focada para o geocodificador não buscar em estados errados
     if uf:
         query = f"{municipio}, {uf}, Brasil"
     else:
         query = f"{municipio}, Brasil"
         
-    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA"
+    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=5&sourceCountry=BRA"
     
     try:
         resposta = requests.get(url, timeout=10).json()
         if resposta.get('candidates'):
-            # Dá preferência para o resultado que melhor se encaixe como Cidade/Localidade
+            # Varre os candidatos e garante correspondência estrita com o estado (UF) pretendido
             for candidato in resposta['candidates']:
-                # Se houver filtro de UF, certifica-se de validar se o endereço retornado bate com o estado esperado
-                if uf and uf not in candidato['address'].upper():
-                    continue
+                endereco_upper = candidato['address'].upper()
+                if uf:
+                    # Verifica se a sigla da UF está isolada por pontuação ou espaços no endereço retornado
+                    if not re.search(r'\b' + uf + r'\b', endereco_upper):
+                        continue
                 ponto = candidato['location']
                 return float(ponto['y']), float(ponto['x'])
             
-            # Fallback para o primeiro candidato caso a validação estrita de string seja inconclusiva
+            # Fallback seguro caso os filtros estritos de string não encontrem casamento perfeito
             ponto = resposta['candidates'][0]['location']
             return float(ponto['y']), float(ponto['x'])
     except Exception:
@@ -104,7 +104,7 @@ def calcular_rota_universal(origem, destino):
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Geração do Link no formato oficial padrão para navegação ponto a ponto do Google Maps
+    # Geração estável do Link no formato oficial para navegação direta do Google Maps
     link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_clean)}/{requests.utils.quote(destino_clean)}"
 
     try:
@@ -138,26 +138,24 @@ def calcular_rota_universal(origem, destino):
             pass
 
         # 3. TRATAMENTO INTEGRADO DE CIRCUITAÇÃO E ERRO DE ESCALA
-        # Se o km rodoviário falhar, ou for menor que a linha reta, aplica a constante estatística de curvas nacional (1.27)
         if km_terrestre <= dist_linha_reta or km_terrestre == 0:
             km_terrestre = round(dist_linha_reta * 1.27, 2)
         
         # 4. MODELO DE VELOCIDADE DINÂMICA BRASILEIRA (Sincronização Ponderada com o Link do Maps)
         if km_terrestre < 15:
-            v_comercial = 25.0  # Modelo hiper-curto de transição urbana local
+            v_comercial = 25.0  # Transição urbana local curta
         elif km_terrestre < 50:
             v_comercial = 45.0  # Modelo interurbano curto
         elif km_terrestre < 150:
             v_comercial = 58.0  # Modelo misto regional
         else:
-            v_comercial = 65.0  # Modelo rodoviário contínuo de frotas logísticas
+            v_comercial = 65.0  # Modelo rodoviário estável de frotas logísticas
 
         minutos_totais = round((km_terrestre / v_comercial) * 60)
         
-        # Detecção contextual para regiões conhecidas de travessia hidroviária (ex: Porto de Moz, Almeirim)
+        # Detecção contextual para regiões conhecidas de travessia hidroviária
         if envolve_balsa == "Sim" or any(c in origem_clean.lower() or c in destino_clean.lower() for c in ["moz", "almeirim"]):
             envolve_balsa = "Sim"
-            # Adiciona o custo operacional médio de espera e travessia de balsa
             if km_terrestre < 100:
                 minutos_totais += 45
             else:
@@ -171,7 +169,8 @@ def calcular_rota_universal(origem, destino):
             minutos_restantes = minutos_totais % 60
             tempo_txt = f"{horas} h {minutos_restantes} min" if minutos_restantes > 0 else f"{horas} h"
             
-        return km_terrestre, tempo_txt, link_maps,定位_balsa=envolve_balsa, dist_linha_reta
+        # RETORNO CORRIGIDO: Tupla limpa sem atribuições nomeadas inválidas
+        return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
 
     except Exception:
         km_err = round(dist_linha_reta * 1.27, 2) if 'dist_linha_reta' in locals() else 0.0
@@ -207,7 +206,6 @@ if arquivo_carregado is not None:
                 if origem and destino and origem != 'nan' and destino != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                     
-                    # Desempacotamento seguro tratando o retorno da rota
                     retorno_valores = calcular_rota_universal(origem, destino)
                     if isinstance(retorno_valores, tuple) and len(retorno_valores) == 5:
                         km, tempo, link, balsa_status, linha_reta = retorno_valores
@@ -257,10 +255,10 @@ if arquivo_carregado is not None:
                 st.markdown("""
                 Este sistema utiliza uma arquitetura de **Fusion de Dados Geoespaciais** estruturada em cinco etapas:
                 1. **Mapeamento de Entrada:** Lê os dados de Origem e Destino do arquivo Excel carregado.
-                2. **Geocodificação Automática de Escopo Nacional:** Isola os nomes dos municípios e as siglas de UF diretamente da célula do Excel usando expressões regulares. Faz a busca usando parâmetros estruturados no servidor do *ArcGIS* filtrando estritamente pelo território brasileiro (`sourceCountry=BRA`), o que extingue erros de homônimos distantes.
+                2. **Geocodificação Automática de Escopo Nacional:** Isola os nomes dos municípios e as siglas de UF diretamente da célula do Excel usando expressões regulares. Faz a busca usando parâmetros estruturados no servidor do *ArcGIS* filtrando estritamente pelo território brasileiro (`sourceCountry=BRA`) e validando a presença da UF correspondente no endereço final para elidir desvios de homônimos de longa distância.
                 3. **Cálculo de Rota Terrestre:** Conecta os pontos no roteador de código aberto *OSRM*, extraindo a quilometragem pelas rodovias federais e estaduais brasileiras.
                 4. **Cálculo de Linha Reta:** Executa localmente o modelo elipsoidal clássico de *Vincenty* (WGS-84) para computar a distância geodésica pura.
-                5. **Calibração Logística Avançada:** Aplica uma curva progressiva de velocidade comercial de frotas rodoviárias do Brasil para alinhar perfeitamente os valores da planilha ao tráfego do link gerado.
+                5. **Calibração Logística Avançada:** Aplica uma curva progressiva de velocidade comercial de frotas rodoviárias do Brasil para alinhar os valores da planilha ao tráfego do link gerado.
                 """)
                 
             with st.expander("2. Nota de Divergência Teórica de Tempo (Planilha vs. Link da Rota)"):
