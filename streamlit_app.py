@@ -65,13 +65,13 @@ def calcular_rota_100_gratis(origem, destino, uf_o="", uf_d=""):
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Geração corrigida e universal do link oficial de rotas do Google Maps
+    # Geração do link oficial de rotas do Google Maps
     link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_clean)}/{requests.utils.quote(destino_clean)}"
 
     try:
         # 1. Geolocalização via OpenStreetMap
         coords_o = geocode_nominatim_estrito(origem_clean, uf_o)
-        time.sleep(0.8) # Delay regulamentar contra bloqueios
+        time.sleep(0.8) # Delay contra bloqueios de IP
         coords_d = geocode_nominatim_estrito(destino_clean, uf_d)
 
         if not coords_o or not coords_d:
@@ -80,10 +80,10 @@ def calcular_rota_100_gratis(origem, destino, uf_o="", uf_d=""):
         lat1, lon1 = coords_o
         lat2, lon2 = coords_d
         
-        # Distância Geodésica Real (Física local invariável)
+        # Distância Geodésica Real (Linha Reta)
         dist_linha_reta = calcular_distancia_vincenty(lat1, lon1, lat2, lon2)
 
-        # 2. Roteamento Rodoviário via OSRM
+        # 2. Roteamento Rodoviário via OSRM público
         url_osrm = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
         
         km_terrestre = 0.0
@@ -101,30 +101,26 @@ def calcular_rota_100_gratis(origem, destino, uf_o="", uf_d=""):
         except Exception:
             pass
 
-        # 3. COMPENSAÇÃO DE CURVATURA E MALHA (Circuidade Rodoviária Brasileira)
+        # 3. COMPENSAÇÃO DE CURVATURA BRASILEIRA (Fator estatístico de circuidade)
         if km_terrestre <= dist_linha_reta or km_terrestre == 0:
             km_terrestre = round(dist_linha_reta * 1.27, 2)
         
-        # 4. MODELO MATEMÁTICO DE VELOCIDADE COMERCIAL DINÂMICA (Padrão de Tráfego Nacional)
-        # Ajusta a velocidade média com base no comprimento do trajeto para simular perfeitamente o Google Maps
+        # 4. MODELO MATEMÁTICO DE VELOCIDADE COMERCIAL DINÂMICA
+        # Ajusta a velocidade para sincronizar o tempo gerado com o tempo do tráfego do Google Maps
         if km_terrestre < 40:
-            # Trajetos curtos: trânsito urbano pesado, semáforos, cruzamentos (Média de 38 km/h)
             v_comercial = 38.0
         elif km_terrestre < 150:
-            # Trajetos médios: transição rodoviária com perímetros urbanos (Média de 58 km/h)
             v_comercial = 58.0
         else:
-            # Trajetos longos: velocidade de cruzeiro comercial de frotas logísticas e ônibus (Média estável de 64 km/h)
             v_comercial = 64.0
 
-        # Cálculo exato do tempo estimado em minutos
+        # Cálculo do tempo de trajeto
         minutos_totais = round((km_terrestre / v_comercial) * 60)
         
-        # Ajuste adaptativo extra para incluir tempo logístico de balsa (Adiciona ~40 min se balsa detectada)
         if envolve_balsa == "Sim":
             minutos_totais += 40
 
-        # Formatação amigável idêntica ao Google Maps
+        # Formatação idêntica às strings do Google Maps
         if minutos_totais < 60:
             tempo_txt = f"{minutos_totais} min"
         else:
@@ -135,10 +131,10 @@ def calcular_rota_100_gratis(origem, destino, uf_o="", uf_d=""):
             else:
                 tempo_txt = f"{horas} h {minutos_restantes} min"
             
-        return km_terrestre, tempo_txt, link_maps,外_balsa=envolve_balsa, dist_linha_reta
+        # RETORNO CORRIGIDO: Tupla purificada livre de caracteres inválidos
+        return km_terrestre, tempo_txt, link_maps, envolve_balsa, dist_linha_reta
 
     except Exception:
-        # Garante o preenchimento estatístico mínimo aproximado em caso de queda de sinal
         km_fallback = round(dist_linha_reta * 1.27, 2) if 'dist_linha_reta' in locals() else 0.0
         min_fallback = round((km_fallback / 60.0) * 60)
         tempo_fallback = f"{min_fallback // 60} h {min_fallback % 60} min" if min_fallback >= 60 else f"{min_fallback} min"
@@ -180,7 +176,6 @@ if arquivo_carregado is not None:
                 if origem and destino and origem != 'nan' and destino != 'nan':
                     texto_status.text(f"🔢 Processando rota {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                     
-                    # Desempacotamento seguro tratando a tupla de retorno
                     retorno_rota = calcular_rota_100_gratis(origem, destino, uf_o, uf_d)
                     if isinstance(retorno_rota, tuple) and len(retorno_rota) == 5:
                         km, tempo, link, balsa_status, linha_reta = retorno_rota
