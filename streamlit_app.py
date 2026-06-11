@@ -157,8 +157,8 @@ def calcular_pipeline_logistico(origem, destino):
     
     tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min"
     
-    # CORRIGIDO: Linha 158 purificada sem caracteres inválidos ou parâmetros nomeados errados
-    return km_terrestre, tempo_txt, link_maps_fallback, json_balsa_fallback, dist_linha_reta
+    # CORRIGIDO: Retorno limpo e sem variáveis fantasmas no plano de contingência
+    return km_terrestre, tempo_txt, link_maps_fallback, envolve_balsa_fallback, dist_linha_reta
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
 st.title("🚗 Gerenciador de Rotas Inteligentes")
@@ -187,7 +187,8 @@ if arquivo_carregado is not None:
                 origem = str(linha['Origem']).strip()
                 destino = str(linha['Destino']).strip()
                 
-                if origin and destino and origem != 'nan' and destino != 'nan':
+                # CORRIGIDO: Variável 'origem' escrita corretamente com 'em' no final
+                if origem and destino and origem != 'nan' and destino != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                     
                     # Chamada segura ao pipeline unificado
@@ -195,7 +196,7 @@ if arquivo_carregado is not None:
                     if isinstance(retorno_pipe, tuple) and len(retorno_pipe) == 5:
                         km, tempo, link, balsa_status, linha_reta = retorno_pipe
                     else:
-                        km, tempo, link, balsa_status, linha_reta = 0.0, "Erro", link_maps_fallback, "Não", 0.0
+                        km, tempo, link, balsa_status, linha_reta = 0.0, "Erro", "Link Indisponível", "Não", 0.0
                     
                     df.at[index, 'Distancia'] = km
                     df.at[index, 'Tempo'] = tempo
@@ -231,27 +232,3 @@ if arquivo_carregado is not None:
                 file_name="planilha_rotas_calculada.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-            
-            # --- SEÇÃO DE AUDITORIA, DOCUMENTAÇÃO E REFERÊNCIAS CIENTÍFICAS ---
-            st.write("---")
-            st.subheader("📘 Documentação Técnico-Científica do Sistema")
-            
-            with st.expander("1. Como este Aplicativo Funciona"):
-                st.markdown("""
-                Este sistema utiliza uma arquitetura de **Web Scraping Hidroviário e Rodoviário** estruturada em cinco etapas:
-                1. **Mapeamento de Entrada:** Lê os dados de Origem e Destino do arquivo Excel carregado.
-                2. **Extração Direta (Reversa):** Faz uma requisição simulada à interface pública do Google Maps. O Python lê a estrutura de dados bruta retornada diretamente da engine comercial deles e captura a quilometragem e o tempo reais.
-                3. **Fidelidade Total e Balsas Dinâmicas:** Ao capturar o dado direto da página gerada pelo link, o aplicativo garante sincronia absoluta (como as **49h** obtidas para trechos amazônicos complexos) e varre as marcações textuais do código procurando palavras chaves de transporte hidroviário do próprio Google, mapeando balsas de forma totalmente automatizada e universal.
-                4. **Cálculo de Linha Reta:** Executa em paralelo o modelo matemático elipsoidal clássico de *Vincenty* (WGS-84) para fins de auditoria interna de vetorização.
-                """)
-                
-            with st.expander("2. Nota de Sincronia de Dados (Planilha vs. Link da Rota)"):
-                st.markdown("""
-                Graças à implementação do módulo de engenharia reversa de dados de tráfego, as colunas **Distancia** e **Tempo** agora refletem com exatidão matemática os mesmos valores nominais exibidos quando o link da rota é aberto no navegador, neutralizando distorções em áreas isoladas do país.
-                """)
-                
-            with st.expander("3. Referências Bibliográficas Fundamentais"):
-                st.markdown("""
-                * **Vincenty, T. (1975):** *"Direct and Inverse Solutions of Geodesics on a Ellipsoid with Application of Nested Equations"*. Survey Review, 23(176), 88-93. (Cálculo analítico interno da linha reta).
-                * **Google Maps Interface Architecture:** Métricas de requisições síncronas HTTP aplicadas para colheita de dados de telemetria pública e informações logísticas abertas de transporte interestadual.
-                """)
