@@ -13,19 +13,21 @@ st.set_page_config(
     layout="centered"
 )
 
-def extrair_dados_reais_google(origem_formatada, destino_formatada, origem_original, destino_original):
+def extrair_dados_reais_google(origem_query, destino_q_str, lat_o, lon_o, lat_d, lon_d):
     """
-    CAMADA BRUTA - Intercepta a API interna de direções assíncronas do Google.
-    Utiliza o endereço já padronizado e validado pelo geocodificador para garantir paridade.
+    CAMADA BRUTA - Intercepta a API interna de direções do Google Maps.
+    Injeta as coordenadas (Lat, Lon) resolvidas em conjunto com o texto
+    para forçar o Google a indexar o local exato da chácara, quadra ou CEP.
     """
-    origem_q = requests.utils.quote(str(origem_formatada).strip())
-    destino_q = requests.utils.quote(str(destino_formatada).strip())
+    # Formata a query forçando o posicionamento geoespacial absoluto no mapa
+    origem_q = requests.utils.quote(f"{origem_query}".strip())
+    destino_q = requests.utils.quote(f"{destino_q_str}".strip())
     
-    # URL de exibição canônica gerada com os endereços originais para manter o padrão visual do usuário
-    link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(str(origem_original).strip())}/{requests.utils.quote(str(destino_original).strip())}/"
+    # URL de exibição estável e limpa para o usuário clicar e abrir no navegador
+    link_maps = f"https://www.google.com/maps/dir/{origem_q}/{destino_q}/"
     
-    # Endpoint da API oculta do Google consultando os metadados geocodificados exatos
-    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_q}!1m2!1m1!1s{destino_q}!3e0"
+    # Endpoint de alta fidelidade cruzando os eixos de coordenadas decimais
+    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{lat_o},{lon_o}!1m2!1m1!1s{lat_d},{lon_d}!3e0"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -63,8 +65,7 @@ def extrair_dados_reais_google(origem_formatada, destino_formatada, origem_origi
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            # RETORNO CORRIGIDO: Removido o parâmetro inválido 'Black_ferry=' que gerava o SyntaxError
-            return km_puro, tempo_txt, link_maps, envolve_balsa
+            return km_puro, tempo_txt, link_maps, json_check=envolve_balsa if 'json_check' in locals() else envolve_balsa
             
     except Exception:
         pass
@@ -108,13 +109,19 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
 
 def obter_coordenadas_e_endereco_oficial(localidade):
     """
-    CAMADA INTEROPERÁVEL AUTOMÁTICA - Consulta a base geográfica global do ArcGIS Server.
-    Identifica dinamicamente qualquer CEP, POI ou rua sem listas de dicionários engessadas.
-    Retorna: (latitude, longitude, endereco_oficial_completo)
+    CAMADA GEOGRÁFICA INTEROPERÁVEL - Consulta a base global do ArcGIS Server.
+    Normaliza o texto do endereço e anexa as coordenadas decimais cruas.
     """
     texto_str = str(localidade).strip()
     
-    query = texto_str if "brasil" in texto_str.lower() else f"{texto_str}, Brasil"
+    # Adiciona contexto regional do DF automaticamente para mitigar omissões de estado
+    query = texto_str
+    if "BRASIL" not in texto_str.upper():
+        if any(token in texto_str.upper() for token in ["TAGUATINGA", "SAMAMBAIA", "PONTE ALTA", "CEILANDIA", "SOBRADINHO", "GUARA"]):
+            query = f"{texto_str}, Brasília, DF, Brasil"
+        else:
+            query = f"{texto_str}, Brasil"
+            
     url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA"
     
     try:
@@ -130,43 +137,38 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     return None
 
 def calcular_pipeline_logistico(origem, destino):
-    """Pipeline central avançado com cruzamento e padronização automática de dados geoespaciais"""
+    """Pipeline central avançado com fusão de coordenadas decimais e strings"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # 1. CRUZAMENTO AUTOMÁTICO DE ENDEREÇOS (Validação de CEP/Ruas/POIs na base GIS)
+    # Cruzamento na base de dados geográficos
     dados_geo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
     dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
     if not dados_geo_o or not dados_geo_d:
-        return 0.0, "Endereço não identificado", "http://maps.google.com", "Não", 0.0
+        link_err = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_clean)}/{requests.utils.quote(destino_clean)}/"
+        return 0.0, "Endereço não localizado", link_err, "Não", 0.0
         
     lat_o, lon_o, endereco_oficial_o = dados_geo_o
     lat_d, lon_d, endereco_oficial_d = dados_geo_d
 
-    # CORREÇÃO DO NAMEERROR: Vinculação exata para o nome da função em português
+    # Cálculo preciso da Linha Reta Geodésica via Vincenty
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
-    # 2. Executa a extração da API utilizando as strings oficiais limpas encontradas pelo ArcGIS
-    dados_reais = extrair_dados_reais_google(endereco_oficial_o, endereco_oficial_d, origem_clean, destino_clean)
+    # Executa a extração fundindo as strings de entrada com o mapa de coordenadas resolvido
+    dados_reais = extrair_dados_reais_google(origem_clean, destino_clean, lat_o, lon_o, lat_d, lon_d)
     
-    if dados_reais and isinstance(dados_reais, tuple) and len(dados_reais) == 4:
+    if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # 3. FALLBACK OPERACIONAL SECUNDÁRIO TERRESTRE
+    # FALLBACK OPERACIONAL SECUNDÁRIO
     link_maps_fallback = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_clean)}/{requests.utils.quote(destino_clean)}/"
     km_terrestre = round(dist_linha_reta * 1.27, 2)
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
     minutos = round((km_terrestre / v_comercial) * 60)
     
     balsa_fallback = "Não"
-    is_norte = any(uf in endereco_oficial_o.upper() or uf in endereco_oficial_d.upper() for uf in ["PA", "AM", "AP", "RO", "RR", "AC"])
-    if is_norte and (km_terrestre < 120 and dist_linha_reta > 20 and (km_terrestre / dist_linha_reta) < 1.10):
-        minutos = 2940  
-        km_terrestre = 85.84
-        balsa_fallback = "Sim"
-
     tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
     return km_terrestre, tempo_txt, link_maps_fallback, balsa_fallback, dist_linha_reta
 
@@ -197,19 +199,11 @@ if arquivo_carregado is not None:
                 origem = str(linha['Origem']).strip()
                 destino = str(linha['Destino']).strip()
                 
-                # CORREÇÃO DO SYNTAXERROR INTERNO: Limpeza do caractere espúrio de validação
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                     
-                    # Chamada unificada do pipeline cruzado de endereços
-                    km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino) if 'calcular_pipeline_logistico' in globals() else (0.0, "", "", "Não", 0.0)
-                    
-                    # Bloco de contingência posicional garantindo o mapeamento dinâmico
-                    if km == 0.0 and tempo == "":
-                        try:
-                            km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
-                        except NameError:
-                            pass
+                    # Consumo do pipeline cruzado adaptativo
+                    km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
                     
                     df.at[index, 'Distancia'] = km
                     df.at[index, 'Tempo'] = tempo
