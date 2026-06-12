@@ -56,7 +56,7 @@ def extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, la
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, envolve_balsa
+            return km_puro, tempo_txt,膜=envolve_balsa if '膜' in locals() else envolve_balsa
             
     except Exception:
         pass
@@ -100,14 +100,12 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
 
 def geocodificar_e_padronizar_universal(localidade_raw):
     """
-    CAMADA GEOGRÁFICA UNIVERSAL - Consulta a base cartográfica global do ArcGIS Server.
-    Transforma qualquer entrada informal, fragmentada ou CEP no endereço formal,
-    completo e estruturado aceito mundialmente pelos motores de mapa.
-    Retorna: (latitude, longitude, endereco_oficial_estruturado)
+    CAMADA GEOGRÁFICA DE DETALHAMENTO UNIVERSAL - Extrai os atributos estendidos da base cartográfica.
+    Garante a reconstrução do endereço completo (Rua/Quadra, Bairro, Cidade, Estado e CEP).
     """
     texto_str = str(localidade_raw).strip()
     
-    # Fallback rápido para CEPs puros de 8 dígitos usando ViaCEP para dar o primeiro polimento estrutural
+    # Validação estrutural prévia para CEPs numéricos via ViaCEP
     cep_limpo = re.sub(r'\D', '', texto_str)
     if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str):
         try:
@@ -117,9 +115,10 @@ def geocodificar_e_padronizar_universal(localidade_raw):
         except Exception:
             pass
 
-    # Garante escopo nacional caso o usuário esqueça o país
     query = texto_str if "BRASIL" in texto_str.upper() else f"{texto_str}, Brasil"
-    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA"
+    
+    # Ativação do parâmetro outFields=* para forçar o ArcGIS a expor toda a árvore cadastral do endereço
+    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA&outFields=*"
     
     try:
         resposta = requests.get(url, timeout=10).json()
@@ -127,8 +126,26 @@ def geocodificar_e_padronizar_universal(localidade_raw):
             melhor_candidato = resposta['candidates'][0]
             lat = float(melhor_candidato['location']['y'])
             lon = float(melhor_candidato['location']['x'])
-            endereco_oficial = melhor_candidato['address']
-            return lat, lon, endereco_oficial
+            
+            # Captura a tabela de atributos estruturados detalhados
+            atributos = melhor_candidato.get('attributes', {})
+            
+            logradouro = atributos.get('StAddr', '').strip()
+            bairro = atributos.get('Neighborhood', '').strip()
+            cidade = atributos.get('City', '').strip()
+            estado = atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()
+            cep_postal = atributos.get('Postal', '').strip()
+            
+            # Se a base estendida tiver o logradouro completo, monta a string detalhada de ponta a ponta
+            if logradouro:
+                componentes = [logradouro, bairro, cidade, estado]
+                endereco_reconstruido = ", ".join([c for c in componentes if c])
+                if cep_postal:
+                    endereco_reconstruido += f", {cep_postal}"
+                return lat, lon, endereco_reconstruido
+            
+            # Fallback seguro caso o candidate padrão já venha completo
+            return lat, lon, melhor_candidato['address']
     except Exception:
         pass
         
@@ -137,28 +154,29 @@ def geocodificar_e_padronizar_universal(localidade_raw):
 def calcular_pipeline_logistico(origem_bruta, destino_bruto):
     """Pipeline logístico agnóstico baseado em normalização de metadados cartográficos"""
     
-    # 1. Executa a geocodificação e padronização automática universal (ArcGIS/ViaCEP Engine)
+    # 1. Executa a geocodificação estruturada estendida universal
     lat_o, lon_o, origem_oficial = geocodificar_e_padronizar_universal(origem_bruta)
     lat_d, lon_d, destino_oficial = geocodificar_e_padronizar_universal(destino_bruto)
     
     # 2. Cálculo local analítico da menor distância em linha reta via Vincenty
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d) if (lat_o != 0.0 and lat_d != 0.0) else 0.0
 
-    # 3. Detecta dinamicamente se a entrada normalizada possui características de POI complexo
-    # para decidir entre roteamento por eixos decimais ou chaves de strings qualificadas
-    origem_is_poi = any(k in origem_oficial.upper() for k in ["UNIVERSIDADE", "FACULDADE", "CAMPUS", "HOSPITAL", "SHOPPING", "AIRPORT", "AEROPORTO"])
-    destino_is_poi = any(k in destino_oficial.upper() for k in ["UNIVERSIDADE", "FACULDADE", "CAMPUS", "HOSPITAL", "SHOPPING", "AIRPORT", "AEROPORTO"])
+    origem_is_poi = any(k in origem_oficial.upper() for k in ["UNIVERSIDADE", "FACULDADE", "CAMPUS", "HOSPITAL", "SHOPPING", "AEROPORTO"])
+    destino_is_poi = any(k in destino_oficial.upper() for k in ["UNIVERSIDADE", "FACULDADE", "CAMPUS", "HOSPITAL", "SHOPPING", "AEROPORTO"])
     usar_coords = not (origem_is_poi or destino_is_poi)
 
-    # 4. Consome a Camada Bruta do Google utilizando as strings limpas e oficiais geradas no passo 1
+    # 3. Consome a Camada Bruta do Google utilizando os endereços completos
     dados_reais = extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
-    # 5. MONTAGEM DA URL VIA DIREÇÕES CANÔNICAS (Projeta o trajeto exato Ponto A -> Ponto B no navegador)
+    # 4. MONTAGEM DA URL VIA DIREÇÕES CANÔNICAS (Garante a plotagem exata do trajeto longo/completo)
     link_maps_canonico = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_oficial)}&destination={requests.utils.quote(destino_oficial)}&travelmode=driving"
     
-    if dados_reais:
-        km_google, tempo_google, balsa_google = dados_reais
+    if dados_reais and isinstance(dados_reais, tuple) and len(dados_reais) == 4:
+        km_google, tempo_google, balsa_google = dados_reais[0], dados_reais[1], dados_reais[2]
         return km_google, tempo_google, link_maps_canonico, balsa_google, dist_linha_reta
+    elif dados_reais:
+        # Desempacotamento de segurança se a tupla vier com 3 elementos
+        return dados_reais[0], dados_reais[1], link_maps_canonico, dados_reais[2], dist_linha_reta
 
     # FALLBACK LOGÍSTICO TERRESTRE LOCAL SECUNDÁRIO
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
@@ -243,7 +261,7 @@ if arquivo_carregado is not None:
                 st.markdown("""
                 Este software implementa um ecossistema de **Engenharia Reversa de Redes** operando em quatro camadas:
                 1. **Vetorização de Lote:** Extrai os eixos de texto das células da planilha carregada.
-                2. **Normalização Geográfica Universal (ArcGIS Engine):** Converte strings abstratas, informais ou postais nos endereços oficiais estruturados e válidos na malha cartográfica global antes de disparar o roteamento.
-                3. **Direções Canônicas Públicas:** Constrói URLs baseadas na API oficial `https://www.google.com/maps/dir/?api=1` forçando o navegador a carregar uma rota real de trânsito estável, eliminando desvios interpretativos.
+                2. **Camada de Atributos Cartográficos Estendidos:** Utiliza o parâmetro corporativo de metadados digitais para remontar os eixos de ruas, conjuntos e CEPs por inteiro de forma agnóstica.
+                3. **Direções Canônicas Públicas:** Constrói URLs baseadas na API oficial forçando o navegador a carregar o trajeto rodoviário completo.
                 4. **Vincenty Geodésico:** Computa a linha reta teórica perfeita baseada no elipsoide real da Terra (WGS-84).
                 """)
