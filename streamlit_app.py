@@ -56,7 +56,8 @@ def extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, la
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt,膜=envolve_balsa if '膜' in locals() else envolve_balsa
+            # CORREÇÃO ABSOLUTA DA LINHA 59: Retorno purificado da tupla sem caracteres ou atribuições inválidas
+            return km_puro, tempo_txt, envolve_balsa
             
     except Exception:
         pass
@@ -171,12 +172,9 @@ def calcular_pipeline_logistico(origem_bruta, destino_bruto):
     # 4. MONTAGEM DA URL VIA DIREÇÕES CANÔNICAS (Garante a plotagem exata do trajeto longo/completo)
     link_maps_canonico = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_oficial)}&destination={requests.utils.quote(destino_oficial)}&travelmode=driving"
     
-    if dados_reais and isinstance(dados_reais, tuple) and len(dados_reais) == 4:
+    if dados_reais and isinstance(dados_reais, tuple):
         km_google, tempo_google, balsa_google = dados_reais[0], dados_reais[1], dados_reais[2]
         return km_google, tempo_google, link_maps_canonico, balsa_google, dist_linha_reta
-    elif dados_reais:
-        # Desempacotamento de segurança se a tupla vier com 3 elementos
-        return dados_reais[0], dados_reais[1], link_maps_canonico, dados_reais[2], dist_linha_reta
 
     # FALLBACK LOGÍSTICO TERRESTRE LOCAL SECUNDÁRIO
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
