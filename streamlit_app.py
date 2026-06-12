@@ -61,7 +61,8 @@ def extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d):
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps,高度=envolve_balsa if '高度' in locals() else envolve_balsa
+            # LINHA 64 INTEGRALMENTE CORRIGIDA: Removida a atribuição nomeada e os caracteres '高度='
+            return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
         pass
@@ -147,6 +148,7 @@ def calcular_pipeline_logistico(origem, destino):
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
+    # Executa a identificação automática dos eixos espaciais nas bases GIS públicas
     dados_geo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
     dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
@@ -157,11 +159,13 @@ def calcular_pipeline_logistico(origem, destino):
     lat_o, lon_o, endereco_oficial_o = dados_geo_o
     lat_d, lon_d, endereco_oficial_d = dados_geo_d
 
+    # Cálculo da menor distância geodésica em linha reta teórica via Vincenty
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
+    # Passa as coordenadas numéricas reais para a busca do Google Maps, elidindo falhas textuais
     dados_reais = extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d)
     
-    if dados_reais and isinstance(dados_reais, tuple) and len(dados_reais) == 4:
+    if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
@@ -197,7 +201,7 @@ if arquivo_carregado is not None:
             total_linhas = len(df)
             barra_progresso = st.progress(0)
             
-            # CORREÇÃO CRÍTICA: Instanciação limpa e única do container de texto para evitar quebra do React DOM
+            # Instanciação única do container para evitar o erro removeChild no React Virtual DOM
             container_status = st.empty()
             
             for index, linha in df.iterrows():
@@ -207,6 +211,7 @@ if arquivo_carregado is not None:
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                     
+                    # Execução estável do pipeline logístico baseado em coordenadas absolutas
                     km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
                     
                     df.at[index, 'Distancia'] = km
