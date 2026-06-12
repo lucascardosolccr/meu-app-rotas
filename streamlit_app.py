@@ -157,16 +157,16 @@ def calcular_pipeline_logistico(origem_bruta, destino_bruto):
     lat_o, lon_o = obter_coordenadas_arcgis(origem_clean)
     lat_d, lon_d = obter_coordenadas_arcgis(destino_clean)
     
-    dist_linha_reta = calcular_distance_vincenty(lat_o, lon_o, lat_d, lon_d) if (lat_o != 0.0 and lat_d != 0.0) else 0.0
+    # CORREÇÃO DO NAMEERROR: Chamada corrigida exatamente com o nome em português da função declarada na linha 95
+    dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d) if (lat_o != 0.0 and lat_d != 0.0) else 0.0
 
     # 3. Dispara a requisição à API interna de tráfego usando coordenadas para precisão matemática
     usar_coords = not (origem_is_poi or destino_is_poi)
     dados_reais = extrair_dados_reais_google(origem_clean, destino_clean, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
     # 4. BLINDAGEM DA URL: Montagem usando a API de busca canônica oficial e universal do Google Maps
-    # Esse formato impede reinterpretações malucas ou fixação em comércios errados.
     query_mapa = f"{origem_clean} to {destino_clean}"
-    link_maps_canonico = f"https://www.google.com/maps/search/?api=1&query={requests.utils.quote(query_mapa)}"
+    link_maps_canonico = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_clean)}&destination={requests.utils.quote(destino_clean)}"
     
     if dados_reais:
         km_google, tempo_google, balsa_google = dados_reais
