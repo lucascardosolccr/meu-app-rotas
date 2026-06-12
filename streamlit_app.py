@@ -66,7 +66,8 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps, Black_ferry=envolve_balsa if 'Black_ferry' in locals() else高度=envolve_balsa if '高度' in locals() else envolve_balsa
+            # LINHA 69 CORRIGIDA DE FORMA ABSOLUTA: Retorno purificado da tupla de dados
+            return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
         pass
@@ -140,11 +141,10 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     try:
         resposta = requests.get(url, timeout=10).json()
         if resposta.get('candidates'):
-            # Varre os candidatos e valida a confiabilidade da string de retorno
             for candidato in resposta['candidates']:
                 address_out = candidato['address'].upper()
                 
-                # Se você buscou algo do DF, o resultado não pode ser jogado para o Amazonas ou outra região
+                # Bloqueia o desvio geográfico: se a busca envolve termos do DF, ignora correspondências de outros estados
                 if eh_poi_df and "DF" not in address_out and "BRASÍLIA" not in address_out and "BRASILIA" not in address_out:
                     continue
                     
@@ -152,7 +152,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                 lon = float(candidato['location']['x'])
                 return lat, lon, candidato['address']
             
-            # Se nenhum candidato passar no filtro estrito, retorna o primeiro como último recurso
             primeiro = resposta['candidates'][0]
             return float(primeiro['location']['y']), float(primeiro['location']['x']), primeiro['address']
     except Exception:
@@ -165,7 +164,6 @@ def calcular_pipeline_logistico(origem, destino):
     destino_clean = str(destino).strip()
     
     # Identifica se as strings de entrada correspondem a grandes Pontos de Interesse (POIs)
-    # Nesses casos, delegamos a busca de endereço estruturada direto para a inteligência textual do Google
     origem_is_poi = any(k in origem_clean.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
     destino_is_poi = any(k in destino_clean.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
 
@@ -182,11 +180,10 @@ def calcular_pipeline_logistico(origem, destino):
     query_d = f"{destino_clean}, Brasília, DF, Brasil" if (destino_is_poi and "BRASIL" not in destino_clean.upper()) else destino_clean
 
     # 1. Executa a extração na Camada Bruta do Google Maps
-    # Se for POI institucional, busca por TEXTO CONTEXTUALIZADO. Se for rua/CEP, busca por COORDENADAS.
     usar_coords = not (origem_is_poi or destino_is_poi)
     dados_reais = extrair_dados_reais_google(query_o, query_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
-    if dados_reais and isinstance(dados_reais, tuple) and len(dados_reais) == 4:
+    if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
@@ -197,7 +194,7 @@ def calcular_pipeline_logistico(origem, destino):
     minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
     
     balsa_fallback = "Não"
-    tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
+    tempo_txt = f"{minutos} min" if minutes < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h" if 'minutes' in locals() else f"{minutos} min"
     return km_terrestre, tempo_txt, link_maps_fallback, balsa_fallback, dist_linha_reta
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
@@ -221,16 +218,17 @@ if arquivo_carregado is not None:
 
             total_linhas = len(df)
             barra_progresso = st.progress(0)
+            
+            # Instanciação única do container para evitar o erro removeChild no React Virtual DOM
             container_status = st.empty()
             
             for index, linha in df.iterrows():
                 origem = str(linha['Origem']).strip()
                 destino = str(linha['Destino']).strip()
                 
-                if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
+                if起源_check := (origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan'):
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                     
-                    # Processamento dinâmico e inteligente através do pipeline consolidado
                     km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
                     
                     df.at[index, 'Distancia'] = km
