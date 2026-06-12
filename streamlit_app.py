@@ -13,20 +13,22 @@ st.set_page_config(
     layout="centered"
 )
 
-def extrair_dados_reais_google(origem_raw, destino_raw):
+def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=True):
     """
-    CAMADA CENTRAL DE ROTEAMENTO - Intercepta a API viva do Google Maps.
-    Envia as strings puras tratadas para que o motor nativo do Google 
-    faça a indexação exata e resolva os metadados de tráfego.
+    CAMADA BRUTA - Intercepta a API interna de direções do Google Maps.
+    Se usar_coordenadas for True, força o traçado pelos pontos geográficos exatos.
+    Se for False (para POIs institucionais complexos), envia o texto tratado e contextualizado.
     """
-    origem_enc = requests.utils.quote(f"{origem_raw}".strip())
-    destino_enc = requests.utils.quote(f"{destino_raw}".strip())
-    
-    # URL de Direções Canônicas em modo de navegação direta rodoviária (driving)
-    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_enc}&destination={destino_enc}&travelmode=driving"
-    
-    # Endpoint da API interna estruturada de tráfego do Google Maps
-    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_enc}!1m2!1m1!1s{destino_enc}!3e0"
+    if usar_coordenadas and lat_o and lon_o and lat_d and lon_d:
+        origem_param = f"{lat_o},{lon_o}"
+        destino_param = f"{lat_d},{lon_d}"
+        url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
+        link_maps = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/"
+    else:
+        origem_param = requests.utils.quote(f"{origem_raw}".strip())
+        destino_param = requests.utils.quote(f"{destino_raw}".strip())
+        url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
+        link_maps = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -52,7 +54,15 @@ def extrair_dados_reais_google(origem_raw, destino_raw):
             
             # --- DETECÇÃO REFINADA DE BALSAS ---
             envolve_balsa = "Não"
-            padroes_balsa = [r'\"utilizar\s+balsa\b', r'\"pegar\s+balsa\b', r'\"travessia\s+de\s+balsa\b']
+            padroes_balsa = [
+                r'\"utilizar\s+balsa\b', 
+                r'\"pegar\s+balsa\b', 
+                r'\"travessia\s+de\s+balsa\b', 
+                r'\"balsa\s+de\s+veículos\b',
+                r'\"ferry\b',
+                r'\"travessia\s+por\s+balsa\b'
+            ]
+            
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
@@ -63,66 +73,133 @@ def extrair_dados_reais_google(origem_raw, destino_raw):
         
     return None
 
-def obter_endereco_oficial_correios(localidade_raw):
+def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
+    """Cálculo local da Linha Reta Geodésica (Vincenty, 1975)"""
+    try:
+        a = 6378137.0
+        b = 6356752.314245
+        f = 1 / 298.257223563
+        L = math.radians(lon2 - lon1)
+        U1 = math.atan((1 - f) * math.tan(math.radians(lat1)))
+        U2 = math.atan((1 - f) * math.tan(math.radians(lat2)))
+        sinU1, cosU1 = math.sin(U1), math.cos(U1)
+        sinU2, cosU2 = math.sin(U2), math.cos(U2)
+        lambda_lon = L
+        
+        for _ in range(200):
+            sinLambda, cosLambda = math.sin(lambda_lon), math.cos(lambda_lon)
+            sinSigma = math.sqrt((cosU2 * sinLambda) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda) ** 2)
+            if sinSigma == 0: return 0.0
+            cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda
+            sigma = math.atan2(sinSigma, cosSigma)
+            sinAlpha = cosU1 * cosU2 * sinLambda / sinSigma
+            cosSqAlpha = 1 - sinAlpha ** 2
+            cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha if cosSqAlpha != 0 else 0
+            C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha))
+            lambdaPrev = lambda_lon
+            lambda_lon = L + (1 - f) * C * sinAlpha * (sigma + f * sinAlpha * (cos2SigmaM + C * cosSigma * (-1 + 2 * cos2SigmaM ** 2)))
+            if abs(lambda_lon - lambdaPrev) < 1e-12: break
+            
+        uSq = cosSqAlpha * (a ** 2 - b ** 2) / (b ** 2)
+        A = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)))
+        B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)))
+        deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * cos2SigmaM ** 2) - B / 6 * cos2SigmaM * (-3 + 4 * sinSigma ** 2) * (-3 + 4 * cos2SigmaM ** 2)))
+        return round((b * A * (sigma - deltaSigma)) / 1000, 2)
+    except Exception:
+        return 0.0
+
+def obter_coordenadas_e_endereco_oficial(localidade):
     """
-    CAMADA POSTAL - Trata e resolve strings numéricas de CEP diretamente na base dos Correios.
-    Se for um endereço comum ou POI (Ex: Universidade de Brasília), anexa o contexto seguro do DF.
+    CAMADA GEOGRÁFICA INTEROPERÁVEL - Consulta a base do ArcGIS Server.
+    Garante amarração contextual estrita para o Distrito Federal.
     """
-    texto_str = str(localidade_raw).strip()
+    texto_str = str(localidade).strip()
     
-    # Captura padrão de CEP (com ou sem hífen)
+    # Validação e busca de CEP prioritária
     cep_limpo = re.sub(r'\D', '', texto_str)
     if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str):
         try:
-            # Consulta síncrona gratuita e ultraprecisa na API dos Correios
-            resposta = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=5)
-            if resposta.status_code == 200:
-                dados = resposta.json()
-                if "erro" not in dados:
-                    logr = dados.get('logradouro', '').strip()
-                    bair = dados.get('bairro', '').strip()
-                    loca = dados.get('localidade', '').strip()
-                    uf_c = dados.get('uf', '').strip()
-                    
-                    # Se o bairro vier poluído com "Zona Industrial", higieniza para o Google não se perder
-                    if bair.upper() == "ZONA INDUSTRIAL":
-                        bair = "SIG"
-                        
-                    componentes = [logr, bair, loca, uf_c]
-                    endereco_correios = ", ".join([c for c in componentes if c])
-                    return f"{endereco_correios}, Brasil"
+            res_cep = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=5).json()
+            if "erro" not in res_cep:
+                logradouro = res_cep.get('logradouro', '')
+                bairro = res_cep.get('bairro', '')
+                
+                # Tratamento corretivo para evitar falhas de interpretação do bairro 'Zona Industrial'
+                if bairro.upper() == "ZONA INDUSTRIAL":
+                    bairro = "SIG"
+                
+                texto_str = f"{logradouro}, {bairro}, {res_cep['localidade']} - {res_cep['uf']}"
         except Exception:
             pass
 
-    # Se for um endereço textual comum, garante a âncora do Distrito Federal para evitar homônimos fora do estado
+    query = texto_str
+    eh_poi_df = any(token in texto_str.upper() for token in ["UNIVERSIDADE", "UNB", "CATÓLICA", "CATOLICA", "UNICEUB", "TAGUATINGA", "SAMAMBAIA", "PONTE ALTA"])
+    
     if "BRASIL" not in texto_str.upper():
-        if "DF" not in texto_str.upper() and "BRASILIA" not in texto_str.upper() and "BRASÍLIA" not in texto_str.upper():
-            return f"{texto_str}, Brasília, DF, Brasil"
-        return f"{texto_str}, Brasil"
-        
-    return texto_str
+        if eh_poi_df:
+            query = f"{texto_str}, Brasília, DF, Brasil"
+        else:
+            query = f"{texto_str}, Brasil"
+            
+    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA"
+    
+    try:
+        resposta = requests.get(url, timeout=10).json()
+        if resposta.get('candidates'):
+            for candidato in resposta['candidates']:
+                address_out = candidato['address'].upper()
+                
+                if eh_poi_df and "DF" not in address_out and "BRASÍLIA" not in address_out and "BRASILIA" not in address_out:
+                    continue
+                    
+                lat = float(candidato['location']['y'])
+                lon = float(candidato['location']['x'])
+                return lat, lon, texto_str  # Retorna a string do CEP tratada/oficializada para blindar o Google
+            
+            primeiro = resposta['candidates'][0]
+            return float(primeiro['location']['y']), float(primeiro['location']['x']), texto_str
+    except Exception:
+        pass
+    return 0.0, 0.0, texto_str
 
 def calcular_pipeline_logistico(origem, destino):
-    """Pipeline unificado sem intermediários GIS terceiros. Conversão Postal -> Google Maps Direct."""
+    """Pipeline central avançado com injeção contextual de strings e coordenadas"""
+    origem_clean = str(origem).strip()
+    destino_clean = str(destino).strip()
     
-    # 1. Normaliza e busca a string real e detalhada
-    origem_oficial = obter_endereco_oficial_correios(origem)
-    destino_oficial = obter_endereco_oficial_correios(destino)
+    # 1. Resolve o CEP e obtém os endereços oficiais convertidos antes de qualquer processamento
+    dados_geo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
+    dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
-    # 2. Executa a extração direto no motor do Google Maps usando a string limpa
-    dados_reais = extrair_dados_reais_google(origem_oficial, destino_oficial)
+    lat_o, lon_o, origem_oficial = dados_geo_o if dados_geo_o else (0.0, 0.0, origem_clean)
+    lat_d, lon_d, destino_oficial = dados_geo_d if dados_geo_d else (0.0, 0.0, destino_clean)
     
-    if dados_reais and isinstance(dados_reais, tuple) and len(dados_reais) == 4:
-        km_google, tempo_google, link_google, balsa_google = dados_reais
-        
-        # Para preservar o layout e a sua função Vincenty nativa do Excel sem quebrar as colunas,
-        # geramos um valor padrão estável para a "Linha Reta" visto que removemos a dependência do ArcGIS
-        dist_teorica = round(km_google / 1.27, 2)
-        return km_google, tempo_google, link_google, balsa_google, dist_teorica
+    dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d) if (lat_o != 0.0 and lat_d != 0.0) else 0.0
 
-    # FALLBACK OPERACIONAL EM CASO DE INSTABILIDADE DE REDE
-    link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_oficial)}&destination={requests.utils.quote(destino_oficial)}&travelmode=driving"
-    return 0.0, "Recalcular Rota", link_maps_fallback, "Não", 0.0
+    origem_is_poi = any(k in origem_oficial.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
+    destino_is_poi = any(k in destino_oficial.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
+
+    query_o = f"{origem_oficial}, Brasília, DF, Brasil" if (origem_is_poi and "BRASIL" not in origem_oficial.upper()) else origem_oficial
+    query_d = f"{destino_oficial}, Brasília, DF, Brasil" if (destino_is_poi and "BRASIL" not in destino_oficial.upper()) else destino_oficial
+
+    usar_coords = not (origem_is_poi or destino_is_poi)
+    
+    # 2. Envia a query contendo o endereço textual traduzido do CEP direto para o motor do Google
+    dados_reais = extrair_dados_reais_google(query_o, query_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
+    
+    if dados_reais:
+        km_google, tempo_google, link_google, balsa_google = dados_reais
+        return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
+
+    # FALLBACK OPERACIONAL SECUNDÁRIO
+    link_maps_fallback = f"https://www.google.com/maps/dir/{requests.utils.quote(query_o)}/{requests.utils.quote(query_d)}/"
+    km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
+    v_comercial = 65.0 if km_terrestre >= 150 else 45.0
+    minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
+    
+    balsa_fallback = "Não"
+    tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
+    return km_terrestre, tempo_txt, link_maps_fallback, balsa_fallback, dist_linha_reta
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
 st.title("🚗 Gerenciador de Rotas Inteligentes")
@@ -197,8 +274,9 @@ if arquivo_carregado is not None:
             
             with st.expander("1. Engenharia de Funcionamento do Aplicativo"):
                 st.markdown("""
-                Este software implementa um ecossistema de **Engenharia Reversa de Redes** operando em três camadas puras:
+                Este software implementa um ecossistema de **Engenharia Reversa de Redes** operando em quatro camadas:
                 1. **Vetorização de Lote:** Extrai os eixos de texto das células da planilha carregada.
-                2. **Tratamento Postal Dinâmico (ViaCEP Engine):** Intercepta os códigos postais e converte as chaves numéricas em endereços literais oficiais e higienizados.
-                3. **Roteamento Canônico Nativo:** Ignora intermediários GIS e projeta a busca textual rica diretamente nas APIs públicas do Google (`/maps/dir/`), herdando as correções e os barramentos de tráfego em tempo real da maior base de dados de mapas do mundo.
+                2. **Mapeamento de API Viva Interna (Camada A):** Dispara requisições ao endpoint corporativo do Google Maps. Ele herda nativamente a inteligência de busca global do Google, mapeando com exatidão endereços granulares.
+                3. **Tradutor Postal Síncrono:** Intercepta chaves numéricas de CEP e injeta o endereço textual exato fornecido pelas bases dos Correios, tratando exceções de bairros e garantindo precisão em áreas industriais e institucionais.
+                4. **Vincenty Geodésico:** Computa a linha reta teórica perfeita baseada no elipsoide real da Terra (WGS-84).
                 """)
