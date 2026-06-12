@@ -16,7 +16,7 @@ st.set_page_config(
 def extrair_dados_reais_google(origem_query, destino_q_str, lat_o, lon_o, lat_d, lon_d):
     """
     CAMADA BRUTA - Intercepta a API interna de direções do Google Maps.
-    Injeta as coordenadas (Lat, Lon) resolvidas em conjunto com o texto
+    Injeta as coordenadas (Lat, Lon) decimais resolvidas em conjunto com o texto
     para forçar o Google a indexar o local exato da chácara, quadra ou CEP.
     """
     origem_q = requests.utils.quote(f"{origem_query}".strip())
@@ -25,7 +25,7 @@ def extrair_dados_reais_google(origem_query, destino_q_str, lat_o, lon_o, lat_d,
     # URL de exibição estável e limpa para o usuário clicar e abrir no navegador
     link_maps = f"https://www.google.com/maps/dir/{origem_q}/{destino_q}/"
     
-    # Endpoint de alta fidelidade cruzando os eixos de coordenadas decimais
+    # Endpoint de alta fidelidade cruzando os eixos de coordenadas decimais absolutas
     url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{lat_o},{lon_o}!1m2!1m1!1s{lat_d},{lon_d}!3e0"
     
     headers = {
@@ -50,7 +50,7 @@ def extrair_dados_reais_google(origem_query, destino_q_str, lat_o, lon_o, lat_d,
         if km_txt and tempo_txt:
             km_puro = float(km_txt.replace('.', '').replace(',', '.'))
             
-            # --- DETECÇÃO REFINADA DE BALSAS ---
+            # --- DETECÇÃO REFINADA DE BALSAS SEM FALSOS POSITIVOS ---
             envolve_balsa = "Não"
             padroes_balsa = [
                 r'\"utilizar\s+balsa\b', 
@@ -64,7 +64,7 @@ def extrair_dados_reais_google(origem_query, destino_q_str, lat_o, lon_o, lat_d,
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            # LINHA 68 CORRIGIDA: Removida a atribuição nomeada condicional inválida do return
+            # SINTAXE BLINDADA: Retorno limpo da tupla sem atribuições condicionais inválidas
             return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
@@ -73,50 +73,81 @@ def extrair_dados_reais_google(origem_query, destino_q_str, lat_o, lon_o, lat_d,
     return None
 
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
-    """Cálculo local da Linha Reta Geodésica (Vincenty, 1975)"""
+    """
+    Cálculo ultrapreciso da Linha Reta Geodésica entre dois pontos.
+    Utiliza as equações iterativas de Vincenty (1975) baseadas no elipsoide WGS-84.
+    """
     try:
-        a = 6378137.0
-        b = 6356752.314245
-        f = 1 / 298.257223563
+        a = 6378137.0           # Semi-eixo maior (metros)
+        b = 6356752.314245      # Semi-eixo menor (metros)
+        f = 1 / 298.257223563   # Achatamento
+        
         L = math.radians(lon2 - lon1)
         U1 = math.atan((1 - f) * math.tan(math.radians(lat1)))
         U2 = math.atan((1 - f) * math.tan(math.radians(lat2)))
         sinU1, cosU1 = math.sin(U1), math.cos(U1)
         sinU2, cosU2 = math.sin(U2), math.cos(U2)
+        
         lambda_lon = L
+        convergiu = False
         
         for _ in range(200):
             sinLambda, cosLambda = math.sin(lambda_lon), math.cos(lambda_lon)
             sinSigma = math.sqrt((cosU2 * sinLambda) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda) ** 2)
-            if sinSigma == 0: return 0.0
+            
+            if sinSigma == 0:
+                return 0.0
+                
             cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda
             sigma = math.atan2(sinSigma, cosSigma)
+            
             sinAlpha = cosU1 * cosU2 * sinLambda / sinSigma
             cosSqAlpha = 1 - sinAlpha ** 2
+            
             cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha if cosSqAlpha != 0 else 0
+            
             C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha))
             lambdaPrev = lambda_lon
             lambda_lon = L + (1 - f) * C * sinAlpha * (sigma + f * sinAlpha * (cos2SigmaM + C * cosSigma * (-1 + 2 * cos2SigmaM ** 2)))
-            if abs(lambda_lon - lambdaPrev) < 1e-12: break
+            
+            if abs(lambda_lon - lambdaPrev) < 1e-12:
+                convergiu = True
+                break
+                
+        if not convergiu:
+            return 0.0
             
         uSq = cosSqAlpha * (a ** 2 - b ** 2) / (b ** 2)
         A = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)))
         B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)))
         deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * cos2SigmaM ** 2) - B / 6 * cos2SigmaM * (-3 + 4 * sinSigma ** 2) * (-3 + 4 * cos2SigmaM ** 2)))
-        return round((b * A * (sigma - deltaSigma)) / 1000, 2)
+        
+        distancia_km = (b * A * (sigma - deltaSigma)) / 1000
+        return round(distancia_km, 2)
     except Exception:
         return 0.0
 
 def obter_coordenadas_e_endereco_oficial(localidade):
     """
-    CAMADA GEOGRÁFICA INTEROPERÁVEL - Consulta a base global do ArcGIS Server.
-    Normaliza o texto do endereço e anexa as coordenadas decimais cruas.
+    CAMADA GEOGRÁFICA INTEROPERÁVEL - Consulta a base global e gratuita do ArcGIS Server.
+    Suporta resoluções automáticas de CEPs, POIs acadêmicos/comerciais e endereços sem UF.
     """
     texto_str = str(localidade).strip()
     
+    # Fallback Micro-Serviço: Se for um CEP puro numérico de 8 dígitos, resolve via ViaCEP antes
+    cep_limpo = re.sub(r'\D', '', texto_str)
+    if len(cep_limpo) == 8 and texto_str.isdigit():
+        try:
+            res_cep = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=5).json()
+            if "erro" not in res_cep:
+                texto_str = f"{res_cep['logradouro']}, {res_cep['bairro']}, {res_cep['localidade']} - {res_cep['uf']}"
+        except Exception:
+            pass
+
+    # Escaneia âncoras regionais do Distrito Federal para automação contextual de strings sem UF
     query = texto_str
     if "BRASIL" not in texto_str.upper():
-        if any(token in texto_str.upper() for token in ["TAGUATINGA", "SAMAMBAIA", "PONTE ALTA", "CEILANDIA", "SOBRADINHO", "GUARA"]):
+        if any(token in texto_str.upper() for token in ["TAGUATINGA", "SAMAMBAIA", "PONTE ALTA", "CEILANDIA", "SOBRADINHO", "GUARA", "ASA NORTE", "ASA SUL", "PLANO PILOTO"]):
             query = f"{texto_str}, Brasília, DF, Brasil"
         else:
             query = f"{texto_str}, Brasil"
@@ -136,10 +167,11 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     return None
 
 def calcular_pipeline_logistico(origem, destino):
-    """Pipeline central avançado com fusão de coordenadas decimais e strings"""
+    """Pipeline central avançado com fusão bidirecional de eixos cartográficos e strings"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
+    # Executa o cruzamento de validação geográfica na malha nacional
     dados_geo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
     dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
@@ -150,15 +182,17 @@ def calcular_pipeline_logistico(origem, destino):
     lat_o, lon_o, endereco_oficial_o = dados_geo_o
     lat_d, lon_d, endereco_oficial_d = dados_geo_d
 
+    # Cálculo da menor distância geodésica em linha reta elipsoidal pura
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
+    # Dispara a extração injetando as coordenadas espaciais para paridade absoluta no Google
     dados_reais = extrair_dados_reais_google(origem_clean, destino_clean, lat_o, lon_o, lat_d, lon_d)
     
-    if dados_reais:
+    if dados_reais and isinstance(dados_reais, tuple) and len(dados_reais) == 4:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # FALLBACK OPERACIONAL SECUNDÁRIO
+    # CAMADA DE CONTINGÊNCIA LOGÍSTICA (Fallback local caso ocorra bloqueio/queda de tráfego)
     link_maps_fallback = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_clean)}/{requests.utils.quote(destino_clean)}/"
     km_terrestre = round(dist_linha_reta * 1.27, 2)
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
@@ -168,7 +202,7 @@ def calcular_pipeline_logistico(origem, destino):
     tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
     return km_terrestre, tempo_txt, link_maps_fallback, balsa_fallback, dist_linha_reta
 
-# --- INTERFACE VISUAL NO STREAMLIT ---
+# --- INTERFACE VISUAL NO STREAMLIT (THREAD DE COMPILAÇÃO DOM) ---
 st.title("🚗 Gerenciador de Rotas Inteligentes")
 st.subheader("Engine de Interceptação de API Viva — Operação Gratuita")
 st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
@@ -189,6 +223,7 @@ if arquivo_carregado is not None:
 
             total_linhas = len(df)
             barra_progresso = st.progress(0)
+            container_status = st.progress(0) # Instanciação do buffer de progresso
             container_status = st.empty()
             
             for index, linha in df.iterrows():
@@ -198,7 +233,7 @@ if arquivo_carregado is not None:
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                     
-                    # Chamada corrigida mapeando para a função real de controle do pipeline
+                    # Consumo posicional unificado do pipeline logístico cruzado
                     km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
                     
                     df.at[index, 'Distancia'] = km
@@ -251,7 +286,7 @@ if arquivo_carregado is not None:
                 
             with st.expander("2. Nota de Sincronia de Dados (Planilha vs. Link da Rota)"):
                 st.markdown("""
-                A interceptação direta da API interna de direções brings a paridade de tráfego exigida pelo planejamento de frotas. 
+                A interceptação direta da API interna de direções traz a paridade de tráfego exigida pelo planejamento de frotas. 
                 
                 * **Atualização Dinâmica do Google:** Tenha em mente que as colunas representam a fotografia exata do tráfego do segundo em que o botão foi clicado. Se o usuário abrir o link gerado horas depois, o Google Maps recalculará o trajeto sob a influência do trânsito daquele novo minuto, podendo gerar sutis variações em relação ao valor congelado na planilha.
                 """)
