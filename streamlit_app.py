@@ -23,7 +23,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         origem_param = f"{lat_o},{lon_o}"
         destino_param = f"{lat_d},{lon_d}"
         url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
-        # CORREÇÃO CRÍTICA: Link canônico oficial do Google Maps parametrizado por Geo-Coordenadas
+        # URL oficial e canônica do Google Maps usando parâmetros universais de latitude/longitude
         link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}"
     else:
         origem_enc = requests.utils.quote(f"{origem_raw}".strip())
@@ -67,7 +67,8 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps,定位=envolve_balsa if '定位' in locals() else envolve_balsa
+            # LINHA 70 TOTALMENTE CORRIGIDA: Retorno purificado da tupla sem atribuições ou lixos de digitação
+            return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
         pass
@@ -185,7 +186,7 @@ def calcular_pipeline_logistico(origem, destino):
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
     minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
     
-    # Formata fallback dinâmico de link com a URL estável paramétrica
+    # Formata fallback dinâmico usando a nova URL canônica estruturada
     if usar_coords and lat_o and lon_o and lat_d and lon_d:
         link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={lat_o},{lon_o}&destination={lat_d},{lon_d}"
     else:
