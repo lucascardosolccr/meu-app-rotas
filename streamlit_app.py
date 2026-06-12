@@ -16,14 +16,13 @@ st.set_page_config(
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=True):
     """
     CAMADA BRUTA - Intercepta a API interna de direções do Google Maps.
-    Converte CEPs e endereços em coordenadas para a API de trânsito interna,
-    e estrutura um link de navegação canônico e infalível para o front-end do usuário.
+    Estrutura um link de navegação canônico baseado nas strings de endereços
+    oficiais validadas para garantir que o mapa abra no local correto.
     """
     if usar_coordenadas and lat_o and lon_o and lat_d and lon_d:
         origem_param = f"{lat_o},{lon_o}"
         destino_param = f"{lat_d},{lon_d}"
         url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
-        # URL oficial e canônica do Google Maps usando parâmetros universais de latitude/longitude
         link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}"
     else:
         origem_enc = requests.utils.quote(f"{origem_raw}".strip())
@@ -67,7 +66,6 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            # LINHA 70 TOTALMENTE CORRIGIDA: Retorno purificado da tupla sem atribuições ou lixos de digitação
             return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
@@ -112,22 +110,25 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
 
 def obter_coordenadas_e_endereco_oficial(localidade):
     """
-    CAMADA GEOGRÁFICA INTEROPERÁVEL - Consulta a base do ArcGIS Server.
-    Garante amarração contextual estrita para o Distrito Federal.
+    CAMADA GEOGRÁFICA INTEROPERÁVEL - Validação cruzada ViaCEP + ArcGIS Server.
+    Desfaz colisões textuais de homônimos (como a Rua das Figueiras da Ponte Alta vs Águas Claras).
     """
     texto_str = str(localidade).strip()
     
+    # 1. Isolamento Estrito de CEP: força a conversão do CEP para a string estruturada oficial dos Correios
     cep_limpo = re.sub(r'\D', '', texto_str)
-    if len(cep_limpo) == 8 and texto_str.isdigit():
+    if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str):
         try:
             res_cep = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=5).json()
             if "erro" not in res_cep:
-                texto_str = f"{res_cep['logradouro']}, {res_cep['bairro']}, {res_cep['localidade']} - {res_cep['uf']}"
+                # Monta a string explícita injetando o bairro e a cidade real para evitar desvios geográficos
+                texto_str = f"{res_cep['logradouro']}, {res_cep['bairro']}, {res_cep['localidade']} - {res_cep['uf']}, {res_cep['cep']}"
         except Exception:
             pass
 
+    # 2. Injeção de âncoras para contextualização regional
     query = texto_str
-    eh_poi_df = any(token in texto_str.upper() for token in ["UNIVERSIDADE", "UNB", "CATÓLICA", "CATOLICA", "UNICEUB", "TAGUATINGA", "SAMAMBAIA", "PONTE ALTA"])
+    eh_poi_df = any(token in texto_str.upper() for token in ["UNIVERSIDADE", "UNB", "CATÓLICA", "CATOLICA", "UNICEUB", "TAGUATINGA", "SAMAMBAIA", "PONTE ALTA", "GAMA"])
     
     if "BRASIL" not in texto_str.upper():
         if eh_poi_df:
@@ -143,15 +144,16 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             for candidato in resposta['candidates']:
                 address_out = candidato['address'].upper()
                 
+                # Bloqueio de vazamento de estado
                 if eh_poi_df and "DF" not in address_out and "BRASÍLIA" not in address_out and "BRASILIA" not in address_out:
                     continue
                     
                 lat = float(candidato['location']['y'])
                 lon = float(candidato['location']['x'])
-                return lat, lon, candidato['address']
+                return lat, lon, texto_str  # Retorna o endereço estruturado resolvido pelo ViaCEP para manter a fidelidade
             
             primeiro = resposta['candidates'][0]
-            return float(primeiro['location']['y']), float(primeiro['location']['x']), primeiro['address']
+            return float(primeiro['location']['y']), float(primeiro['location']['x']), texto_str
     except Exception:
         pass
     return None
@@ -167,15 +169,16 @@ def calcular_pipeline_logistico(origem, destino):
     dados_geo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
     dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
-    lat_o, lon_o = (dados_geo_o[0], dados_geo_o[1]) if dados_geo_o else (0.0, 0.0)
-    lat_d, lon_d = (dados_geo_d[0], dados_geo_d[1]) if dados_geo_d else (0.0, 0.0)
+    lat_o, lon_o, addr_oficial_o = dados_geo_o if dados_geo_o else (0.0, 0.0, origem_clean)
+    lat_d, lon_d, addr_oficial_d = dados_geo_d if dados_geo_d else (0.0, 0.0, destino_clean)
+    
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d) if (lat_o != 0.0 and lat_d != 0.0) else 0.0
 
-    query_o = f"{origem_clean}, Brasília, DF, Brasil" if (origem_is_poi and "BRASIL" not in origem_clean.upper()) else origem_clean
-    query_d = f"{destino_clean}, Brasília, DF, Brasil" if (destino_is_poi and "BRASIL" not in destino_clean.upper()) else destino_clean
-
+    # Determina o uso de coordenadas ou texto estruturado na busca final do Google
     usar_coords = not (origem_is_poi or destino_is_poi)
-    dados_reais = extrair_dados_reais_google(query_o, query_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
+    
+    # Se o endereço passou pelo ViaCEP/ArcGIS, passamos a string limpa e oficial para o motor de busca do Google
+    dados_reais = extrair_dados_reais_google(addr_oficial_o, addr_oficial_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
@@ -186,11 +189,10 @@ def calcular_pipeline_logistico(origem, destino):
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
     minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
     
-    # Formata fallback dinâmico usando a nova URL canônica estruturada
     if usar_coords and lat_o and lon_o and lat_d and lon_d:
         link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={lat_o},{lon_o}&destination={lat_d},{lon_d}"
     else:
-        link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(query_o)}&destination={requests.utils.quote(query_d)}"
+        link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(addr_oficial_o)}&destination={requests.utils.quote(addr_oficial_d)}"
         
     balsa_fallback = "Não"
     tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
