@@ -16,12 +16,13 @@ st.set_page_config(
 def extrair_dados_reais_google(origem, destino):
     """
     CAMADA BRUTA - Intercepta a API interna de direções assíncronas do Google.
-    Bula o HTML estático puxando a matriz de texto do próprio servidor de tráfego.
+    Puxa a matriz de texto do próprio servidor de tráfego em tempo real.
+    Suporta CEPs, endereços estruturados completos e nomes de estabelecimentos.
     """
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # URL de exibição para o usuário clicar
+    # URL de exibição estável para o usuário clicar
     link_maps = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_clean)}/{requests.utils.quote(destino_clean)}/"
     
     # Endpoint da API oculta do Google que cospe o JSON estruturado de tráfego direto
@@ -44,17 +45,24 @@ def extrair_dados_reais_google(origem, destino):
         regex_tempo = r'\"(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)\"'
         match_tempo = re.findall(regex_tempo, texto_resposta)
         
-        # Filtra os primeiros resultados válidos da matriz do Google Preview
         km_txt = match_km[0] if match_km else ""
         tempo_txt = match_tempo[0] if match_tempo else ""
         
         if km_txt and tempo_txt:
-            # Converte a string de KM em float puro para a planilha (ex: "18,4" -> 18.4)
             km_puro = float(km_txt.replace('.', '').replace(',', '.'))
             
-            # Varre o dump para checar se a rota envolve balsa (ferry)
+            # --- DETECÇÃO REFINADA DE BALSAS SEM FALSOS POSITIVOS ---
             envolve_balsa = "Não"
-            if any(token in texto_resposta.lower() for token in ["balsa", "travessia", "ferry"]):
+            padroes_balsa = [
+                r'\"utilizar\s+balsa\b', 
+                r'\"pegar\s+balsa\b', 
+                r'\"travessia\s+de\s+balsa\b', 
+                r'\"balsa\s+de\s+veículos\b',
+                r'\"ferry\b',
+                r'\"travessia\s+por\s+balsa\b'
+            ]
+            
+            if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
             return km_puro, tempo_txt, link_maps, envolve_balsa
@@ -65,74 +73,63 @@ def extrair_dados_reais_google(origem, destino):
     return None
 
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
-    """
-    Cálculo ultrapreciso da Linha Reta Geodésica entre dois pontos.
-    Utiliza as equações iterativas de Vincenty (1975) baseadas no elipsoide WGS-84.
-    """
+    """Cálculo local da Linha Reta Geodésica baseada no elipsoide real (Vincenty, 1975)"""
     try:
-        # Constantes oficiais do elipsoide WGS-84
-        a = 6378137.0           # Semi-eixo maior (metros)
-        b = 6356752.314245      # Semi-eixo menor (metros)
-        f = 1 / 298.257223563   # Achatamento
-        
+        a = 6378137.0
+        b = 6356752.314245
+        f = 1 / 298.257223563
         L = math.radians(lon2 - lon1)
         U1 = math.atan((1 - f) * math.tan(math.radians(lat1)))
         U2 = math.atan((1 - f) * math.tan(math.radians(lat2)))
         sinU1, cosU1 = math.sin(U1), math.cos(U1)
         sinU2, cosU2 = math.sin(U2), math.cos(U2)
-        
         lambda_lon = L
-        convergiu = False
         
-        # Processamento iterativo de alta convergência angular para exatidão milimétrica
         for _ in range(200):
             sinLambda, cosLambda = math.sin(lambda_lon), math.cos(lambda_lon)
             sinSigma = math.sqrt((cosU2 * sinLambda) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda) ** 2)
-            
-            if sinSigma == 0:
-                return 0.0  # Pontos idênticos ou antipodais
-                
+            if sinSigma == 0: return 0.0
             cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda
             sigma = math.atan2(sinSigma, cosSigma)
-            
             sinAlpha = cosU1 * cosU2 * sinLambda / sinSigma
             cosSqAlpha = 1 - sinAlpha ** 2
-            
-            # Prevenção de divisão por zero na linha do equador
             cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha if cosSqAlpha != 0 else 0
-            
             C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha))
             lambdaPrev = lambda_lon
             lambda_lon = L + (1 - f) * C * sinAlpha * (sigma + f * sinAlpha * (cos2SigmaM + C * cosSigma * (-1 + 2 * cos2SigmaM ** 2)))
-            
-            # Tolerância de convergência de nível geodésico militar (1e-12)
-            if abs(lambda_lon - lambdaPrev) < 1e-12:
-                convergiu = True
-                break
-                
-        if not convergiu:
-            return 0.0  # Falha de convergência matemática
+            if abs(lambda_lon - lambdaPrev) < 1e-12: break
             
         uSq = cosSqAlpha * (a ** 2 - b ** 2) / (b ** 2)
         A = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)))
         B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)))
         deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * cos2SigmaM ** 2) - B / 6 * cos2SigmaM * (-3 + 4 * sinSigma ** 2) * (-3 + 4 * cos2SigmaM ** 2)))
-        
-        distancia_km = (b * A * (sigma - deltaSigma)) / 1000
-        return round(distancia_km, 2)
+        return round((b * A * (sigma - deltaSigma)) / 1000, 2)
     except Exception:
         return 0.0
 
 def decodificar_localidade_brazil(texto):
     """
-    Filtro de Strings Flexível para capturar a UF das células.
-    Se o endereço for complexo, fragmentado ou um POI, preserva-o por inteiro.
+    Filtro de Strings Flexível e Adaptativo.
+    Se detectar estruturas urbanas, CEPs, quadras ou POIs, preserva o endereço
+    completo intacto para a API de geocodificação resolver.
     """
     texto_str = str(texto).strip()
+    
+    # Captura a UF se ela existir isolada no texto
     match_uf = re.search(r'\b([A-Z]{2})\b', texto_str)
     uf = match_uf.group(1) if match_uf else ""
     
-    if ',' not in texto_str or any(p in texto_str.upper() for p in ['QR ', 'QNL ', 'CONJUNTO', 'CHÁCARA', 'CHACARA', 'UNIVERSIDADE', 'UNICEUB', 'CAMPUS']):
+    # Lista expansível de padrões de endereços e CEPs comuns
+    padroes_complexos = [
+        r'\b\d{5}-\d{3}\b', r'\b\d{8}\b', r'\bQR\b', r'\bQNL\b', r'\bQNJ\b', 
+        r'\bQNM\b', r'\bCONJUNTO\b', r'\bCONJ\b', r'\bCHÁCARA\b', r'\bCHACARA\b', 
+        r'\bUNIVERSIDADE\b', r'\bUNB\b', r'\bUNICEUB\b', r'\bCAMPUS\b', r'\bRUA\b', 
+        r'\bAVENIDA\b', r'\bAV\b', r'\bLOTE\b', r'\bQUADRA\b', r'\bQD\b'
+    ]
+    
+    contem_padrao_complexo = any(re.search(p, texto_str.upper()) for p in padroes_complexos)
+    
+    if ',' not in texto_str or contem_padrao_complexo:
         nome_municipio = texto_str
     else:
         nome_municipio = texto_str.split(',')[0].strip()
@@ -142,8 +139,8 @@ def decodificar_localidade_brazil(texto):
 
 def geocode_ibge_geonames(localidade):
     """
-    Geocodificador universal tolerante a CEPs, chácaras e POIs (ArcGIS Server).
-    Garante suporte para buscas sem a indicação explícita do estado.
+    Geocodificador universal tolerante a CEPs, chácaras, estabelecimentos e POIs (ArcGIS Server).
+    Injeta Geofence nacional automática se o texto não contiver indicações de país.
     """
     municipio, uf = decodificar_localidade_brazil(localidade)
     
@@ -174,7 +171,7 @@ def calcular_pipeline_logistico(origem, destino):
     destino_clean = str(destino).strip()
     link_maps_fallback = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_clean)}/{requests.utils.quote(destino_clean)}/"
 
-    # Linha reta geodésica analítica executada com precisão refinada de Vincenty
+    # Linha reta geodésica analítica sempre executada para fins de auditoria
     coords_o = geocode_ibge_geonames(origem_clean)
     coords_d = geocode_ibge_geonames(destino_clean)
     dist_linha_reta = calcular_distancia_vincenty(coords_o[0], coords_o[1], coords_d[0], coords_d[1]) if coords_o and coords_d else 0.0
@@ -193,7 +190,7 @@ def calcular_pipeline_logistico(origem, destino):
     balsa_fallback = "Não"
     is_norte = any(uf in origem_clean.upper() or uf in destino_clean.upper() for uf in ["PA", "AM", "AP", "RO", "RR", "AC"])
     if is_norte and (km_terrestre < 120 and dist_linha_reta > 20 and (km_terrestre / dist_linha_reta) < 1.10):
-        minutos = 2940  
+        minutos = 2940  # Segurança para bacias isoladas (49 h)
         km_terrestre = 85.84
         balsa_fallback = "Sim"
 
@@ -227,18 +224,11 @@ if arquivo_carregado is not None:
                 origem = str(linha['Origem']).strip()
                 destino = str(linha['Destino']).strip()
                 
-                if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
+                if json_check := (origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan'):
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                     
-                    km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino) if 'calcular_pipeline_logistico' in globals() else calcular_pipeline_logistico(origem, destino) if 'calcular_pipeline_logistico' in locals() else (0.0, "", "", "Não", 0.0)
-                    
-                    # Garantia de fallback dinâmico para mapeamento de função local
-                    if km == 0.0 and tempo == "":
-                        km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino) if 'calcular_pipeline_logistico' in globals() else calcular_pipeline_logistico(origem, destino) if 'calcular_pipeline_logistico' in locals() else (0.0, "", "", "Não", 0.0)
-                    try:
-                        km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
-                    except NameError:
-                        km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
+                    # Chamada direta e limpa da função unificada do pipeline logístico
+                    km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
                     
                     df.at[index, 'Distancia'] = km
                     df.at[index, 'Tempo'] = tempo
