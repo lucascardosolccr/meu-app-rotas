@@ -99,11 +99,11 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
 def geocodificar_e_padronizar_universal(localidade_raw):
     """
     CAMADA GEOGRÁFICA UNIVERSAL - Converte a entrada informal ou postal
-    no endereço completo e estruturado da malha cartográfica planetária.
+    no endereço completo e estruturado, amarrando estritamente ao CEP original.
     """
     texto_str = str(localidade_raw).strip()
     
-    # 1. VALIDAÇÃO POSTAL PRIORITÁRIA (ViaCEP)
+    # 1. VALIDAÇÃO POSTAL PRIORITÁRIA (ViaCEP) com higienização estrita
     cep_limpo = re.sub(r'\D', '', texto_str)
     if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str):
         try:
@@ -113,25 +113,33 @@ def geocodificar_e_padronizar_universal(localidade_raw):
                 bair = res_cep.get('bairro', '').strip()
                 loca = res_cep.get('localidade', '').strip()
                 uf_c = res_cep.get('uf', '').strip()
-                cep_c = res_cep.get('cep', '').strip()
                 
-                # Reconstrói a string com a base postal intocável dos Correios
+                # Trata strings do DF que vem poluídas com nomenclaturas que confundem o ArcGIS/Google
+                if bair.upper() == "ZONA INDUSTRIAL":
+                    bair = "SIG"
+                
+                # Monta a query com o endereço estruturado + o CEP explícito para amarrar o local
                 componentes_cep = [logr, bair, loca, uf_c]
-                texto_str = ", ".join([c for c in componentes_cep if c])
-                if cep_c:
-                    texto_str += f", {cep_c}"
+                endereco_formatado = ", ".join([c for c in componentes_cep if c])
                 
-                # Se for CEP, o endereço gerado aqui é soberano e retorna imediatamente com coordenadas
-                query_cep = f"{texto_str}, Brasil"
-                url_cep = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query_cep)}&maxLocations=1&sourceCountry=BRA"
+                # Fazemos a busca geográfica travando o CEP na query e limitando para 1 único resultado relevante
+                query_cep = f"{endereco_formatado}, CEP {cep_limpo}, Brasil"
+                url_cep = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query_cep)}&maxLocations=1&sourceCountry=BRA&outFields=*"
+                
                 resposta_cep = requests.get(url_cep, timeout=10).json()
                 if resposta_cep.get('candidates'):
-                    pt = resposta_cep['candidates'][0]['location']
-                    return float(pt['y']), float(pt['x']), texto_str
+                    candidato = resposta_cep['candidates'][0]
+                    lat = float(candidato['location']['y'])
+                    lon = float(candidato['location']['x'])
+                    # Retorna a string limpa do ViaCEP combinada com o CEP correto
+                    return lat, lon, f"{endereco_formatado}, CEP {cep_limpo}"
+                
+                # Fallback caso o ArcGIS falhe em geocodificar o endereço do ViaCEP
+                return 0.0, 0.0, f"{endereco_formatado}, CEP {cep_limpo}"
         except Exception:
             pass
 
-    # 2. SE NÃO FOR CEP: RESOLUÇÃO POR ATRIBUTOS ESTENDIDOS NO ARCGIS
+    # 2. SE NÃO FOR CEP: RESOLUÇÃO TRADICIONAL POR ATRIBUTOS NO ARCGIS
     query = texto_str if "BRASIL" in texto_str.upper() else f"{texto_str}, Brasil"
     url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA&outFields=*"
     
@@ -149,7 +157,6 @@ def geocodificar_e_padronizar_universal(localidade_raw):
             estado_arc = atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()
             cep_postal_arc = atributos.get('Postal', '').strip()
             
-            # Se possuir logradouro rico, monta o endereço detalhado completo
             if logradouro_arc and len(logradouro_arc.split()) > 1:
                 componentes = [logradouro_arc, bairro_arc, cidade_arc, estado_arc]
                 endereco_reconstruido = ", ".join([c for c in componentes if c])
@@ -176,7 +183,7 @@ def calcular_pipeline_logistico(origem_bruta, destino_bruto):
 
     dados_reais = extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
-    # LINKS DE DIRETRIZES CANÔNICAS (Garante a plotagem exata do trajeto com endereços completos)
+    # LINKS DE DIRETRIZES CANÔNICAS BASEADAS NAS STRINGS HIGIENIZADAS E CERTIFICADAS
     link_maps_canonico = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_oficial)}&destination={requests.utils.quote(destino_oficial)}&travelmode=driving"
     
     if dados_reais and isinstance(dados_reais, tuple):
