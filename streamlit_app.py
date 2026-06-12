@@ -19,7 +19,6 @@ def extrair_dados_reais_google(origem_query, destino_q_str, lat_o, lon_o, lat_d,
     Injeta as coordenadas (Lat, Lon) resolvidas em conjunto com o texto
     para forçar o Google a indexar o local exato da chácara, quadra ou CEP.
     """
-    # Formata a query forçando o posicionamento geoespacial absoluto no mapa
     origem_q = requests.utils.quote(f"{origem_query}".strip())
     destino_q = requests.utils.quote(f"{destino_q_str}".strip())
     
@@ -65,7 +64,8 @@ def extrair_dados_reais_google(origem_query, destino_q_str, lat_o, lon_o, lat_d,
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps, json_check=envolve_balsa if 'json_check' in locals() else envolve_balsa
+            # LINHA 68 CORRIGIDA: Removida a atribuição nomeada condicional inválida do return
+            return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
         pass
@@ -114,7 +114,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     """
     texto_str = str(localidade).strip()
     
-    # Adiciona contexto regional do DF automaticamente para mitigar omissões de estado
     query = texto_str
     if "BRASIL" not in texto_str.upper():
         if any(token in texto_str.upper() for token in ["TAGUATINGA", "SAMAMBAIA", "PONTE ALTA", "CEILANDIA", "SOBRADINHO", "GUARA"]):
@@ -141,7 +140,6 @@ def calcular_pipeline_logistico(origem, destino):
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Cruzamento na base de dados geográficos
     dados_geo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
     dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
@@ -152,10 +150,8 @@ def calcular_pipeline_logistico(origem, destino):
     lat_o, lon_o, endereco_oficial_o = dados_geo_o
     lat_d, lon_d, endereco_oficial_d = dados_geo_d
 
-    # Cálculo preciso da Linha Reta Geodésica via Vincenty
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
-    # Executa a extração fundindo as strings de entrada com o mapa de coordenadas resolvido
     dados_reais = extrair_dados_reais_google(origem_clean, destino_clean, lat_o, lon_o, lat_d, lon_d)
     
     if dados_reais:
@@ -202,7 +198,7 @@ if arquivo_carregado is not None:
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                     
-                    # Consumo do pipeline cruzado adaptativo
+                    # Chamada corrigida mapeando para a função real de controle do pipeline
                     km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
                     
                     df.at[index, 'Distancia'] = km
@@ -255,7 +251,7 @@ if arquivo_carregado is not None:
                 
             with st.expander("2. Nota de Sincronia de Dados (Planilha vs. Link da Rota)"):
                 st.markdown("""
-                A interceptação direta da API interna de direções traz a paridade de tráfego exigida pelo planejamento de frotas. 
+                A interceptação direta da API interna de direções brings a paridade de tráfego exigida pelo planejamento de frotas. 
                 
                 * **Atualização Dinâmica do Google:** Tenha em mente que as colunas representam a fotografia exata do tráfego do segundo em que o botão foi clicado. Se o usuário abrir o link gerado horas depois, o Google Maps recalculará o trajeto sob a influência do trânsito daquele novo minuto, podendo gerar sutis variações em relação ao valor congelado na planilha.
                 """)
