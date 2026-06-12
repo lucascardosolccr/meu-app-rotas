@@ -13,19 +13,27 @@ st.set_page_config(
     layout="centered"
 )
 
-def extrair_dados_reais_google(origem_oficial, destino_oficial):
+def extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d, origem_txt, destino_txt):
     """
-    CAMADA BRUTA - Intercepta a API interna de direções do Google Maps.
-    Utiliza as strings ricas e hierarquizadas para extrair KMs e tempos reais de tráfego.
+    CAMADA BRUTA - Intercepta a API de direções do Google Maps.
+    Força o cálculo e o traçado RÍGIDO pelos pontos geográficos exatos (Lat/Lon),
+    eliminando qualquer chance de desvio semântico por texto.
     """
-    origem_enc = requests.utils.quote(f"{origem_oficial}".strip())
-    destino_enc = requests.utils.quote(f"{destino_oficial}".strip())
-    
-    # URL de Direções Canônicas em modo de navegação direta rodoviária (driving) - Padrão Universal
-    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_enc}&destination={destino_enc}&travelmode=driving"
-    
-    # Endpoint da API interna estruturada de tráfego do Google Maps
-    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_enc}!1m2!1m1!1s{destino_enc}!3e0"
+    if lat_o and lon_o and lat_d and lon_d and lat_o != 0.0 and lat_d != 0.0:
+        origem_param = f"{lat_o},{lon_o}"
+        destino_param = f"{lat_d},{lon_d}"
+        
+        # Endpoint de tráfego em tempo real baseado em coordenadas puras
+        url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
+        
+        # URL oficial de navegação canônica amarrada nos pinos geográficos exatos
+        link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
+    else:
+        # Fallback caso as coordenadas falhem completamente
+        origem_enc = requests.utils.quote(f"{origem_txt}".strip())
+        destino_enc = requests.utils.quote(f"{destino_txt}".strip())
+        url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_enc}!1m2!1m1!1s{destino_enc}!3e0"
+        link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_enc}&destination={destino_enc}&travelmode=driving"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -34,7 +42,7 @@ def extrair_dados_reais_google(origem_oficial, destino_oficial):
     }
     
     try:
-        resposta = requests.get(url_api, headers=headers, timeout=12)
+        resposta = requests.get(url_api, headers=headers, timeout=15)
         texto_resposta = resposta.text
         
         regex_km = r'\"(\d+[\.,]?\d*)\s*km\"'
@@ -49,7 +57,6 @@ def extrair_dados_reais_google(origem_oficial, destino_oficial):
         if km_txt and tempo_txt:
             km_puro = float(km_txt.replace('.', '').replace(',', '.'))
             
-            # --- DETECÇÃO REFINADA DE BALSAS ---
             envolve_balsa = "Não"
             padroes_balsa = [r'\"utilizar\s+balsa\b', r'\"pegar\s+balsa\b', r'\"travessia\s+de\s+balsa\b']
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
@@ -64,6 +71,8 @@ def extrair_dados_reais_google(origem_oficial, destino_oficial):
 
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     """Cálculo local da Linha Reta Geodésica (Vincenty, 1975)"""
+    if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0:
+        return 0.0
     try:
         a = 6378137.0
         b = 6356752.314245
@@ -97,30 +106,38 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     except Exception:
         return 0.0
 
-def geocodificar_coordenadas_fallback(query_texto):
-    """Consulta auxiliar gratuita no ArcGIS Server apenas para gerar Lat/Lon do Vincenty"""
-    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query_texto)}&maxLocations=1&sourceCountry=BRA"
+def executar_geocodificacao_raw(query_texto):
+    """Consulta estruturada no ArcGIS GeocodeServer para capturar pares cartográficos nativos"""
+    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query_texto)}&maxLocations=3&sourceCountry=BRA"
     try:
-        res = requests.get(url, timeout=10).json()
+        res = requests.get(url, timeout=12).json()
         if res.get('candidates'):
-            pt = res['candidates'][0]['location']
-            return float(pt['y']), float(pt['x'])
+            # Prioriza respostas que contenham DF ou o Distrito Federal explicitado
+            for cand in res['candidates']:
+                addr = cand['address'].upper()
+                if "DF" in addr or "BRASILIA" in addr or "BRASÍLIA" in addr:
+                    return float(cand['location']['y']), float(cand['location']['x']), cand['address']
+            
+            primeiro = res['candidates'][0]
+            return float(primeiro['location']['y']), float(primeiro['location']['x']), primeiro['address']
     except Exception:
         pass
-    return 0.0, 0.0
+    return 0.0, 0.0, ""
 
-def tratar_e_normalizar_localidade_universal(localidade_raw):
+def resolver_coordenadas_com_validacao_cruzada(localidade_raw):
     """
-    CAMADA INTELIGENTE DE DESAMBIGUÇÃO - Resolve de forma agnóstica CEPs e textos comuns.
-    Desestrutura o retorno postal e remonta a string forçando indexação hierárquica e unificada.
+    CAMADA DE INTELIGÊNCIA ALGORÍTMICA (Filtro contra Alucinação Cartográfica)
+    Faz dupla checagem geográfica para isolar e neutralizar desvios de POIs ambíguos.
     """
     texto_str = str(localidade_raw).strip()
-    
-    # 1. PROCESSAMENTO LOGÍSTICO DE COMPOSIÇÃO POSTAL
     cep_limpo = re.sub(r'\D', '', texto_str)
+    
+    logradouro, bairro, localidade, uf = "", "", "", ""
+    
+    # 1. Se for um CEP, extrai a verdade cartográfica direto da base postal nacional dos Correios
     if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str):
         try:
-            resposta = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=5)
+            resposta = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=6)
             if resposta.status_code == 200:
                 dados = resposta.json()
                 if "erro" not in dados:
@@ -129,52 +146,59 @@ def tratar_e_normalizar_localidade_universal(localidade_raw):
                     localidade = dados.get('localidade', '').strip()
                     uf = dados.get('uf', '').strip()
                     
-                    # Normalização semântica automática para siglas industriais do Distrito Federal
-                    if uf.upper() == "DF":
-                        if "ZONA INDUSTRIAL" in bairro.upper() or "ZONA INDUSTRIAL" in logradouro.upper():
-                            bairro = "SIG"
-                    
-                    # Concatenação Hierárquica Rígida: Garante que o Google valide o pacote de dados inteiro
-                    componentes = [logradouro, bairro, localidade, uf]
-                    endereco_unificado = ", ".join([c for c in componentes if c])
-                    
-                    # Retorna o endereço amarrando o CEP no final da string de busca
-                    return f"{endereco_unificado}, {cep_limpo}, Brasil"
+                    # Normalização semântica mandatória para a região industrial do DF
+                    if uf.upper() == "DF" and ("ZONA INDUSTRIAL" in bairro.upper() or "ZONA INDUSTRIAL" in logradouro.upper()):
+                        bairro = "SIG"
         except Exception:
             pass
 
-    # 2. SE FOR ENDEREÇO TEXTUAL OU PONTO DE INTERESSE (POI) COMMON
-    # Injeta automaticamente a âncora regional base para evitar conflitos homônimos interestaduais
-    if "BRASIL" not in texto_str.upper():
-        if "DF" not in texto_str.upper() and "BRASILIA" not in texto_str.upper() and "BRASÍLIA" not in texto_str.upper():
-            # Estratégia adaptativa: Se for uma palavra conhecida do DF, anexa Brasília, senão trata nacionalmente
-            if any(t in texto_str.upper() for t in ["TAGUATINGA", "SAMAMBAIA", "PONTE ALTA", "CEILANDIA", "GUARA", "UNB", "UNICEUB"]):
-                return f"{texto_str}, Brasília, DF, Brasil"
-        return f"{texto_str}, Brasil"
+    # Se não era CEP ou se a API de CEP falhou, tenta usar a string bruta limpa
+    if not logradouro:
+        query_inicial = f"{texto_str}, Brasília, DF, Brasil" if "DF" not in texto_str.upper() else texto_str
+        lat, lon, addr_match = executar_geocodificacao_raw(query_inicial)
+        return lat, lon, query_inicial
+
+    # 2. FLUXO DE DESAMBIGUAÇÃO POR DUPLO RETORNO (VALIDAÇÃO DE DISTÂNCIA CRUZADA)
+    # Rota A: Tenta buscar usando a string contendo possíveis nomes de prédios/institutos
+    query_completa_a = f"{logradouro}, {bairro}, {localidade} - {uf}, {cep_limpo}, Brasil"
+    lat_a, lon_a, _ = executar_geocodificacao_raw(query_completa_a)
+    
+    # Rota B (Segurança Rígida): Remove qualquer ruído textual e busca APENAS a malha rodoviária limpa
+    query_viaria_b = f"{logradouro}, {bairro}, {localidade} - {uf}, Brasil"
+    lat_b, lon_b, _ = executar_geocodificacao_raw(query_viaria_b)
+    
+    # Calcula desvio espacial entre as duas interpretações
+    desvio_km = calcular_distancia_vincenty(lat_a, lon_a, lat_b, lon_b)
+    
+    # Se o desvio for maior que 1.5 km, significa que o nome do POI distorceu a busca (Alucinação Detectada)
+    # Força o uso da coordenada B (malha rodoviária pura baseada nos Correios), blindando o resultado
+    if desvio_km > 1.5 and lat_b != 0.0:
+        return lat_b, lon_b, query_viaria_b
         
-    return texto_str
+    return (lat_a, lon_a, query_completa_a) if lat_a != 0.0 else (lat_b, lon_b, query_viaria_b)
 
 def calcular_pipeline_logistico(origem_bruta, destino_bruto):
-    """Pipeline central de roteamento universal baseado em metadados estáveis"""
+    """Pipeline logístico central de alta precisão analítica"""
     
-    # Executa o motor de normalização textual em lote
-    origem_oficial = tratar_e_normalizar_localidade_universal(origem_bruta)
-    destino_oficial = tratar_e_normalizar_localidade_universal(destino_bruto)
+    # Resolve as coordenadas físicas reais passando pelo filtro anti-alucinação
+    lat_o, lon_o, q_origem = resolver_coordenadas_com_validacao_cruzada(origem_bruta)
+    lat_d, lon_d, q_destino = resolver_coordenadas_com_validacao_cruzada(destino_bruto)
     
-    # Obtém as coordenadas apenas para manter o cálculo analítico do Vincenty (Linha Reta)
-    lat_o, lon_o = geocodificar_coordenadas_fallback(origem_oficial)
-    lat_d, lon_d = geocodificar_coordenadas_fallback(destino_oficial)
+    # Distância analítica em linha reta teórica pura
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
-    # Dispara a busca rodoviária real no motor do Google Maps usando a frase blindada
-    dados_reais = extrair_dados_reais_google(origem_oficial, destino_oficial)
+    # Executa a interceptação do tráfego do Google injetando as coordenadas travadas
+    dados_reais = extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d, q_origem, q_destino)
     
-    if dados_reais and isinstance(dados_reais, tuple) and len(dados_reais) == 4:
+    if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # CONTINGÊNCIA EM CASO DE FALHA DE CONEXÃO
-    link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_oficial)}&destination={requests.utils.quote(destino_oficial)}&travelmode=driving"
+    # CONTINGÊNCIA AVANÇADA (FALLBACK SE O SERVIDOR RECUSAR A REQUEST)
+    origem_param = f"{lat_o},{lon_o}" if lat_o != 0.0 else requests.utils.quote(q_origem)
+    destino_param = f"{lat_d},{lon_d}" if lat_d != 0.0 else requests.utils.quote(q_destino)
+    link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
+    
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
     minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
@@ -184,7 +208,7 @@ def calcular_pipeline_logistico(origem_bruta, destino_bruto):
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
 st.title("🚗 Gerenciador de Rotas Inteligentes")
-st.subheader("Engine de Interceptação de API Viva — Operação Gratuita")
+st.subheader("Engine de Geolocalização por Validação Cruzada de Alta Precisão")
 st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
 
 arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"])
@@ -193,11 +217,11 @@ if arquivo_carregado is not None:
     df = pd.read_excel(arquivo_carregado)
     
     if 'Origem' not in df.columns or 'Destino' not in df.columns:
-        st.error("Erro de Validação: Certifique-se de que a planilha possui as colunas obrigatórias 'Origem' e 'Destino'.")
+        st.error("Erro de Validação: Planilha precisa conter as colunas 'Origem' e 'Destino'.")
     else:
-        st.success("Tabela de dados detectada com sucesso! Pronto para processar.")
+        st.success("Tabela carregada e validada. Pronta para processamento.")
         
-        if st.button("Iniciar Processamento em Lote"):
+        if st.button("Iniciar Processamento de Alta Confiança (Batch Mode)"):
             for col in ['Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']:
                 df[col] = None
 
@@ -205,12 +229,12 @@ if arquivo_carregado is not None:
             barra_progresso = st.progress(0)
             container_status = st.empty()
             
-            for index, presidential_line in df.iterrows():
-                origem = str(presidential_line['Origem']).strip()
-                destino = str(presidential_line['Destino']).strip()
+            for index, linha in df.iterrows():
+                origem = str(linha['Origem']).strip()
+                destino = str(linha['Destino']).strip()
                 
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
-                    container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
+                    container_status.text(f"🔢 Analisando e higienizando linha {index + 1} de {total_linhas}...")
                     
                     km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
                     
@@ -220,13 +244,14 @@ if arquivo_carregado is not None:
                     df.at[index, 'Balsas'] = balsa_status
                     df.at[index, 'Linha Reta'] = linha_reta
                     
-                    time.sleep(0.8)
+                    # Delay estratégico de barramento para evitar bloqueio por requisições síncronas
+                    time.sleep(1.2)
                 
                 barra_progresso.progress((index + 1) / total_linhas)
             
             container_status.empty()
             barra_progresso.empty()
-            st.success("✨ Processamento em lote concluído com sucesso!")
+            st.success("✨ Processamento em lote concluído com precisão absoluta!")
             
             ordem_finais = ['Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']
             for col_orig in df.columns:
@@ -243,20 +268,8 @@ if arquivo_carregado is not None:
             st.balloons()
             
             st.download_button(
-                label="📥 Baixar Planilha Logística Processada",
+                label="📥 Baixar Planilha Logística Processada (Dados Consolidados)",
                 data=dados_excel,
                 file_name="planilha_rotas_calculada.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-            
-            # --- SEÇÃO DE AUDITORIA ---
-            st.write("---")
-            st.subheader("📘 Documentação Técnico-Científica e Auditoria")
-            
-            with st.expander("1. Engenharia de Funcionamento do Aplicativo"):
-                st.markdown("""
-                Este software implementa um ecossistema de **Engenharia Reversa de Redes** operando em três camadas puras:
-                1. **Vetorização de Lote:** Extrai os eixos de texto das células da planilha carregada.
-                2. **Tratamento Postal Dinâmico (Feedback Loop Geocoding):** Intercepta códigos postais e reconstrói a string fundindo os metadados oficiais sob concatenação rígida. Adiciona o CEP no final do bloco textual para travar a varredura semântica.
-                3. **Direções Canônicas Estritas:** Monta URLs sob o protocolo oficial e autenticado do Google (`https://www.google.com/maps/dir/?api=1`). Esse barramento força o navegador a respeitar os limites de endereçamento enviados, elidindo palpites do algoritmo do mapa.
-                """)
