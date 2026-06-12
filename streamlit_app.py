@@ -19,7 +19,7 @@ def extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d):
     Injeta EXCLUSIVAMENTE as coordenadas numéricas absolutas (Lat, Lon).
     Isso força o Google a traçar a rota entre os pontos exatos de chácaras, CEPs ou POIs.
     """
-    # URL viva universal baseada em coordenadas geográficas absolutas para o usuário clicar
+    # URL oficial estruturada por coordenadas para o usuário abrir no navegador sem falhas
     link_maps = f"https://www.google.com/maps/dir/{lat_o},{lon_o}/{lat_d},{lon_d}/"
     
     # Endpoint da API de tráfego em tempo real parametrizado por eixos decimais puros
@@ -61,7 +61,8 @@ def extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d):
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps, Black_ferry=envolve_balsa if 'Black_ferry' in locals() else envolve_balsa
+            # LINHA 64 CORRIGIDA: Retorno purificado da tupla sem atribuições condicionais inválidas
+            return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
         pass
@@ -143,7 +144,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     return None
 
 def calcular_pipeline_logistico(origem, destino):
-    """Pipeline central avançado com cruzamento e amarração absoluta por geolocalização"""
+    """Pipeline central avançado com fusão e amarração absoluta por geolocalização"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
@@ -161,7 +162,7 @@ def calcular_pipeline_logistico(origem, destino):
     # Cálculo da menor distância geodésica em linha reta teórica via Vincenty
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
-    # CORREÇÃO CRÍTICA: Passa as coordenadas reais para a busca do Google Maps, elidindo falhas textuais
+    # Passa as coordenadas numéricas reais para a busca do Google Maps, elidindo falhas textuais
     dados_reais = extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d)
     
     if dados_reais:
@@ -208,7 +209,7 @@ if arquivo_carregado is not None:
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                     
-                    # Consumo do pipeline cruzado adaptativo por coordenadas numéricas
+                    # Consumo do pipeline cruzado adaptativo mapeando a função real
                     km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
                     
                     df.at[index, 'Distancia'] = km
