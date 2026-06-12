@@ -13,17 +13,19 @@ st.set_page_config(
     layout="centered"
 )
 
-def extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d):
+def extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=True):
     """
     CAMADA BRUTA - Intercepta a API interna de direções do Google Maps.
-    Calcula KMs e tempos rodoviários reais usando estritamente as coordenadas.
+    Utiliza as strings ricas e oficializadas para garantir indexação estável no mapa.
     """
-    if lat_o and lon_o and lat_d and lon_d:
+    if usar_coordenadas and lat_o and lon_o and lat_d and lon_d:
         origem_param = f"{lat_o},{lon_o}"
         destino_param = f"{lat_d},{lon_d}"
         url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     else:
-        return None
+        origem_param = requests.utils.quote(f"{origem_oficial}".strip())
+        destino_param = requests.utils.quote(f"{destino_oficial}".strip())
+        url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -96,12 +98,12 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
 
 def geocodificar_e_padronizar_universal(localidade_raw):
     """
-    CAMADA GEOGRÁFICA UNIVERSAL - Cruza ViaCEP e ArcGIS Server.
-    Prioriza encontrar as coordenadas geográficas exatas e imutáveis da localidade.
+    CAMADA GEOGRÁFICA UNIVERSAL - Converte a entrada informal ou postal
+    no endereço completo e estruturado da malha cartográfica planetária.
     """
     texto_str = str(localidade_raw).strip()
     
-    # 1. VALIDAÇÃO POSTAL (ViaCEP) para dar robustez a buscas por CEP
+    # 1. VALIDAÇÃO POSTAL PRIORITÁRIA (ViaCEP)
     cep_limpo = re.sub(r'\D', '', texto_str)
     if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str):
         try:
@@ -111,17 +113,27 @@ def geocodificar_e_padronizar_universal(localidade_raw):
                 bair = res_cep.get('bairro', '').strip()
                 loca = res_cep.get('localidade', '').strip()
                 uf_c = res_cep.get('uf', '').strip()
-                # Remove o termo "Zona Industrial" se ele vier do ViaCEP, pois confunde os mapas
-                if bair.upper() == "ZONA INDUSTRIAL":
-                    bair = ""
+                cep_c = res_cep.get('cep', '').strip()
+                
+                # Reconstrói a string com a base postal intocável dos Correios
                 componentes_cep = [logr, bair, loca, uf_c]
                 texto_str = ", ".join([c for c in componentes_cep if c])
+                if cep_c:
+                    texto_str += f", {cep_c}"
+                
+                # Se for CEP, o endereço gerado aqui é soberano e retorna imediatamente com coordenadas
+                query_cep = f"{texto_str}, Brasil"
+                url_cep = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query_cep)}&maxLocations=1&sourceCountry=BRA"
+                resposta_cep = requests.get(url_cep, timeout=10).json()
+                if resposta_cep.get('candidates'):
+                    pt = resposta_cep['candidates'][0]['location']
+                    return float(pt['y']), float(pt['x']), texto_str
         except Exception:
             pass
 
-    # 2. RESOLUÇÃO DE LATITUDE E LONGITUDE NO ARCGIS
+    # 2. SE NÃO FOR CEP: RESOLUÇÃO POR ATRIBUTOS ESTENDIDOS NO ARCGIS
     query = texto_str if "BRASIL" in texto_str.upper() else f"{texto_str}, Brasil"
-    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA"
+    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA&outFields=*"
     
     try:
         resposta = requests.get(url, timeout=10).json()
@@ -129,6 +141,22 @@ def geocodificar_e_padronizar_universal(localidade_raw):
             melhor_candidato = resposta['candidates'][0]
             lat = float(melhor_candidato['location']['y'])
             lon = float(melhor_candidato['location']['x'])
+            
+            atributos = melhor_candidato.get('attributes', {})
+            logradouro_arc = atributos.get('StAddr', '').strip()
+            bairro_arc = atributos.get('Neighborhood', '').strip()
+            cidade_arc = atributos.get('City', '').strip()
+            estado_arc = atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()
+            cep_postal_arc = atributos.get('Postal', '').strip()
+            
+            # Se possuir logradouro rico, monta o endereço detalhado completo
+            if logradouro_arc and len(logradouro_arc.split()) > 1:
+                componentes = [logradouro_arc, bairro_arc, cidade_arc, estado_arc]
+                endereco_reconstruido = ", ".join([c for c in componentes if c])
+                if cep_postal_arc:
+                    endereco_reconstruido += f", {cep_postal_arc}"
+                return lat, lon, endereco_reconstruido
+            
             return lat, lon, melhor_candidato['address']
     except Exception:
         pass
@@ -136,33 +164,31 @@ def geocodificar_e_padronizar_universal(localidade_raw):
     return 0.0, 0.0, texto_str
 
 def calcular_pipeline_logistico(origem_bruta, destino_bruto):
-    """Pipeline focado em amarrações numéricas via coordenadas no mapa"""
-    
-    # 1. Resolve as coordenadas e os endereços formais de forma universal
+    """Pipeline logístico agnóstico baseado em normalização de metadados cartográficos"""
     lat_o, lon_o, origem_oficial = geocodificar_e_padronizar_universal(origem_bruta)
     lat_d, lon_d, destino_oficial = geocodificar_e_padronizar_universal(destino_bruto)
     
-    # 2. Cálculo analítico de linha reta
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d) if (lat_o != 0.0 and lat_d != 0.0) else 0.0
 
-    # 3. Executa a extração usando as coordenadas numéricas absolutas
-    dados_reais = extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d)
+    origem_is_poi = any(k in origem_oficial.upper() for k in ["UNIVERSIDADE", "FACULDADE", "CAMPUS", "HOSPITAL", "SHOPPING", "AEROPORTO"])
+    destino_is_poi = any(k in destino_oficial.upper() for k in ["UNIVERSIDADE", "FACULDADE", "CAMPUS", "HOSPITAL", "SHOPPING", "AEROPORTO"])
+    usar_coords = not (origem_is_poi or destino_is_poi)
+
+    dados_reais = extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
-    # 4. BLINDAGEM DO LINK: Criamos um link canônico baseado EXCLUSIVAMENTE em Coordenadas Geográficas (Query por GPS)
-    # Isso impede o Google Maps de tentar adivinhar nomes de prédios ou bairros homônimos.
-    link_maps_gps = f"https://www.google.com/maps/dir/?api=1&origin={lat_o},{lon_o}&destination={lat_d},{lon_d}&travelmode=driving"
+    # LINKS DE DIRETRIZES CANÔNICAS (Garante a plotagem exata do trajeto com endereços completos)
+    link_maps_canonico = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_oficial)}&destination={requests.utils.quote(destino_oficial)}&travelmode=driving"
     
     if dados_reais and isinstance(dados_reais, tuple):
         km_google, tempo_google, balsa_google = dados_reais[0], dados_reais[1], dados_reais[2]
-        return km_google, tempo_google, link_maps_gps, balsa_google, dist_linha_reta
+        return km_google, tempo_google, link_maps_canonico, balsa_google, dist_linha_reta
 
-    # FALLBACK OPERACIONAL
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
     minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
     
     tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
-    return km_terrestre, tempo_txt, link_maps_gps, "Não", dist_linha_reta
+    return km_terrestre, tempo_txt, link_maps_canonico, "Não", dist_linha_reta
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
 st.title("🚗 Gerenciador de Rotas Inteligentes")
@@ -230,3 +256,16 @@ if arquivo_carregado is not None:
                 file_name="planilha_rotas_calculada.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+            
+            # --- SEÇÃO DE AUDITORIA ---
+            st.write("---")
+            st.subheader("📘 Documentação Técnico-Científica e Auditoria")
+            
+            with st.expander("1. Engenharia de Funcionamento do Aplicativo"):
+                st.markdown("""
+                Este software implementa um ecossistema de **Engenharia Reversa de Redes** operando em quatro camadas:
+                1. **Vetorização de Lote:** Extrai os eixos de texto das células da planilha carregada.
+                2. **Pipeline Agnóstico de Padronização:** Converte de forma soberana CEPs e entradas informais em estruturas de endereços completos validados (Correios/ArcGIS outFields) antes de gerar as rotas.
+                3. **Direções Canônicas Públicas:** Constrói URLs estruturadas forçando o navegador a carregar o trajeto rodoviário sem reinterpretações dinâmicas de bairros.
+                4. **Vincenty Geodésico:** Computa a linha reta teórica perfeita baseada no elipsoide real da Terra (WGS-84).
+                """)
