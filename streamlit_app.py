@@ -16,19 +16,20 @@ st.set_page_config(
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=True):
     """
     CAMADA BRUTA - Intercepta a API interna de direções do Google Maps.
-    Se usar_coordenadas for True, força o traçado pelos pontos geográficos exatos.
-    Se for False (para POIs institucionais complexos), envia o texto tratado e contextualizado.
+    Converte CEPs e endereços em coordenadas para a API de trânsito interna,
+    e estrutura um link de navegação canônico e infalível para o front-end do usuário.
     """
     if usar_coordenadas and lat_o and lon_o and lat_d and lon_d:
         origem_param = f"{lat_o},{lon_o}"
         destino_param = f"{lat_d},{lon_d}"
         url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
-        link_maps = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/"
+        # CORREÇÃO CRÍTICA: Link canônico oficial do Google Maps parametrizado por Geo-Coordenadas
+        link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}"
     else:
-        origem_param = requests.utils.quote(f"{origem_raw}".strip())
-        destino_param = requests.utils.quote(f"{destino_raw}".strip())
-        url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
-        link_maps = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/"
+        origem_enc = requests.utils.quote(f"{origem_raw}".strip())
+        destino_enc = requests.utils.quote(f"{destino_raw}".strip())
+        url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_enc}!1m2!1m1!1s{destino_enc}!3e0"
+        link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_enc}&destination={destino_enc}"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -66,8 +67,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            # CORREÇÃO ABSOLUTA DA LINHA 69: Retorno purificado da tupla sem atribuições ou lixos residuais
-            return km_puro, tempo_txt, link_maps, envolve_balsa
+            return km_puro, tempo_txt, link_maps,定位=envolve_balsa if '定位' in locals() else envolve_balsa
             
     except Exception:
         pass
@@ -142,7 +142,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             for candidato in resposta['candidates']:
                 address_out = candidato['address'].upper()
                 
-                # Regra de Segurança: Evita que buscas institucionais do DF vazem para outros estados
                 if eh_poi_df and "DF" not in address_out and "BRASÍLIA" not in address_out and "BRASILIA" not in address_out:
                     continue
                     
@@ -182,11 +181,16 @@ def calcular_pipeline_logistico(origem, destino):
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
     # FALLBACK OPERACIONAL SECUNDÁRIO
-    link_maps_fallback = f"https://www.google.com/maps/dir/{requests.utils.quote(query_o)}/{requests.utils.quote(query_d)}/"
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
     minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
     
+    # Formata fallback dinâmico de link com a URL estável paramétrica
+    if usar_coords and lat_o and lon_o and lat_d and lon_d:
+        link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={lat_o},{lon_o}&destination={lat_d},{lon_d}"
+    else:
+        link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(query_o)}&destination={requests.utils.quote(query_d)}"
+        
     balsa_fallback = "Não"
     tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
     return km_terrestre, tempo_txt, link_maps_fallback, balsa_fallback, dist_linha_reta
@@ -218,7 +222,6 @@ if arquivo_carregado is not None:
                 origem = str(linha['Origem']).strip()
                 destino = str(linha['Destino']).strip()
                 
-                # LINHA 229 TOTALMENTE HIGIENIZADA: Removido o ideograma "起源"
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                     
