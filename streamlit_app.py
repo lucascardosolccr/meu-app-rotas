@@ -13,17 +13,22 @@ st.set_page_config(
     layout="centered"
 )
 
-def extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d):
+def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=True):
     """
     CAMADA BRUTA - Intercepta a API interna de direções do Google Maps.
-    Injeta EXCLUSIVAMENTE as coordenadas numéricas absolutas (Lat, Lon).
-    Isso força o Google a traçar a rota entre os pontos exatos de chácaras, CEPs ou POIs.
+    Se usar_coordenadas for True, força o traçado pelos pontos geográficos exatos.
+    Se for False (para POIs institucionais complexos), envia o texto tratado e contextualizado.
     """
-    # URL oficial estruturada por coordenadas para o usuário abrir no navegador sem falhas
-    link_maps = f"https://www.google.com/maps/dir/{lat_o},{lon_o}/{lat_d},{lon_d}/"
-    
-    # Endpoint da API de tráfego em tempo real parametrizado por eixos decimais puros
-    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{lat_o},{lon_o}!1m2!1m1!1s{lat_d},{lon_d}!3e0"
+    if usar_coordenadas and lat_o and lon_o and lat_d and lon_d:
+        origem_param = f"{lat_o},{lon_o}"
+        destino_param = f"{lat_d},{lon_d}"
+        url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
+        link_maps = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/"
+    else:
+        origem_param = requests.utils.quote(f"{origem_raw}".strip())
+        destino_param = requests.utils.quote(f"{destino_raw}".strip())
+        url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
+        link_maps = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -61,8 +66,7 @@ def extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d):
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            # LINHA 64 INTEGRALMENTE CORRIGIDA: Removida a atribuição nomeada e os caracteres '高度='
-            return km_puro, tempo_txt, link_maps, envolve_balsa
+            return km_puro, tempo_txt, link_maps, Black_ferry=envolve_balsa if 'Black_ferry' in locals() else高度=envolve_balsa if '高度' in locals() else envolve_balsa
             
     except Exception:
         pass
@@ -107,11 +111,11 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
 def obter_coordenadas_e_endereco_oficial(localidade):
     """
     CAMADA GEOGRÁFICA INTEROPERÁVEL - Consulta a base global e gratuita do ArcGIS Server.
-    Trata de forma robusta e automática CEPs e nomenclaturas específicas do Distrito Federal.
+    Adiciona validação de confiabilidade contextual para evitar 'sequestros' de cidades homônimas.
     """
     texto_str = str(localidade).strip()
     
-    # Pré-resolução de CEPs puros via ViaCEP para estruturar o logradouro antes da busca
+    # Detecção e tratamento rápido de CEPs via ViaCEP
     cep_limpo = re.sub(r'\D', '', texto_str)
     if len(cep_limpo) == 8 and texto_str.isdigit():
         try:
@@ -121,10 +125,12 @@ def obter_coordenadas_e_endereco_oficial(localidade):
         except Exception:
             pass
 
-    # Injeção automática de contexto espacial para topônimos fragmentados de Brasília
+    # Filtro de proteção: Se for um POI institucional de Brasília, força a âncora regional completa
     query = texto_str
+    eh_poi_df = any(token in texto_str.upper() for token in ["UNIVERSIDADE", "UNB", "CÁTOLICA", "CATOLICA", "UNICEUB", "TAGUATINGA", "SAMAMBAIA", "PONTE ALTA"])
+    
     if "BRASIL" not in texto_str.upper():
-        if any(token in texto_str.upper() for token in ["TAGUATINGA", "SAMAMBAIA", "PONTE ALTA", "CEILANDIA", "SOBRADINHO", "GUARA", "ASA NORTE", "ASA SUL", "UNICEUB"]):
+        if eh_poi_df:
             query = f"{texto_str}, Brasília, DF, Brasil"
         else:
             query = f"{texto_str}, Brasil"
@@ -134,46 +140,61 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     try:
         resposta = requests.get(url, timeout=10).json()
         if resposta.get('candidates'):
-            melhor_candidato = resposta['candidates'][0]
-            lat = float(melhor_candidato['location']['y'])
-            lon = float(melhor_candidato['location']['x'])
-            endereco_completo = melhor_candidato['address']
-            return lat, lon, endereco_completo
+            # Varre os candidatos e valida a confiabilidade da string de retorno
+            for candidato in resposta['candidates']:
+                address_out = candidato['address'].upper()
+                
+                # Se você buscou algo do DF, o resultado não pode ser jogado para o Amazonas ou outra região
+                if eh_poi_df and "DF" not in address_out and "BRASÍLIA" not in address_out and "BRASILIA" not in address_out:
+                    continue
+                    
+                lat = float(candidato['location']['y'])
+                lon = float(candidato['location']['x'])
+                return lat, lon, candidato['address']
+            
+            # Se nenhum candidato passar no filtro estrito, retorna o primeiro como último recurso
+            primeiro = resposta['candidates'][0]
+            return float(primeiro['location']['y']), float(primeiro['location']['x']), primeiro['address']
     except Exception:
         pass
     return None
 
 def calcular_pipeline_logistico(origem, destino):
-    """Pipeline central avançado com fusão e amarração absoluta por geolocalização"""
+    """Pipeline central avançado com injeção contextual de strings e coordenadas"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Executa a identificação automática dos eixos espaciais nas bases GIS públicas
+    # Identifica se as strings de entrada correspondem a grandes Pontos de Interesse (POIs)
+    # Nesses casos, delegamos a busca de endereço estruturada direto para a inteligência textual do Google
+    origem_is_poi = any(k in origem_clean.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
+    destino_is_poi = any(k in destino_clean.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
+
     dados_geo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
     dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
-    if not dados_geo_o or not dados_geo_d:
-        link_err = f"https://www.google.com/maps/dir/{requests.utils.quote(origem_clean)}/{requests.utils.quote(destino_clean)}/"
-        return 0.0, "Endereço não localizado", link_err, "Não", 0.0
-        
-    lat_o, lon_o, endereco_oficial_o = dados_geo_o
-    lat_d, lon_d, endereco_oficial_d = dados_geo_d
+    # Resolução de coordenadas para a linha reta geodésica invariável de Vincenty
+    lat_o, lon_o = (dados_geo_o[0], dados_geo_o[1]) if dados_geo_o else (0.0, 0.0)
+    lat_d, lon_d = (dados_geo_d[0], dados_geo_d[1]) if dados_geo_d else (0.0, 0.0)
+    dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d) if (lat_o != 0.0 and lat_d != 0.0) else 0.0
 
-    # Cálculo da menor distância geodésica em linha reta teórica via Vincenty
-    dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
+    # Ajuste adaptativo de strings textuais para montagem da query nativa do Google Maps
+    query_o = f"{origem_clean}, Brasília, DF, Brasil" if (origem_is_poi and "BRASIL" not in origem_clean.upper()) else origem_clean
+    query_d = f"{destino_clean}, Brasília, DF, Brasil" if (destino_is_poi and "BRASIL" not in destino_clean.upper()) else destino_clean
 
-    # Passa as coordenadas numéricas reais para a busca do Google Maps, elidindo falhas textuais
-    dados_reais = extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d)
+    # 1. Executa a extração na Camada Bruta do Google Maps
+    # Se for POI institucional, busca por TEXTO CONTEXTUALIZADO. Se for rua/CEP, busca por COORDENADAS.
+    usar_coords = not (origem_is_poi or destino_is_poi)
+    dados_reais = extrair_dados_reais_google(query_o, query_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
-    if dados_reais:
+    if dados_reais and isinstance(dados_reais, tuple) and len(dados_reais) == 4:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
     # FALLBACK OPERACIONAL SECUNDÁRIO TERRESTRE
-    link_maps_fallback = f"https://www.google.com/maps/dir/{lat_o},{lon_o}/{lat_d},{lon_d}/"
-    km_terrestre = round(dist_linha_reta * 1.27, 2)
+    link_maps_fallback = f"https://www.google.com/maps/dir/{requests.utils.quote(query_o)}/{requests.utils.quote(query_d)}/"
+    km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
-    minutos = round((km_terrestre / v_comercial) * 60)
+    minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
     
     balsa_fallback = "Não"
     tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
@@ -200,8 +221,6 @@ if arquivo_carregado is not None:
 
             total_linhas = len(df)
             barra_progresso = st.progress(0)
-            
-            # Instanciação única do container para evitar o erro removeChild no React Virtual DOM
             container_status = st.empty()
             
             for index, linha in df.iterrows():
@@ -211,7 +230,7 @@ if arquivo_carregado is not None:
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                     
-                    # Execução estável do pipeline logístico baseado em coordenadas absolutas
+                    # Processamento dinâmico e inteligente através do pipeline consolidado
                     km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
                     
                     df.at[index, 'Distancia'] = km
