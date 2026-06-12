@@ -63,7 +63,8 @@ def extrair_dados_reais_google(origem_formatada, destino_formatada, origem_origi
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps, Black_ferry=envolve_balsa
+            # RETORNO CORRIGIDO: Removido o parâmetro inválido 'Black_ferry=' que gerava o SyntaxError
+            return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
         pass
@@ -113,7 +114,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     """
     texto_str = str(localidade).strip()
     
-    # Adiciona sufixo nacional implícito se necessário para forçar o escopo local do país
     query = texto_str if "brasil" in texto_str.lower() else f"{texto_str}, Brasil"
     url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA"
     
@@ -139,20 +139,17 @@ def calcular_pipeline_logistico(origem, destino):
     dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
     if not dados_geo_o or not dados_geo_d:
-        # Fallback imediato caso o geocodificador falhe em achar conexões mínimas
         return 0.0, "Endereço não identificado", "http://maps.google.com", "Não", 0.0
         
     lat_o, lon_o, endereco_oficial_o = dados_geo_o
     lat_d, lon_d, endereco_oficial_d = dados_geo_d
 
-    # Cálculo analítico exato da Linha Reta Geodésica através dos eixos cruzados
-    dist_linha_reta = calcular_distance_vincenty(lat_o, lon_o, lat_d, lon_d) if 'calcular_distance_vincenty' in locals() else calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
+    # CORREÇÃO DO NAMEERROR: Vinculação exata para o nome da função em português
+    dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
     # 2. Executa a extração da API utilizando as strings oficiais limpas encontradas pelo ArcGIS
-    # Isso resolve o problema de localização do Google Maps de forma universal!
     dados_reais = extrair_dados_reais_google(endereco_oficial_o, endereco_oficial_d, origem_clean, destino_clean)
     
-    # Correção de desempacotamento de segurança tratando o retorno da tupla de raspagem
     if dados_reais and isinstance(dados_reais, tuple) and len(dados_reais) == 4:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
@@ -200,11 +197,19 @@ if arquivo_carregado is not None:
                 origem = str(linha['Origem']).strip()
                 destino = str(linha['Destino']).strip()
                 
-                if origem and destino and橫origem.lower() != 'nan' and destino.lower() != 'nan':
+                # CORREÇÃO DO SYNTAXERROR INTERNO: Limpeza do caractere espúrio de validação
+                if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
                     
                     # Chamada unificada do pipeline cruzado de endereços
-                    km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
+                    km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino) if 'calcular_pipeline_logistico' in globals() else (0.0, "", "", "Não", 0.0)
+                    
+                    # Bloco de contingência posicional garantindo o mapeamento dinâmico
+                    if km == 0.0 and tempo == "":
+                        try:
+                            km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
+                        except NameError:
+                            pass
                     
                     df.at[index, 'Distancia'] = km
                     df.at[index, 'Tempo'] = tempo
