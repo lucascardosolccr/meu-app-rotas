@@ -211,6 +211,7 @@ def calcular_pipeline_logistico(origem, destino):
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
+    # Paridade de funções corrigida para chamada unificada
     dados_geo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
     dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
@@ -222,15 +223,14 @@ def calcular_pipeline_logistico(origem, destino):
     query_o = origem_oficial
     query_d = destino_oficial
 
-    # Bloqueia o uso de coordenadas corrompidas se as coordenadas falharem ou se houver indício de estouro interestadual
+    # Definição de flag de segurança contra coordenadas corrompidas
     usar_coords = True if (lat_o != 0.0 and lat_d != 0.0 and dist_linha_reta < 150.0) else False
     dados_reais = extrair_dados_reais_google(query_o, query_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         
-        # FILTRO DE AUDITORIA DE MALHA: Se a rota rodoviária final ultrapassar de forma absurda a linha reta geodésica,
-        # faz o recálculo textual puro para expurgar e neutralizar o desvio interestadual instantaneamente.
+        # FILTRO DE AUDITORIA DE MALHA
         if km_google > 120.0 and dist_linha_reta < 45.0:
             dados_reais_seguros = extrair_dados_reais_google(query_o, query_d, 0.0, 0.0, 0.0, 0.0, usar_coordenadas=False)
             if dados_reais_seguros:
@@ -238,15 +238,15 @@ def calcular_pipeline_logistico(origem, destino):
                 
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # FALLBACK OPERACIONAL SECUNDÁRIO E CANÔNICO
+    # FALLBACK OPERACIONAL SECUNDÁRIO E CANÔNICO CORRIGIDO (Correção do NameError de minutos)
     link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(query_o)}&destination={requests.utils.quote(query_d)}&travelmode=driving"
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
     minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
     
-    balsa_fallback = "Não"
-    tempo_txt = f"{minutos} min" if minutes < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
-    return km_terrestre, tempo_txt, link_maps_fallback, balsa_fallback, dist_linha_reta
+    # Tratamento corrigido e saneado substituindo a variável fantasma 'minutes' por 'minutos'
+    tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
+    return km_terrestre, tempo_txt, link_maps_fallback, "Não", dist_linha_reta
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
 st.title("🚗 Gerenciador de Rotas Inteligentes")
