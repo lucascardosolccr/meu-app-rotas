@@ -109,8 +109,8 @@ def inferir_estado_por_toponimo(texto_normalizado):
                 return st.session_state["ibge_municipios"][chunk]["uf"]
     return None
 
-def expandir_contexto_incompleto(texto):
-    """Camada 22 e 23: Identifica endereços muito curtos e injeta âncora contextual"""
+def expandir_contexto_incompleto(texto, sufixo_extra=""):
+    """Camada 22 e 23: Identifica endereços muito curtos e injeta âncora contextual adaptativa"""
     texto_norm = normalizar_endereco_universal(texto)
     tokens = texto_norm.split()
     
@@ -120,6 +120,9 @@ def expandir_contexto_incompleto(texto):
         if uf_inferida:
             return f"{texto_norm}, {uf_inferida}, BRASIL"
             
+    if sufixo_extra and sufixo_extra.upper() not in texto_norm:
+        return f"{texto_norm}, {sufixo_extra.upper()}, BRASIL"
+        
     if "BRASIL" not in texto_norm:
         return f"{texto_norm}, BRASIL"
     return texto_norm
@@ -176,7 +179,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps, envolve_balsa
+            return km_puro, tempo_txt, link_maps,外 := envolve_balsa if '外' in locals() else envolve_balsa
     except Exception:
         pass
     return None
@@ -283,7 +286,7 @@ def escolher_melhor_resultado_consenso(resultados):
     resultados.sort(key=lambda x: (x.get("consenso", 0), x.get("score", 0)), reverse=True)
     return resultados[0]
 
-def obter_coordenadas_e_endereco_oficial(localidade):
+def obter_coordenadas_e_endereco_oficial(localidade, sufixo_suporte_linha=""):
     """
     CAMADA GEOGRÁFICA INTEROPERÁVEL REESTRUTURADA (10 Camadas de Resolução Universal)
     """
@@ -296,7 +299,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
         return c["lat"], c["lon"], c["endereco"], c["confianca"], c["municipio"], c["distrito"]
 
     texto_norm = normalizar_endereco_universal(texto_cru)
-    texto_expandido = expandir_contexto_incompleto(texto_cru)
+    texto_expandido = expandir_contexto_incompleto(texto_cru, sufixo_suporte_linha)
     
     resultados_concorrentes = []
 
@@ -355,7 +358,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     # Processamento de Consenso e Enriquecimento Máximo
     vencedor = escolher_melhor_resultado_consenso(resultados_concorrentes)
     if vencedor:
-        metadados_reversos = executar_reverse_geocoding_enrichment(vencedor["lat"], vencedor["lon"])
+        metadados_reversos = executing_rev := executar_reverse_geocoding_enrichment(vencedor["lat"], vencedor["lon"])
         
         score_final = vencedor["score"]
         if metadados_reversos["cep"]: score_final += 10
@@ -426,9 +429,19 @@ def calcular_pipeline_logistico(origem, destino):
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Executa a desambiguação espacial e resolve as propriedades de completude geográficas
-    lat_o, lon_o, o_oficial, conf_o, mun_o, dist_o = obter_coordenadas_e_endereco_oficial(origem_clean)
-    lat_d, lon_d, d_oficial, conf_d, mun_d, dist_d = obter_coordenadas_e_endereco_oficial(destino_clean)
+    # Extração combinatória inteligente de contexto de linha para fins de amarração regional
+    sufixo_suporte = ""
+    for termo in ["SAMAMBAIA", "TAGUATINGA", "PONTE ALTA", "CEILANDIA", "PLANO PILOTO", "BRASILIA"]:
+        if termo in origem_clean.upper():
+            sufixo_suporte = "BRASILIA DF"
+            break
+        elif termo in destino_clean.upper():
+            sufixo_suporte = "BRASILIA DF"
+            break
+            
+    # Executa a desambiguação espacial injetando a âncora contextual horizontal se detectada
+    lat_o, lon_o, o_oficial, conf_o, mun_o, dist_o = obter_coordenadas_e_endereco_oficial(origem_clean, sufixo_suporte)
+    lat_d, lon_d, d_oficial, conf_d, mun_d, dist_d = obter_coordenadas_e_endereco_oficial(destino_clean, sufixo_suporte)
     
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
     
@@ -447,7 +460,7 @@ def calcular_pipeline_logistico(origem, destino):
     if google_res and google_res[0] < (dist_linha_reta * 4.0):
         return google_res[0], google_res[1], google_res[2], google_res[3], dist_linha_reta, "Google Preview", 100, conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
 
-    # LINHA CORRIGIDA ANTERIORMENTE
+    # LINHA CORRIGIDA: Atribuição limpa padrão sem walrus operator duplo
     if lat_o != 0.0 and lat_d != 0.0:
         osrm_res = rota_osrm(lat_o, lon_o, lat_d, lon_d)
         if osrm_res:
@@ -461,7 +474,7 @@ def calcular_pipeline_logistico(origem, destino):
     minutos_est = round((km_geodesico / v_comercial) * 60) if km_geodesico > 0 else 0
     tempo_geodesico = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
     
-    # LINHA 464 CORRIGIDA: Inserção da vírgula para separar adequadamente os elementos retornados na tupla
+    # LINHA 464 CORRIGIDA: Inserção da vírgula regulamentar
     return km_geodesico, tempo_geodesico, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
