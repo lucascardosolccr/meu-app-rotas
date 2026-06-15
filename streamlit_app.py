@@ -54,7 +54,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps, envolve_balsa
+            return km_puro, tempo_txt, link_maps, Black := envolve_balsa if 'Black' in locals() else envolve_balsa
             
     except Exception:
         pass
@@ -98,192 +98,148 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     except Exception:
         return 0.0
 
-# ==============================================================================
-# 🌟 NOVA RESOLUÇÃO UNIVERSAL DE ENDEREÇOS (PIpipeline de 10 Camadas Gratuitas)
-# ==============================================================================
-
-def calcular_levenshtein_local(s1, s2):
-    """Algoritmo de Similaridade de Distância Levenshtein Nátivo (Camada 2 Fuzzy)"""
-    if len(s1) < len(s2):
-        return calcular_levenshtein_local(s2, s1)
-    if len(s2) == 0:
-        return len(s1)
-    previous_row = range(len(s2) + 1)
-    for i, c1 in enumerate(s1):
-        current_row = [i + 1]
-        for j, c2 in enumerate(s2):
-            insertions = previous_row[j + 1] + 1
-            deletions = current_row[j] + 1
-            substitutions = previous_row[j] + (c1 != c2)
-            current_row.append(min(insertions, deletions, substitutions))
-        previous_row = current_row
-    distance = previous_row[-1]
-    max_len = max(len(s1), len(s2))
-    return (1 - (distance / max_len)) * 100
-
-def sanitizar_texto_universal(texto):
-    """Camada 1: Limpeza, Normalização Unicode e Expansão de Abreviações"""
-    t = str(texto).strip()
-    t = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', t)  # Remove caracteres invisíveis
-    t = re.sub(r'\s+', ' ', t)  # Remove espaços duplicados
-    
-    # Tabela de Abreviações Consagradas Nacionais
-    substituicoes = {
-        r'\bAV\b': 'Avenida', r'\bR\b': 'Rua', r'\bQD\b': 'Quadra', r'\bQ\b': 'Quadra',
-        r'\bCJ\b': 'Conjunto', r'\bCONJ\b': 'Conjunto', r'\bLT\b': 'Lote', r'\bL\b': 'Lote',
-        r'\bAPT\b': 'Apartamento', r'\bAP\b': 'Apartamento', r'\bBL\b': 'Bloco', r'\bB\b': 'Bloco',
-        r'\bST\b': 'Setor', r'\bCH\b': 'Chácara', r'\bCHAC\b': 'Chácara', r'\bKM\b': 'Quilômetro',
-        r'\bDF\b': 'Distrito Federal', r'\bTRAV\b': 'Travessa', r'\bBR\b': 'Rodovia BR'
-    }
-    
-    for padrao, expansao in substituicoes.items():
-        t = re.sub(padrao, expansao, t, flags=re.IGNORECASE)
-    return t
-
-def camada_postal_redundante(cep_limpo):
-    """Camada 3: Resolução Postal com Tolerância a Falhas (ViaCEP + BrasilAPI)"""
-    # Fallback 1: ViaCEP
-    try:
-        res = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=4).json()
-        if "erro" not in res:
-            return res.get('logradouro', ''), res.get('bairro', ''), res.get('localidade', ''), res.get('uf', '')
-    except Exception:
-        pass
-        
-    # Fallback 2: BrasilAPI
-    try:
-        res = requests.get(f"https://brasilapi.com.br/api/cep/v1/{cep_limpo}", timeout=4).json()
-        if "name" not in res:
-            return res.get('street', ''), res.get('neighborhood', ''), res.get('city', ''), res.get('state', '')
-    except Exception:
-        pass
-        
+def extrair_metadados_via_cep(cep_alvo):
+    """Varre a API estruturada dos Correios para extrair cidade e estado de suporte"""
+    cep_limpo = re.sub(r'\D', '', str(cep_alvo))
+    if len(cep_limpo) == 8:
+        try:
+            res = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=5).json()
+            if "erro" not in res:
+                return res.get('logradouro', ''), res.get('bairro', ''), res.get('localidade', ''), res.get('uf', '')
+        except Exception:
+            pass
     return "", "", "", ""
 
-def obter_coordenadas_e_endereco_oficial(localidade):
+def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
     """
-    CAMADA GEOGRÁFICA INTEROPERÁVEL UNIVERSAL - Pipeline Consolidado.
-    Resolve dinamicamente inputs incompletos através de votação multi-fonte.
+    CAMADA GEOGRÁFICA INTEROPERÁVEL UNIVERSAL - Redundância Híbrida Inteligente.
+    Filtra candidatos com base na coerência de estado para erradicar desvios interestaduais.
     """
-    texto_original = str(localidade).strip()
-    texto_limpo = sanitizar_texto_universal(texto_original)
-    texto_upper = texto_limpo.upper()
+    texto_str = str(localidade).strip()
+    texto_upper = texto_str.upper()
     
-    # Tenta pescar alguma numeração ou indicação de quadra/bloco original do usuário
-    fração_predial = ""
-    match_fracao = re.search(r'\b(CONJUNTO|CJ|QUADRA|QD|BLOCO|BL|LOTE|LT|CHÁCARA|CHACARA|NÚMERO|Nº|NUMERO|N|CASA|AP|KM)\s*([A-Za-z0-9\/.]+)\b', texto_upper)
-    if match_fracao and not re.match(r'^\d{5}-?\d{3}$', texto_original):
-        fração_predial = match_fracao.group(0)
-
-    # 1. PROCESSAMENTO DE CEP DIRECT (Camada 3 Saneada)
-    digits_cep = re.sub(r'\D', '', texto_original)
-    if len(digits_cep) == 8 and (texto_original.isdigit() or "-" in texto_original or "CEP" in texto_upper):
-        logr, bair, loca, uf = camada_postal_redundante(digits_cep)
+    # 1. PROCESSAMENTO LOGÍSTICO DE CEP DIRECT (ViaCEP)
+    cep_limpo = re.sub(r'\D', '', texto_str)
+    if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str or "CEP" in texto_upper):
+        logr, bair, loca, uf = extrair_metadados_via_cep(cep_limpo)
         if loca:
-            endereco_oficial_cep = ", ".join([c for c in [logr, fracao_predial if fracao_predial else "", bair, loca, uf] if c.strip()]) + ", Brasil"
+            if uf.upper() == "DF" and "ZONA INDUSTRIAL" in bair.upper():
+                bair = "SIG"
+            componentes = [logr, bair, loca, uf]
+            endereco_oficial_cep = ", ".join([c for c in componentes if c]) + f", {cep_limpo}"
             
-            # Captura Lat/Lon do CEP via OpenStreetMap
-            url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(endereco_oficial_cep)}&limit=1&countrycodes=br"
-            headers_osm = {"User-Agent": "GerenciadorRotasInteligentes/6.0 (lucasccruz@gmail.com)"}
+            url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(endereco_oficial_cep + ', Brasil')}&maxLocations=1&sourceCountry=BRA"
             try:
-                res_osm = requests.get(url_osm, headers=headers_osm, timeout=4).json()
-                if res_osm:
-                    return float(res_osm[0]['lat']), float(res_osm[0]['lon']), endereco_oficial_cep
+                res_arc = requests.get(url_arc, timeout=5).json()
+                if res_arc.get('candidates'):
+                    pt = res_arc['candidates'][0]['location']
+                    return float(pt['y']), float(pt['x']), endereco_oficial_cep, uf.upper()
             except Exception:
                 pass
-            return 0.0, 0.0, endereco_oficial_cep
+            return 0.0, 0.0, endereco_oficial_cep, uf.upper()
 
-    # 2. GEOCODIFICAÇÃO MULTI-FONTE PARALELA E CONSENSO (Camadas 4, 5, 6, 8, 9)
-    query_completa = f"{texto_limpo}, Brasil" if "BRASIL" not in texto_upper else texto_limpo
+    # 2. CONSTRUÇÃO DA QUERY COM AMARRAÇÃO DE UF SE DISPONÍVEL
+    query = f"{texto_str}, Brasil"
+    if uf_limite_obrigatorio and uf_limite_obrigatorio not in texto_upper:
+        query = f"{texto_str}, {uf_limite_obrigatorio}, Brasil"
+    elif "BRASIL" not in texto_upper:
+        query = f"{texto_str}, Brasil"
     
-    candidatos_fontes = []
-    
-    # Fonte A: ArcGIS REST Engine
-    url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query_completa)}&maxLocations=3&sourceCountry=BRA&outFields=StAddr,Neighborhood,City,RegionAbbr"
+    # --- PROVEDOR PROPRIETÁRIO (ArcGIS Server REST) ---
+    url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=8&sourceCountry=BRA&outFields=*"
     try:
-        res_arc = requests.get(url_arc, timeout=5).json()
+        res_arc = requests.get(url_arc, timeout=8).json()
         if res_arc.get('candidates'):
-            cand = res_arc['candidates'][0]
-            attr = cand.get('attributes', {})
-            candidatos_fontes.append({
-                'lat': float(cand['location']['y']),
-                'lon': float(cand['location']['x']),
-                'rua': attr.get('StAddr', ''),
-                'bairro': attr.get('Neighborhood', ''),
-                'cidade': attr.get('City', ''),
-                'estado': attr.get('RegionAbbr', ''),
-                'score_bruto': cand.get('score', 0)
-            })
-    except Exception:
-        pass
-
-    # Fonte B: OpenStreetMap Nominatim Engine
-    url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query_completa)}&limit=2&addressdetails=1&countrycodes=br"
-    headers_osm = {"User-Agent": "GerenciadorRotasInteligentes/6.0 (lucasccruz@gmail.com)"}
-    try:
-        res_osm = requests.get(url_osm, headers=headers_osm, timeout=5).json()
-        if res_osm:
-            alvo = res_osm[0]
-            details = alvo.get('address', {})
-            candidatos_fontes.append({
-                'lat': float(alvo['lat']),
-                'lon': float(alvo['lon']),
-                'rua': details.get('road', details.get('pedestrian', details.get('construction', ''))),
-                'bairro': details.get('neighbourhood', details.get('suburb', details.get('city_district', ''))),
-                'cidade': details.get('city', details.get('town', '')),
-                'estado': details.get('state', ''),
-                'score_bruto': 90
-            })
-    except Exception:
-        pass
-
-    # ALGORITMO DE VOTAÇÃO E SCORE DE CONFIANÇA (Camadas 8 e 9)
-    if candidatos_fontes:
-        # Seleciona o candidato com maior estabilidade cadastral e proximidade semântica
-        melhor_candidato = candidatos_fontes[0]
-        max_score_calculado = -1.0
-        
-        for cand in candidatos_fontes:
-            # Avalia a completude e qualidade do texto via Fuzzy Matching com a digitação do usuário
-            string_remontada = f"{cand['rua']} {cand['bairro']} {cand['cidade']} {cand['estado']}"
-            score_fuzzy = calcular_levenshtein_local(texto_limpo, string_remontada)
-            
-            score_final_provedor = (cand['score_bruto'] * 0.4) + (score_fuzzy * 0.6)
-            if score_final_provedor > max_score_calculado:
-                max_score_calculado = score_final_provedor
-                melhor_candidato = cand
+            # Varre os candidatos e força a validação cruzada do Estado encontrado
+            for candidato in res_arc['candidates']:
+                attrs = candidato.get('attributes', {})
+                esta_a = attrs.get('RegionAbbr', '').strip() or attrs.get('Region', '').strip()
                 
-        # Remonta a estrutura canônica enriquecida
-        rua_final = melhor_candidato['rua'] if melhor_candidato['rua'] else texto_limpo
-        if fração_predial and fração_predial.upper() not in rua_final.upper():
-            rua_final = f"{rua_final} {fração_predial.title()}"
-            
-        componentes_finais = [rua_final, melhor_candidato['bairro'], melhor_candidato['cidade'], melhor_candidato['estado']]
-        endereco_estruturado_final = ", ".join([c for c in componentes_finais if c.strip()]) + ", Brasil"
-        
-        return melhor_candidato['lat'], melhor_candidato['lon'], endereco_estruturado_final
+                # Se houver uma trava de UF vinda da mesma linha, rejeita candidatos de outros estados (Ex: Rejeita AM se a origem for DF)
+                if uf_limite_obrigatorio and esta_a.upper() != uf_limite_obrigatorio.upper():
+                    continue
+                    
+                lat = float(candidato['location']['y'])
+                lon = float(candidato['location']['x'])
+                logr_a = attrs.get('StAddr', '').strip()
+                bair_a = attrs.get('Neighborhood', '').strip()
+                cide_a = attrs.get('City', '').strip()
+                
+                if logr_a and len(logr_a.split()) > 1:
+                    componentes_arc = [logr_a, bair_a, cide_a, esta_a]
+                    return lat, lon, ", ".join([c for c in componentes_arc if c]), esta_a.upper()
+                return lat, lon, candidato['address'], esta_a.upper()
+    except Exception:
+        pass
 
-    return 0.0, 0.0, query_completa
+    # --- PROVEDOR COLABORATIVO (OpenStreetMap Nominatim) ---
+    url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query)}&limit=3&addressdetails=1"
+    headers_osm = {"User-Agent": "GerenciadorRotasUniversais/4.0 (lucasccruz@gmail.com)"}
+    try:
+        res_osm = requests.get(url_osm, headers=headers_osm, timeout=6).json()
+        if res_osm:
+            for opcao in res_osm:
+                details = opcao.get('address', {})
+                esta_o = details.get('state', '').strip()
+                
+                # Tradução de estados longos para siglas comuns se necessário
+                if uf_limite_obrigatorio and uf_limite_obrigatorio.upper() == "DF" and "DISTRITO FEDERAL" not in esta_o.upper():
+                    continue
+                
+                lat = float(opcao['lat'])
+                lon = float(opcao['lon'])
+                rua = details.get('road', details.get('pedestrian', ''))
+                bair_o = details.get('neighbourhood', details.get('suburb', ''))
+                cide_o = details.get('city', details.get('town', ''))
+                
+                componentes_osm = [rua, bair_o, cide_o, esta_o]
+                endereco_osm = ", ".join([c for c in componentes_osm if c])
+                return lat, lon, endereco_osm, uf_limite_obrigatorio if uf_limite_obrigatorio else "OSM"
+    except Exception:
+        pass
+        
+    return 0.0, 0.0, query, uf_limite_obrigatorio
 
 def calcular_pipeline_logistico(origem, destino):
-    """Pipeline central avançado com injeção contextual de strings e coordenadas"""
+    """Pipeline Universal de Roteamento Sem Amarras Fixas com Fusão de Contexto de Linha"""
     origem_clean = str(origem).strip()
-    destino_clean = str(destino).strip()
+    num_destino = str(destino).strip()
     
-    # Processa os endereços de lote através do ecossistema das APIs de Consenso
-    lat_o, lon_o, origem_oficial = obter_coordenadas_e_endereco_oficial(origem_clean)
-    lat_d, lon_d, destino_oficial = obter_coordenadas_e_endereco_oficial(destino_clean)
+    # ETAPA 1: Pré-Varredura de Metadados Postais da Linha para extrair a UF âncora da operação
+    uf_ancora = ""
+    cep_o_match = re.search(r'\b\d{5}-?\d{3}\b', origem_clean)
+    cep_d_match = re.search(r'\b\d{5}-?\d{3}\b', num_destino)
+    
+    if cep_o_match:
+        _, _, _, uf_o = extrair_metadados_via_cep(cep_o_match.group(0))
+        if uf_o: uf_ancora = uf_o.upper()
+    elif cep_d_match:
+        _, _, _, uf_d = extrair_metadados_via_cep(cep_d_match.group(0))
+        if uf_d: uf_ancora = uf_d.upper()
+        
+    # Se não houver CEP na linha, procura siglas de estados explícitas escritas pelo usuário (Ex: "DF", "SP", "GO")
+    if not uf_ancora:
+        match_sigla = re.search(r'\b(DF|GO|SP|RJ|MG|BA|PR|SC|RS|CE|PE|AM)\b', origem_clean.upper() + " " + num_destino.upper())
+        if match_sigla:
+            uf_ancora = match_sigla.group(1)
+
+    # ETAPA 2: Resolve a localização aplicando a trava da UF âncora encontrada na mesma linha
+    lat_o, lon_o, origem_oficial, uf_final_o = obter_coordenadas_e_endereco_oficial(origem_clean, uf_ancora)
+    lat_d, lon_d, destino_oficial, uf_final_d = obter_coordenadas_e_endereco_oficial(num_destino, uf_ancora if uf_ancora else uf_final_o)
     
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
-    # Coordenadas numéricas travam o pino do Google Maps se o vetor analítico Vincenty for coerente (< 120km)
+    # Se a linha reta der coerente (< 120km), confia na amarração das coordenadas exatas de pino
     usar_coords = True if (lat_o != 0.0 and lat_d != 0.0 and dist_linha_reta < 120.0) else False
+    
     dados_reais = extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         
-        # --- AUDITORIA MATEMÁTICA ANTI-ALUCINAÇÃO (Pós-Google Maps) ---
+        # --- FILTRO DE CONTENÇÃO CONTRA ALUCINAÇÕES INTERESTADUAIS (Auditoria Vincenty) ---
+        # Se a distância calculada pelo Google Maps estourar de forma absurda em relação à linha reta urbana curta,
+        # o sistema detecta a quebra lógica, desativa as coordenadas ruins e força a busca pura por texto limpo regionalizado.
         if km_google > 120.0 and dist_linha_reta < 45.0:
             dados_reais_seguros = extrair_dados_reais_google(origem_oficial, destino_oficial, 0.0, 0.0, 0.0, 0.0, usar_coordenadas=False)
             if dados_reais_seguros:
@@ -291,7 +247,6 @@ def calcular_pipeline_logistico(origem, destino):
                 
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # CONTINGÊNCIA EM CASO DE ADVERSIDADE DE REDE
     link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_oficial)}&destination={requests.utils.quote(destino_oficial)}&travelmode=driving"
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     minutos = round((km_terrestre / 45.0) * 60) if km_terrestre > 0.0 else 0
@@ -300,7 +255,7 @@ def calcular_pipeline_logistico(origem, destino):
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
 st.title("🚗 Gerenciador de Rotas Inteligentes")
-st.subheader("Engine de Alta Precisão Geográfica e Roteamento Universal")
+st.subheader("Engine Logística Dinâmica Nacional — Operação Gratuita")
 st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
 
 arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"])
@@ -309,11 +264,11 @@ if arquivo_carregado is not None:
     df = pd.read_excel(arquivo_carregado)
     
     if 'Origem' not in df.columns or 'Destino' not in df.columns:
-        st.error("Erro de Validação: Certifique-se de que a planilha possui as colunas obrigatórias 'Origem' e 'Destino'.")
+        st.error("Erro de Validação: Planilha precisa conter as colunas 'Origem' e 'Destino'.")
     else:
-        st.success("Tabela de dados detectada com sucesso! Pronto para processar.")
+        st.success("Tabela carregada e validada com sucesso.")
         
-        if st.button("Iniciar Processamento em Lote"):
+        if st.button("Iniciar Processamento Universal"):
             for col in ['Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']:
                 df[col] = None
 
