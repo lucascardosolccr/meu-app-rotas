@@ -54,7 +54,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps, Black := envolve_balsa if 'Black' in locals() else envolve_balsa
+            return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
         pass
@@ -128,7 +128,6 @@ def obter_coordenadas_e_endereco_oficial(localidade, contexto_ancora=""):
             componentes = [logr, bair, loca, uf]
             endereco_oficial_cep = ", ".join([c for c in componentes if c]) + f", {cep_limpo}"
             
-            # Captura Lat/Lon do CEP estruturado via ArcGIS
             url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(endereco_oficial_cep + ', Brasil')}&maxLocations=1&sourceCountry=BRA"
             try:
                 res_arc = requests.get(url_arc, timeout=5).json()
@@ -139,7 +138,7 @@ def obter_coordenadas_e_endereco_oficial(localidade, contexto_ancora=""):
                 pass
             return 0.0, 0.0, endereco_oficial_cep
 
-    # 2. SE FOR TEXTO COMUM: INJETA O CONTEXTO ÂNCORA VINDOURO DA MESMA LINHA
+    # 2. SE FOR ENDEREÇO TEXTUAL COMUM: INJETA O CONTEXTO ÂNCORA VINDOURO DA MESMA LINHA
     query = f"{texto_str}, {contexto_ancora}, Brasil" if contexto_ancora and "BRASIL" not in texto_upper else f"{texto_str}, Brasil" if "BRASIL" not in texto_upper else texto_str
     
     # --- PROVEDOR PROPRIETÁRIO (ArcGIS Server REST) ---
@@ -192,10 +191,9 @@ def calcular_pipeline_logistico(origem, destino):
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # MATRIZ DE COERÊNCIA EM NÍVEL DE LINHA (FUSION CONTEXT)
-    # Tenta pescar metadados de cidade/estado de um CEP presente na própria linha para guiar o endereço textual vizinho
     contexto_ancora = ""
-    cep_o_limpo = re.sub(r'\D', '', origem_clean)
+    cep_o_limpo = re.sub(r'\D', '', \
+origem_clean)
     cep_d_limpo = re.sub(r'\D', '', destino_clean)
     
     if len(cep_o_limpo) == 8:
@@ -205,15 +203,11 @@ def calcular_pipeline_logistico(origem, destino):
         _, _, loca, uf = extrair_metadados_via_cep(cep_d_limpo)
         if loca: contexto_ancora = f"{loca}, {uf}"
 
-    # Resolve os metadados geográficos aplicando a fusão de contexto dinâmico
     lat_o, lon_o, origem_oficial = obter_coordenadas_e_endereco_oficial(origem_clean, contexto_ancora)
     lat_d, lon_d, destino_oficial = obter_coordenadas_e_endereco_oficial(destino_clean, contexto_ancora)
     
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
-    # GATILHO GEODÉSICO DE SEGURANÇA ANTIALUCINAÇÃO:
-    # Se a distância calculada em linha reta estourar um limite geográfico lógico para frotas urbanas diárias
-    # (indicação clara de que o geocodificador pulou de estado), desativa as coordenadas e força o Google por texto tratado.
     usar_coords = True if (lat_o != 0.0 and lat_d != 0.0 and dist_linha_reta < 120.0) else False
     
     dados_reais = extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
@@ -221,8 +215,6 @@ def calcular_pipeline_logistico(origem, destino):
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         
-        # Filtro de Contingência de Malha: Se a rota rodoviária final ultrapassar de forma absurda a linha reta,
-        # faz o recálculo textual puro para expurgar erros interestaduais
         if km_google > 150.0 and dist_linha_reta < 50.0:
             dados_reais_seguros = extrair_dados_reais_google(origem_oficial, destino_oficial, 0.0, 0.0, 0.0, 0.0, usar_coordenadas=False)
             if dados_reais_seguros:
@@ -230,7 +222,6 @@ def calcular_pipeline_logistico(origem, destino):
                 
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # FALLBACK ADAPTATIVO
     link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_oficial)}&destination={requests.utils.quote(destino_oficial)}&travelmode=driving"
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     minutos = round((km_terrestre / 45.0) * 60) if km_terrestre > 0.0 else 0
