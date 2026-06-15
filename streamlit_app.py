@@ -99,7 +99,7 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         return 0.0
 
 def buscar_via_cep(cep):
-    """Busca estruturada e imutável na API nacional aberta dos Correios (ViaCEP)"""
+    """Busca estruturada na base nacional unificada dos Correios (ViaCEP)"""
     cep_limpo = re.sub(r'\D', '', str(cep))
     if len(cep_limpo) == 8:
         try:
@@ -111,108 +111,118 @@ def buscar_via_cep(cep):
                 uf = res.get('uf', '').strip()
                 
                 componentes = [logradouro, bairro, localidade, uf]
-                endereco_formatado = ", ".join([c for c in componentes if c])
-                return endereco_formatado + f", {res.get('cep')}"
+                return ", ".join([c for c in componentes if c]) + f", CEP {res.get('cep')}"
         except Exception:
             pass
     return None
 
 def obter_coordenadas_e_endereco_oficial(localidade):
     """
-    CAMADA GEOGRÁFICA INTEROPERÁVEL UNIVERSAL - Resolução e higienização sem regras locais fixas.
-    Funciona de forma totalmente automática para qualquer endereço ou CEP do Brasil.
+    CAMADA GEOGRÁFICA INTEROPERÁVEL - Sistema de Validação por Triangulação em Cascata.
+    Mapeia e deduz o endereço estruturado (Logradouro, Bairro, Cidade, Estado) de inputs parciais.
     """
     texto_str = str(localidade).strip()
     texto_upper = texto_str.upper()
     
-    # Captura frações numéricas/urbanas latentes para manter a fidelidade do ponto (ex: Conjunto, Bloco, Chácara, Número)
-    fracao_urbana = ""
-    match_fracao = re.search(r'\b(CONJUNTO|CJ|QUADRA|QD|BLOCO|BL|LOTE|LT|CHÁCARA|CHACARA|NÚMERO|Nº|NUMERO|N|APARTAMENTO|AP|CASA|KM)\s*([A-Za-z0-9\/.]+)\b', texto_upper)
-    if match_fracao and not re.match(r'^\d{5}-?\d{3}$', texto_str):
-        fracao_urbana = match_fracao.group(0)
+    # Isola frações urbanas e numéricas prediais específicas informadas (Evita perdas na geocodificação)
+    identificacao_predial = ""
+    match_num = re.search(r'\b(CONJUNTO|CJ|QUADRA|QD|BLOCO|BL|LOTE|LT|CHÁCARA|CHACARA|NÚMERO|Nº|NUMERO|N|CASA|AP)\s*([A-Za-z0-9\/.]+)\b', texto_upper)
+    if match_num and not re.match(r'^\d{5}-?\d{3}$', texto_str):
+        identificacao_predial = match_num.group(0)
 
-    # 1. PROCESSAMENTO SOBERANO DE CEP (ViaCEP - Base Oficial dos Correios)
-    cep_limpo = re.sub(r'\D', '', texto_str)
-    if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str or "CEP" in texto_upper):
-        endereco_via_cep = buscar_via_cep(cep_limpo)
+    # 1. RESOLUÇÃO SOBERANA DE INPUTS POR CEP DIRECT (ViaCEP)
+    match_cep = re.search(r'\b\d{5}-?\d{3}\b', texto_str)
+    if match_cep or (len(re.sub(r'\D', '', texto_str)) == 8 and texto_str.isdigit()):
+        cep_alvo = match_cep.group(0).replace("-", "") if match_cep else re.sub(r'\D', '', texto_str)
+        endereco_via_cep = buscar_via_cep(cep_alvo)
         if endereco_via_cep:
-            url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(endereco_via_cep)}&limit=1&countrycodes=br"
-            headers_osm = {"User-Agent": "GerenciadorRotasUniversais/5.0 (lucasccruz@gmail.com)"}
+            url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(endereco_via_cep + ', Brasil')}&maxLocations=1&sourceCountry=BRA"
             try:
-                res_osm = requests.get(url_osm, headers=headers_osm, timeout=5).json()
-                if res_osm:
-                    return float(res_osm[0]['lat']), float(res_osm[0]['lon']), endereco_via_cep
+                res_arc = requests.get(url_arc, timeout=5).json()
+                if res_arc.get('candidates'):
+                    loc = res_arc['candidates'][0]['location']
+                    return float(loc['y']), float(loc['x']), f"{endereco_via_cep}, Brasil"
             except Exception:
                 pass
-            return 0.0, 0.0, endereco_via_cep
+            return 0.0, 0.0, f"{endereco_via_cep}, Brasil"
 
-    # 2. SE FOR ENDEREÇO TEXTUAL COMUM: GEOCODIFICAÇÃO E ENRIQUECIMENTO VIA OPENSTREETMAP (NOMINATIM)
+    # 2. RESOLUÇÃO DE ENDEREÇOS COMUNS / PARCIAIS (ArcGIS REST Engine)
     query = texto_str if "BRASIL" in texto_upper else f"{texto_str}, Brasil"
-    url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query)}&limit=3&addressdetails=1&countrycodes=br"
-    headers_osm = {"User-Agent": "GerenciadorRotasUniversais/5.0 (lucasccruz@gmail.com)"}
+    url_arcgis = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA&outFields=*"
     
     try:
-        resposta = requests.get(url_osm, headers=headers_osm, timeout=10).json()
-        if resposta:
-            for candidato in resposta:
-                lat = float(candidato['lat'])
-                lon = float(candidato['lon'])
+        resposta = requests.get(url_arcgis, timeout=8).json()
+        if respuesta.get('candidates'):
+            candidato = resposta['candidates'][0]
+            lat = float(candidato['location']['y'])
+            lon = float(candidato['location']['x'])
+            
+            # Se o ArcGIS localizar atributos granulares válidos, reconstrói a string estruturada
+            atributos = candidato.get('attributes', {})
+            logradouro_arc = atributos.get('StAddr', '').strip()
+            bairro_arc = atributos.get('Neighborhood', '').strip()
+            cidade_arc = atributos.get('City', '').strip()
+            estado_arc = atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()
+            
+            if logradouro_arc and len(logradouro_arc.split()) > 1:
+                # Re-acopla o número de conjunto/chácara/lote original no logradouro deduzido
+                if identificacao_predial and identificacao_predial.upper() not in logradouro_arc.upper():
+                    logradouro_arc = f"{logradouro_arc} {identificacao_predial.title()}"
                 
-                addr_details = candidato.get('address', {})
-                cep_identificado = addr_details.get('postcode', '').strip()
-                cep_identificado_limpo = re.sub(r'\D', '', cep_identificado)
-                
-                # FEEDBACK LOOP AUTOMÁTICO: Se o mapeador global achar um CEP válido, cruza com os Correios
-                if len(cep_identificado_limpo) == 8:
-                    endereco_oficial_correios = buscar_via_cep(cep_identificado_limpo)
-                    if endereco_oficial_correios:
-                        # Re-anexa as informações específicas da planilha do usuário à rua oficial
-                        if fracao_urbana and fracao_urbana.upper() not in endereco_oficial_correios.upper():
-                            partes = endereco_oficial_correios.split(', ', 1)
-                            if len(partes) > 1:
-                                endereco_oficial_correios = f"{partes[0]} {fracao_urbana.title()}, {partes[1]}"
-                        return lat, lon, endereco_oficial_correios
+                componentes_arc = [logradouro_arc, bairro_arc, cidade_arc, estado_arc]
+                endereco_reconstruido = ", ".join([c for c in componentes_arc if c.strip()]) + ", Brasil"
+                return lat, lon, endereco_reconstruido
+            
+            return lat, lon, f"{candidato['address']}, Brasil"
+    except Exception:
+        pass
 
-            # FALLBACK ESTRUTURADO: Se o local geocodificado não tiver CEP individualizado no OpenStreetMap
-            primeiro = resposta[0]
-            lat = float(primeiro['lat'])
-            lon = float(primeiro['lon'])
-            details = primeiro.get('address', {})
+    # 3. PROVEDOR SECUNDÁRIO AUXILIAR DE REDUNDÂNCIA (OpenStreetMap Nominatim)
+    url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query)}&limit=1&addressdetails=1&countrycodes=br"
+    headers_osm = {"User-Agent": "GerenciadorRotasInteligentes/6.0 (lucasccruz@gmail.com)"}
+    try:
+        res_osm = requests.get(url_osm, headers=headers_osm, timeout=6).json()
+        if res_osm:
+            opcao = res_osm[0]
+            lat = float(opcao['lat'])
+            lon = float(opcao['lon'])
+            details = opcao.get('address', {})
+            
             rua = details.get('road', details.get('pedestrian', '')).strip()
             bairro_osm = details.get('neighbourhood', details.get('suburb', details.get('city_district', ''))).strip()
             cidade_osm = details.get('city', details.get('town', '')).strip()
             estado_osm = details.get('state', '').strip()
             
-            if rua and len(rua.split()) > 1:
-                componentes = [rua, fracao_urbana if fracao_urbana else "", bairro_osm, cidade_osm, estado_osm]
-                return lat, lon, ", ".join([c for c in componentes if c.strip()]) + ", Brasil"
-            
-            return lat, lon, primeiro['display_name']
+            componentes_osm = [texto_str if len(texto_str) > len(rua) else rua, bairro_osm, cidade_osm, estado_osm]
+            endereco_osm = ", ".join([c for c in componentes_osm if c.strip()]) + ", Brasil"
+            return lat, lon, endereco_osm
     except Exception:
         pass
         
-    return 0.0, 0.0, texto_str
+    return 0.0, 0.0, query
 
 def calcular_pipeline_logistico(origem, destino):
     """Pipeline central avançado com injeção contextual de strings e coordenadas"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Resolve e qualifica as strings de forma totalmente agnóstica pelas APIs geográficas
+    # Executa a limpeza, dedução de bairros e estruturação nas APIs geográficas
     lat_o, lon_o, origem_oficial = obter_coordenadas_e_endereco_oficial(origem_clean)
     lat_d, lon_d, destino_oficial = obter_coordenadas_e_endereco_oficial(destino_clean)
     
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
-    # Coordenadas são ativadas apenas se o cálculo analítico de Vincenty apontar consistência urbana local
-    usar_coords = True if (lat_o != 0.0 and lat_d != 0.0 and dist_linha_reta < 100.0) else False
+    # Coordenadas numéricas travam o pino do Google Maps se o vetor analítico Vincenty for coerente (< 120km)
+    usar_coords = True if (lat_o != 0.0 and lat_d != 0.0 and dist_linha_reta < 120.0) else False
     dados_reais = extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         
-        # FILTRO DE AUDITORIA CONTRA HOMÔNIMOS INTERESTADUAIS (Gatilho de Recálculo Dinâmico)
-        if km_google > 120.0 and dist_linha_reta < 40.0:
+        # --- AUDITORIA MATEMÁTICA ANTI-ALUCINAÇÃO (Pós-Google Maps) ---
+        # Se a rota rodoviária explodir em relação à linha reta curta (erro de homônimo interestadual),
+        # o sistema detecta o erro lógico, cancela as coordenadas ruins e recalcula tudo via string pura estruturada.
+        if km_google > 120.0 and dist_linha_reta < 45.0:
             dados_reais_seguros = extrair_dados_reais_google(origem_oficial, destino_oficial, 0.0, 0.0, 0.0, 0.0, usar_coordenadas=False)
             if dados_reais_seguros:
                 return dados_reais_seguros[0], dados_reais_seguros[1], dados_reais_seguros[2], dados_reais_seguros[3], dist_linha_reta
@@ -228,7 +238,7 @@ def calcular_pipeline_logistico(origem, destino):
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
 st.title("🚗 Gerenciador de Rotas Inteligentes")
-st.subheader("Engine Logística 100% Adaptável e Automatizada — Operação Gratuita")
+st.subheader("Engine de Alta Precisão Geográfica e Roteamento Universal")
 st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
 
 arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"])
