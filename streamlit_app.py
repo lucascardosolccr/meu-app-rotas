@@ -32,7 +32,7 @@ cache_cep = Cache("./cache_cep")
 cache_google = Cache("./cache_google")
 cache_reverse = Cache("./cache_reverse")
 
-# Problema 6 Solucionado: Expurgar chaves expiradas na inicialização (evita vazamento de disco)
+# Expurgar chaves expiradas na inicialização (evita vazamento de disco)
 cache_geo.cull()
 cache_rotas.cull()
 cache_poi.cull()
@@ -59,21 +59,16 @@ adapter = HTTPAdapter(max_retries=retry_strategy)
 session.mount("https://", adapter)
 session.mount("http://", adapter)
 
-# Problema 2 Solucionado: Teto rígido em 4 workers globais
-if "executor_global" not in st.session_state:
-    st.session_state["executor_global"] = ThreadPoolExecutor(max_workers=4)
-
-# Problema 3 Solucionado: Fila de contenção global para proteger o Rate Limit do Nominatim
+# Fila de contenção global para proteger o Rate Limit do Nominatim
 lock_nominatim = Lock()
 
 CACHE_IBGE_PATH = "municipios_ibge.pkl"
 
 # ==============================================================================
-# 🎛️ DADOS GLOBAIS THREAD-SAFE (IBGE TEMPORIZADO)
+# 🎛️ DADOS GLOBAIS THREAD-SAFE (FIM DO KEYERROR DO SESSION_STATE)
 # ==============================================================================
-@st.cache_data
-def carregar_dados_ibge():
-    """Problema 7 Solucionado: Valida se o cache IBGE tem mais de 30 dias para reciclagem"""
+def carregar_dados_ibge_seguro():
+    """Valida se o cache IBGE tem mais de 30 dias para reciclagem e retorna globais thread-safe"""
     if os.path.exists(CACHE_IBGE_PATH):
         if time.time() - os.path.getmtime(CACHE_IBGE_PATH) > (30 * 86400):
             os.remove(CACHE_IBGE_PATH)
@@ -106,7 +101,8 @@ def carregar_dados_ibge():
     
     return base_mun, base_est, list(base_mun.keys())
 
-IBGE_MUNICIPIOS, IBGE_ESTADOS, LISTA_MUNICIPIOS = carregar_dados_ibge()
+# Atribuição global pura. Variáveis totalmente acessíveis às worker threads.
+IBGE_MUNICIPIOS, IBGE_ESTADOS, LISTA_MUNICIPIOS = carregar_dados_ibge_seguro()
 
 SINONIMOS_SEMANTICOS = {
     "UNB": "UNIVERSIDADE DE BRASILIA", "CATOLICA": "UNIVERSIDADE CATOLICA",
@@ -121,7 +117,7 @@ POI_KEYWORDS = [
 ]
 
 # ==============================================================================
-# 🧹 ENGINE DE RESOLUÇÃO SEMÂNTICA
+# 🧹 ENGINE DE RESOLUÇÃO SEMÂNTICA (UTILIZANDO GLOBAIS SEGURAS)
 # ==============================================================================
 def normalizar_endereco_universal(texto):
     if not texto or pd.isna(texto): return ""
@@ -200,7 +196,7 @@ def camada_postal_redundante(cep_limpo):
     return "", "", "", ""
 
 # ==============================================================================
-# 🧮 LÓGICA GEODÉSICA DE ALTA FIDELIDADE
+# 🧮 LÓGICA GEODÉSICA DE ALTA FIDELIDADE (WGS-84)
 # ==============================================================================
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     if not (-90 <= lat1 <= 90) or not (-90 <= lat2 <= 90) or not (-180 <= lon1 <= 180) or not (-180 <= lon2 <= 180): return 0.0
@@ -214,11 +210,11 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         lam = L
         for _ in range(100):
             sinLam, cosLam = math.sin(lam), math.cos(lam)
-            sinSigma = math.sqrt((cosU2 * sinLam) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLam) ** 2)
+            sinSigma = math.sqrt((cosU2 * sinLam) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda) ** 2)
             if sinSigma == 0: return 0.0
             cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda
             sigma = math.atan2(sinSigma, cosSigma)
-            sinAlpha = cosU1 * cosU2 * sinLam / sinSigma
+            sinAlpha = cosU1 * cosU2 * sinLambda / sinSigma
             cosSqAlpha = 1 - sinAlpha ** 2
             cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha if cosSqAlpha != 0 else 0
             C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha))
@@ -272,7 +268,6 @@ def API_ArcGIS(query):
     return None
 
 def API_Nominatim(query):
-    """Problema 3 Solucionado: Uso de Lock para garantir Rate Limit da API do Nominatim"""
     with lock_nominatim:
         time.sleep(1.1)
         try:
@@ -298,7 +293,6 @@ def API_Photon(query):
     return None
 
 def API_Overpass_POIs(texto_norm):
-    """Problema 4 Solucionado: Overpass com Fallback para mirrors alternativos garantindo resiliência"""
     if len(texto_norm) < 10 or not parece_poi(texto_norm): return None
     if texto_norm in cache_poi: return cache_poi[texto_norm]
     
@@ -383,16 +377,18 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     res_poi = API_Overpass_POIs(cache_key)
     if res_poi: candidatos_validos.append(res_poi)
 
-    fs = [
-        st.session_state["executor_global"].submit(API_ArcGIS, texto_expandido),
-        st.session_state["executor_global"].submit(API_Nominatim, texto_expandido),
-        st.session_state["executor_global"].submit(API_Photon, texto_expandido)
-    ]
-    for futuro in as_completed(fs):
-        try:
-            res = futuro.result(timeout=5)
-            if res: candidatos_validos.append(res)
-        except Exception: pass
+    # Criação Efêmera do Pool para APIs: Elimina a dependência de st.session_state dentro das worker threads
+    with ThreadPoolExecutor(max_workers=3) as pool_api:
+        fs = [
+            pool_api.submit(API_ArcGIS, texto_expandido),
+            pool_api.submit(API_Nominatim, texto_expandido),
+            pool_api.submit(API_Photon, texto_expandido)
+        ]
+        for futuro in as_completed(fs):
+            try:
+                res = futuro.result(timeout=5)
+                if res: candidatos_validos.append(res)
+            except Exception: pass
             
     res_final = processar_consenso_e_pontuacao_centesimal(candidatos_validos, texto_cru)
     if res_final:
@@ -405,7 +401,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     return 0.0, 0.0, texto_expandido, "BAIXA", 0, "", "", "N/A"
 
 # ==============================================================================
-# 🚀 MOTOR DE ROTEAMENTO CORPORATIVO (GOOGLE PREVIEW PRIORITÁRIO)
+# 🚀 MOTOR DE ROTEAMENTO (GOOGLE PREVIEW PRIORITÁRIO COM VALIDAÇÃO RÍGIDA)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
     cache_key = f"{normalizar_endereco_universal(origem_raw)}|{normalizar_endereco_universal(destino_raw)}"
@@ -546,115 +542,4 @@ def embrulhar_task_paralela(item):
     return idx, calcular_pipeline_logistico(orig, dest)
 
 # ==============================================================================
-# 🚗 INTERFACE VISUAL NO STREAMLIT (MANIPULAÇÃO EM LOTE CORPORATIVA)
-# ==============================================================================
-st.title("🚗 Gerenciador de Rotas Inteligentes")
-st.subheader("Engine de Resolução Espacial Nacional — Operação Corporativa")
-st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
-
-arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"])
-
-if arquivo_carregado is not None:
-    df = pd.read_excel(arquivo_carregado)
-    
-    if 'Origem' not in df.columns or 'Destino' not in df.columns:
-        st.error("Erro de Validação: Certifique-se de que a planilha possui as colunas obrigatórias 'Origem' e 'Destino'.")
-    else:
-        # Problema 5 Solucionado: Interrupção imediata de barramento limitando carga de RAM extrema
-        MAX_LINHAS = 5000
-        if len(df) > MAX_LINHAS:
-            st.error(f"⚠️ A planilha excede o limite arquitetural de {MAX_LINHAS} linhas. Por favor, fracione o arquivo para evitar sobrecarga de memória (Out Of Memory).")
-            st.stop()
-            
-        st.success(f"Tabela de dados detectada com sucesso! ({len(df)} registros mapeados). Pronto para processar.")
-        
-        if st.button("Iniciar Processamento em Lote"):
-            novas_colunas = [
-                'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta', 
-                'Fonte da Rota', 'Score da Rota', 
-                'Confianca Origem', 'Score Num Origem', 'Distrito Origem', 'Municipio Origem', 'Fonte Geocoding Origem', 'Endereco Oficial Origem',
-                'Confianca Destino', 'Score Num Destino', 'Distrito Destino', 'Municipio Destino', 'Fonte Geocoding Destino', 'Endereco Oficial Destino',
-                'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino',
-                'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Status da Rota'
-            ]
-            for col in novas_colunas: df[col] = None
-                
-            tarefas = []
-            for linha in df.itertuples(index=True):
-                origem = str(getattr(linha, 'Origem', '')).strip()
-                destino = str(getattr(linha, 'Destino', '')).strip()
-                if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
-                    tarefas.append((linha.Index, origem, destino))
-            
-            # Problema 8 Solucionado: O uso do .at[] injeta os dados na base original instantaneamente, matando o vazamento de memória da matriz temporária
-            executor_lote = st.session_state["executor_global"]
-            futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in tarefas}
-            
-            concluidos = 0
-            barra_progresso = st.progress(0)
-            container_status = st.empty()
-            
-            for f in as_completed(futuros):
-                idx, res = f.result()
-                
-                df.at[idx, 'Distancia'] = res[0]
-                df.at[idx, 'Tempo'] = res[1]
-                df.at[idx, 'Link da Rota'] = res[2]
-                df.at[idx, 'Balsas'] = res[3]
-                df.at[idx, 'Linha Reta'] = res[4]
-                df.at[idx, 'Fonte da Rota'] = res[5]
-                df.at[idx, 'Score da Rota'] = res[6]
-                df.at[idx, 'Confianca Origem'] = res[7]
-                df.at[idx, 'Score Num Origem'] = res[8]
-                df.at[idx, 'Distrito Origem'] = res[9]
-                df.at[idx, 'Municipio Origem'] = res[10]
-                df.at[idx, 'Fonte Geocoding Origem'] = res[11]
-                df.at[idx, 'Endereco Oficial Origem'] = res[12]
-                df.at[idx, 'Confianca Destino'] = res[13]
-                df.at[idx, 'Score Num Destino'] = res[14]
-                df.at[idx, 'Distrito Destino'] = res[15]
-                df.at[idx, 'Municipio Destino'] = res[16]
-                df.at[idx, 'Fonte Geocoding Destino'] = res[17]
-                df.at[idx, 'Endereco Oficial Destino'] = res[18]
-                df.at[idx, 'Lat Origem'] = res[19]
-                df.at[idx, 'Lon Origem'] = res[20]
-                df.at[idx, 'Lat Destino'] = res[21]
-                df.at[idx, 'Lon Destino'] = res[22]
-                df.at[idx, 'Tempo Geocoding (s)'] = res[23]
-                df.at[idx, 'Tempo Roteamento (s)'] = res[24]
-                df.at[idx, 'Tempo Total (s)'] = res[25]
-                
-                # O Grande Ganho: Formulação da Classificação Parametrizada Final (Score Global)
-                score_o = res[8]
-                score_d = res[14]
-                score_r = res[6]
-                score_global = round((0.35 * score_o) + (0.35 * score_d) + (0.30 * score_r), 2)
-                df.at[idx, 'Score Final Global'] = score_global
-                
-                if score_global >= 90:
-                    df.at[idx, 'Status da Rota'] = "Excelente"
-                elif score_global >= 80:
-                    df.at[idx, 'Status da Rota'] = "Boa"
-                elif score_global >= 70:
-                    df.at[idx, 'Status da Rota'] = "Aceitável"
-                else:
-                    df.at[idx, 'Status da Rota'] = "Revisar"
-                
-                concluidos += 1
-                container_status.text(f"🚀 Roteamento Assíncrono: {concluidos} de {len(tarefas)} processados...")
-                barra_progresso.progress(concluidos / len(tarefas))
-                
-            container_status.empty(); barra_progresso.empty()
-            st.success("✨ Processamento em lote concluído com sucesso!")
-            
-            ordem_finais = ['Origem', 'Destino'] + novas_colunas
-            df = df.reindex(columns=ordem_finais)
-            
-            output_buffer = io.BytesIO()
-            with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: df.to_excel(writer, index=False)
-            
-            st.write("---"); st.balloons()
-            st.download_button(
-                label="📥 Baixar Planilha Logística Processada", data=output_buffer.getvalue(),
-                file_name="planilha_rotas_calculada.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+# 🚗 INTERFACE VISUAL
