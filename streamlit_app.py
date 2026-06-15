@@ -129,8 +129,12 @@ def normalizar_endereco_universal(texto):
         r'\bTR\b': 'TRAVESSA', r'\bTV\b': 'TRAVESSA', r'\bPCA\b': 'PRACA', r'\bPQ\b': 'PARQUE',
         r'\bSQN\b': 'SUPERQUADRA NORTE', r'\bSQS\b': 'SUPERQUADRA SUL', r'\bCLN\b': 'COMERCIO LOCAL NORTE'
     }
-    for padrao, expansao in abreviacoes.items(): t = re.sub(padrao, expansao, t)
-    for chave, valor in SINONIMOS_SEMANTICOS.items(): t = re.sub(r'\b' + chave + r'\b', valor, t)
+    for padrao, expansao in abreviacoes.items(): 
+        t = re.sub(padrao, expansao, t)
+        
+    for chave, valor in SINONIMOS_SEMANTICOS.items(): 
+        t = re.sub(r'\b' + chave + r'\b', valor, t)
+        
     return re.sub(r'\s+', ' ', t).strip()
 
 def corrigir_toponimo_base_nacional_ibge(texto_normalizado):
@@ -229,7 +233,7 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         return round(6371.0 * 2 * math.atan2(math.sqrt(m_a), math.sqrt(1 - m_a)), 2)
 
 # ==============================================================================
-# 🗺️ GEOCODIFICAÇÃO PARALELIZADA (ARCGIS + NOMINATIM + PHOTON)
+# 🗺️ GEOCODIFICAÇÃO PARALELIZADA E REVERSE
 # ==============================================================================
 def executar_reverse_geocoding_enrichment(lat, lon):
     rev_key = f"{round(lat,5)}|{round(lon,5)}"
@@ -312,7 +316,8 @@ def API_Overpass_POIs(texto_norm):
                     res_poi = {"lat": lat, "lon": lon, "fonte": "OVERPASS", "score_base": 35, "cidade": tags.get("addr:city", "").upper(), "estado": tags.get("addr:state", "").upper(), "bairro": tags.get("addr:suburb", "").upper()}
                     cache_poi.set(texto_norm, res_poi, expire=86400)
                     return res_poi
-        except Exception: continue
+        except Exception:
+            continue
     return None
 
 def processar_consenso_e_pontuacao_centesimal(candidatos, texto_cru):
@@ -372,7 +377,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     res_poi = API_Overpass_POIs(cache_key)
     if res_poi: candidatos_validos.append(res_poi)
 
-    # Execução local isolada do Pool Global para evitar Deadlock em chamadas recursivas
     with ThreadPoolExecutor(max_workers=3) as pool_api:
         fs = [
             pool_api.submit(API_ArcGIS, texto_expandido),
@@ -493,7 +497,7 @@ def calcular_pipeline_logistico(origem, destino):
     if res_google:
         tempo_roteamento = round(time.time() - start_rot, 2)
         tempo_total = round(time.time() - start_total, 2)
-        retorno = (res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total)
+        retorno = (res_google[0], res_google[1], link_fallback, res_google[3], dist_linha_reta, "Google Preview", res_google[4], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
         return retorno
 
@@ -530,7 +534,7 @@ def embrulhar_task_paralela(item):
     idx, orig, dest = item
     try:
         return idx, calcular_pipeline_logistico(orig, dest)
-    except Exception as e:
+    except Exception:
         return idx, None
 
 # ==============================================================================
