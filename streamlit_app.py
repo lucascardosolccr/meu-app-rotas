@@ -110,14 +110,13 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
 
 def obter_coordenadas_e_endereco_oficial(localidade):
     """
-    CAMADA GEOGRÁFICA INTEROPERÁVEL - Validação e Enriquecimento Prévio.
-    Se for CEP, força a string oficial dos Correios (ViaCEP) sem alterações adicionais.
-    Se for endereço textual comum, limpa e cruza os dados com o OpenStreetMap (Nominatim).
+    CAMADA GEOGRÁFICA INTEROPERÁVEL MÁXIMA (ArcGIS Pro + OpenStreetMap + ViaCEP)
+    Varredura preditiva híbrida para estruturação e higienização completa de endereços.
     """
     texto_str = str(localidade).strip()
     texto_upper = texto_str.upper()
     
-    # 1. DETECÇÃO E INTERCEPTAÇÃO POSTAL PURA (ViaCEP)
+    # 1. TRATAMENTO SOBERANO DE CEP (ViaCEP)
     cep_limpo = re.sub(r'\D', '', texto_str)
     if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str or "CEP" in texto_upper):
         try:
@@ -134,41 +133,68 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                 componentes_cep = [logradouro, bairro, localidade_nome, uf]
                 endereco_oficial_cep = ", ".join([c for c in componentes_cep if c])
                 
-                # Obtém lat/lon do endereço estruturado do CEP via OpenStreetMap para manter o pipeline geodésico
-                url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(endereco_oficial_cep + ', Brasil')}&limit=1"
-                headers_osm = {"User-Agent": "GerenciadorRotasInteligentes/1.0 (lucasccruz@gmail.com)"}
-                res_osm = requests.get(url_osm, headers=headers_osm, timeout=5).json()
+                # Coleta Lat/Lon via ArcGIS para o endereço do CEP para manter precisão do georreferenciamento
+                url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(endereco_oficial_cep + ', Brasil')}&maxLocations=1"
+                res_arc = requests.get(url_arc, timeout=5).json()
+                lat, lon = (0.0, 0.0)
+                if res_arc.get('candidates'):
+                    lat = float(res_arc['candidates'][0]['location']['y'])
+                    lon = float(res_arc['candidates'][0]['location']['x'])
                 
-                lat, lon = (float(res_osm[0]['lat']), float(res_osm[0]['lon'])) if res_osm else (0.0, 0.0)
-                # Retorna exatamente o endereço estruturado atrelado ao CEP sem modificações complementares
+                # Retorna EXATAMENTE o endereço do CEP sem qualquer modificação complementar externa
                 return lat, lon, f"{endereco_oficial_cep}, Brasil"
         except Exception:
             pass
 
-    # 2. SE FOR ENDEREÇO TEXTUAL COMUM: ENRIQUECIMENTO E GEOCODIFICAÇÃO (OpenStreetMap / Nominatim)
-    # Suporte para ancoragem automática local no DF para siglas típicas da malha urbana brasiliense
-    tokens_df = ["QR ", "QN ", "QS ", "QNL ", "QNJ ", "QNM ", "QNO ", "SAMAMBAIA", "CEILANDIA", "CEILÂNDIA", "TAGUATINGA", "UCB", "CATOLICA", "UNB", "UNICEUB", "CEUB"]
+    # 2. TRATAMENTO DE ENDEREÇO TEXTUAL COMUM: ECOSSISTEMA DUPLO (ArcGIS + OSM)
+    # Suporte contextual para malha urbana e siglas do Distrito Federal
+    tokens_df = ["QR ", "QN ", "QS ", "QNL ", "QNJ ", "QNM ", "QNO ", "SAMAMBAIA", "CEILANDIA", "CEILÂNDIA", "TAGUATINGA", "UCB", "CATOLICA", "UNB", "UNICEUB", "CEUB", "SIG ", "SIA "]
     sufixo_regional = ""
     if any(t in texto_upper for t in tokens_df) and "DF" not in texto_upper and "BRAS" not in texto_upper:
         sufixo_regional = ", Brasília, DF"
 
     query = f"{texto_str}{sufixo_regional}, Brasil" if "BRASIL" not in texto_upper else texto_str
     
-    url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query)}&limit=3&addressdetails=1"
-    headers_osm = {"User-Agent": "GerenciadorRotasInteligentes/1.0 (lucasccruz@gmail.com)"}
-    
+    # --- PROVEDOR A: ARCGIS WORLD GEOCODING ENGINE ---
+    url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA&outFields=*"
     try:
-        resposta = requests.get(url_osm, headers=headers_osm, timeout=8).json()
-        if resposta:
-            melhor_opcao = resposta[0]
-            lat = float(melhor_opcao['lat'])
-            lon = float(melhor_opcao['lon'])
+        res_arc = requests.get(url_arc, timeout=8).json()
+        if res_arc.get('candidates'):
+            candidato = res_arc['candidates'][0]
+            # Validação por Inteligência de Score (Aceita apenas resultados com alta fidelidade cadastral)
+            if candidato.get('score', 0) >= 85:
+                lat = float(candidato['location']['y'])
+                lon = float(candidato['location']['x'])
+                
+                atributos = candidato.get('attributes', {})
+                logradouro_arc = atributos.get('StAddr', '').strip()
+                bairro_arc = atributos.get('Neighborhood', '').strip()
+                cidade_arc = atributos.get('City', '').strip()
+                estado_arc = atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()
+                
+                if logradouro_arc and len(logradouro_arc.split()) > 1:
+                    componentes_arc = [logradouro_arc, bairro_arc, cidade_arc, estado_arc]
+                    endereco_completo = ", ".join([c for c in componentes_arc if c])
+                    return lat, lon, f"{endereco_completo}, Brasil"
+                
+                return lat, lon, f"{candidato['address']}"
+    except Exception:
+        pass
+
+    # --- PROVEDOR B (FALLBACK): OPENSTREETMAP NOMINATIM ENGINE ---
+    url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query)}&limit=1&addressdetails=1"
+    headers_osm = {"User-Agent": "GerenciadorRotasInteligentes/1.0 (lucasccruz@gmail.com)"}
+    try:
+        res_osm = requests.get(url_osm, headers=headers_osm, timeout=6).json()
+        if res_osm:
+            opcao = res_osm[0]
+            lat = float(opcao['lat'])
+            lon = float(opcao['lon'])
             
-            # Reconstrói dinamicamente e valida o endereço com bairro, cidade e estado informados pela malha geográfica
-            addr_details = melhor_opcao.get('address', {})
+            addr_details = opcao.get('address', {})
             rua = addr_details.get('road', addr_details.get('pedestrian', '')).strip()
             bairro_osm = addr_details.get('neighbourhood', addr_details.get('suburb', addr_details.get('city_district', ''))).strip()
-            cidade_osm = addr_details.get('city', addr_details.get('town', addr_details.get('municipality', ''))).strip()
+            cidade_osm = addr_details.get('city', addr_details.get('town', '').strip())
             estado_osm = addr_details.get('state', '').strip()
             
             componentes_osm = [rua, bairro_osm, cidade_osm, estado_osm]
@@ -176,7 +202,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             
             if len(endereco_reconstruido) > 10:
                 return lat, lon, f"{endereco_reconstruido}, Brasil"
-            return lat, lon, f"{melhor_opcao['display_name']}"
+            return lat, lon, f"{opcao['display_name']}"
     except Exception:
         pass
         
@@ -194,7 +220,7 @@ def calcular_pipeline_logistico(origem, destino):
     # Cálculo analítico de linha reta via Vincenty
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
-    # Definição de flag de segurança contra coordenadas corrompidas fora do raio geográfico lógico
+    # Definição de flag de segurança contra coordenadas corrompidas
     usar_coords = True if (lat_o != 0.0 and lat_d != 0.0 and dist_linha_reta < 180.0) else False
     
     # Envia a query contendo o endereço qualificado e exato para o motor do Google
@@ -219,7 +245,7 @@ def calcular_pipeline_logistico(origem, destino):
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
 st.title("🚗 Gerenciador de Rotas Inteligentes")
-st.subheader("Engine de Interceptação de API Viva — Operação Gratuita")
+st.subheader("Engine de Interceptação de API Viva — Híbrida e Gratuita")
 st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
 
 arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"])
@@ -293,6 +319,6 @@ if arquivo_carregado is not None:
                 Este software implementa um ecossistema de **Engenharia Reversa de Redes** operando em quatro camadas:
                 1. **Vetorização de Lote:** Extrai os eixos de texto das células da planilha carregada.
                 2. **Mapeamento de API Viva Interna (Camada A):** Dispara requisições ao endpoint corporativo do Google Maps extraindo KMs e tempos rodoviários em tempo real.
-                3. **Filtro de Desambiguação Postal:** Intercepta e reconstrói as strings de CEP na base dos Correios, forçando o Google Maps a renderizar o trajeto sob o protocolo de links de Direções Canônicas, eliminando saltos para homônimos.
+                3. **Filtro de Desambiguação Postal Múltiplo:** Intercepta CEPs via ViaCEP e reconstrói dados textuais cruzando paralelamente os motores ArcGIS Geocoding e OpenStreetMap Nominatim, injetando strings hiper-estruturadas de alta fidelidade antes do traçado de rotas.
                 4. **Vincenty Geodésico:** Computa a linha reta teórica perfeita baseada no elipsoide real da Terra (WGS-84).
                 """)
