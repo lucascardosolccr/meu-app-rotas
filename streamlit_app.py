@@ -22,18 +22,16 @@ st.set_page_config(
 )
 
 # ==============================================================================
-# 🧠 PERSISTÊNCIA EM DISCO E HIGIENIZAÇÃO DE AMBIENTE (CAMADA 10 & PROBLEMA 9)
+# 🧠 INFRAESTRUTURA DE PERSISTÊNCIA EM DISCO E CONEXÃO BLINDADA
 # ==============================================================================
 cache_geo = Cache("./cache_geo")
 cache_rotas = Cache("./cache_rotas")
 cache_poi = Cache("./cache_poi")
 cache_cep = Cache("./cache_cep")
 cache_google = Cache("./cache_google")
-cache_reverse = Cache("./cache_reverse") # Problema 4: Cache dedicado para engenharia reversa
-CACHE_IBGE_PATH = "municipios_ibge.pkl"
+cache_reverse = Cache("./cache_reverse")
 
 def realizar_manutencao_logs_google():
-    """Problema 9 Solucionado: Garante a poda automática de logs brutos antigos (Retenção de 30 dias)"""
     diretorio_logs = "logs_google"
     os.makedirs(diretorio_logs, exist_ok=True)
     limite_tempo = time.time() - (30 * 86400)
@@ -46,10 +44,9 @@ def realizar_manutencao_logs_google():
     except Exception:
         pass
 
-# Executa o Garbage Collector de logs na inicialização da aplicação
 realizar_manutencao_logs_google()
 
-# Sessão HTTP Única com Adaptador de Resiliência Escalável
+# Sessão HTTP Global (Reutiliza TCP/SSL Handshakes)
 session = requests.Session()
 retry_strategy = Retry(
     total=3,
@@ -60,23 +57,17 @@ adapter = HTTPAdapter(max_retries=retry_strategy)
 session.mount("https://", adapter)
 session.mount("http://", adapter)
 
-# Problema 6 Solucionado: Pool unificado corporativo. Fim do surgimento de threads duplicadas/zumbis
 if "executor_global" not in st.session_state:
     st.session_state["executor_global"] = ThreadPoolExecutor(max_workers=8)
 
-# Carregamento Thread-Safe da Base de Dados de Cidades do IBGE
-if "ibge_municipios" not in st.session_state:
-    if os.path.exists(CACHE_IBGE_PATH):
-        try:
-            with open(CACHE_IBGE_PATH, "rb") as f:
-                d = pickle.load(f)
-                st.session_state["ibge_municipios"] = d.get("municipios", {})
-                st.session_state["ibge_estados"] = d.get("estados", {})
-                st.session_state["lista_municipios"] = list(d.get("municipios", {}).keys())
-        except Exception:
-            st.session_state["ibge_municipios"], st.session_state["ibge_estados"], st.session_state["lista_municipios"] = {}, {}, []
-    else:
-        st.session_state["ibge_municipios"], st.session_state["ibge_estados"], st.session_state["lista_municipios"] = {}, {}, []
+SINONIMOS_SEMANTICOS = {
+    "UNB": "UNIVERSIDADE DE BRASILIA",
+    "CATOLICA": "UNIVERSIDADE CATOLICA",
+    "JK": "JUSCELINO KUBITSCHEK",
+    "HBDF": "HOSPITAL DE BASE",
+    "HRAN": "HOSPITAL REGIONAL DA ASA NORTE",
+    "RODOVIARIA": "TERMINAL RODOVIARIO"
+}
 
 POI_KEYWORDS = [
     "AEROPORTO", "HOSPITAL", "UNIVERSIDADE", "FACULDADE", "ESCOLA",
@@ -85,10 +76,46 @@ POI_KEYWORDS = [
 ]
 
 # ==============================================================================
-# 🧹 ENGINE DE RESOLUÇÃO SEMÂNTICA NACIONAL AG NÓSTICA
+# 🎛️ DADOS GLOBAIS THREAD-SAFE
+# ==============================================================================
+@st.cache_data
+def carregar_dados_ibge():
+    caminho = "municipios_ibge.pkl"
+    if os.path.exists(caminho):
+        try:
+            with open(caminho, "rb") as f:
+                d = pickle.load(f)
+                return d.get("municipios", {}), d.get("estados", {}), list(d.get("municipios", {}).keys())
+        except Exception: pass
+
+    base_mun, base_est = {}, {}
+    try:
+        r_est = session.get("https://servicodados.ibge.gov.br/api/v1/localidades/estados", timeout=8)
+        if r_est.status_code == 200:
+            for est in r_est.json():
+                base_est[est["sigla"]] = unidecode(est["nome"]).upper()
+                
+        r_mun = session.get("https://servicodados.ibge.gov.br/api/v1/localidades/municipios", timeout=12)
+        if r_mun.status_code == 200:
+            for mun in r_mun.json():
+                nome_norm = unidecode(mun["nome"]).upper().strip()
+                base_mun[nome_norm] = {
+                    "id": mun["id"],
+                    "uf": mun["microrregiao"]["mesorregiao"]["UF"]["sigla"].upper(),
+                    "nome_oficial": mun["nome"]
+                }
+            with open(caminho, "wb") as f:
+                pickle.dump({"municipios": base_mun, "estados": base_est}, f)
+    except Exception: pass
+    
+    return base_mun, base_est, list(base_mun.keys())
+
+IBGE_MUNICIPIOS, IBGE_ESTADOS, LISTA_MUNICIPIOS = carregar_dados_ibge()
+
+# ==============================================================================
+# 🧹 ENGINE DE RESOLUÇÃO SEMÂNTICA
 # ==============================================================================
 def normalizar_endereco_universal(texto):
-    """Camada 1, 24 & Problema 8 Solucionado: Dicionário estendido de abreviações e tipologias do interior do Brasil"""
     if not texto or pd.isna(texto): return ""
     t = str(texto).strip()
     t = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', t)
@@ -105,20 +132,19 @@ def normalizar_endereco_universal(texto):
     for padrao, expansao in abreviacoes.items():
         t = re.sub(padrao, expansao, t)
         
-    for chave, valor in SINONIMOS_SEMANTICOS := {k: v for k, v in [("UNB", "UNIVERSIDADE DE BRASILIA"), ("CATOLICA", "UNIVERSIDADE CATOLICA")]}:
+    for chave, valor in SINONIMOS_SEMANTICOS.items():
         t = re.sub(r'\b' + chave + r'\b', valor, t)
         
     return re.sub(r'\s+', ' ', t).strip()
 
 def corrigir_toponimo_base_nacional_ibge(texto_normalizado):
-    """Camada 2 & Problema 7 Solucionado: Incremento do teto mínimo de casamento de tokens para 97% contra colisões"""
-    if not texto_normalizado or not st.session_state.get("lista_municipios"): return texto_normalizado
+    if not texto_normalizado or not LISTA_MUNICIPIOS: return texto_normalizado
     tokens = texto_normalizado.split()
     for token in tokens:
         if len(token) >= 5:  
-            if token in st.session_state["ibge_municipios"]: continue
-            match = process.extractOne(token, st.session_state["lista_municipios"], scorer=fuzz.WRatio)
-            if match and match[1] >= 97:  # Piso de rigidez cartográfica estrita
+            if token in IBGE_MUNICIPIOS: continue
+            match = process.extractOne(token, LISTA_MUNICIPIOS, scorer=fuzz.WRatio)
+            if match and match[1] >= 95:
                 texto_normalizado = texto_normalizado.replace(token, match[0])
                 break
     return texto_normalizado
@@ -129,8 +155,7 @@ def inferir_estado_ibge(texto_normalizado):
     for i in range(len(ultimos_tokens)):
         for j in range(i + 1, len(ultimos_tokens) + 1):
             chunk = " ".join(ultimos_tokens[i:j])
-            if chunk in st.session_state.get("ibge_municipios", {}):
-                return st.session_state["ibge_municipios"][chunk]["uf"]
+            if chunk in IBGE_MUNICIPIOS: return IBGE_MUNICIPIOS[chunk]["uf"]
     return None
 
 def expandir_contexto_incompleto(texto):
@@ -140,7 +165,7 @@ def expandir_contexto_incompleto(texto):
     if len(tokens) <= 2 or not any(c.isdigit() for c in texto_norm):
         uf_inferida = inferir_estado_ibge(texto_norm)
         if uf_inferida:
-            nome_estado = st.session_state.get("ibge_estados", {}).get(uf_inferida, "")
+            nome_estado = IBGE_ESTADOS.get(uf_inferida, "")
             return f"{texto_norm}, {nome_estado} - {uf_inferida}, BRASIL"
     if "BRASIL" not in texto_norm: return f"{texto_norm}, BRASIL"
     return texto_norm
@@ -171,56 +196,54 @@ def camada_postal_redundante(cep_limpo):
     return "", "", "", ""
 
 # ==============================================================================
-# 🧮 LÓGICA GEODÉSICA DE ACURÁCIA ELIPSOIDAL (WGS-84)
+# 🧮 LÓGICA GEODÉSICA DE ALTA FIDELIDADE (WGS-84)
 # ==============================================================================
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
-    """Problema 7 Solucionado: Interceptação rígida contra coordenadas corrompidas fora do grid elipsoidal da Terra"""
-    if not (-90 <= lat1 <= 90) or not (-90 <= lat2 <= 90) or not (-180 <= lon1 <= 180) or not (-180 <= lon2 <= 180):
-        return 0.0
     if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0: return 0.0
     if lat1 == lat2 and lon1 == lon2: return 0.0
     try:
         a, b, f = 6378137.0, 6356752.314245, 1 / 298.257223563
         L = math.radians(lon2 - lon1)
-        U1, U2 = math.atan((1-f)*math.tan(math.radians(lat1))), math.atan((1-f)*math.tan(math.radians(lat2)))
-        sinU1, cosU1, sinU2, cosU2 = math.sin(U1), math.cos(U1), math.sin(U2), math.cos(U2)
-        lam = L
+        U1 = math.atan((1 - f) * math.tan(math.radians(lat1)))
+        U2 = math.atan((1 - f) * math.tan(math.radians(lat2)))
+        sinU1, cosU1 = math.sin(U1), math.cos(U1)
+        sinU2, cosU2 = math.sin(U2), math.cos(U2)
+        lambda_lon = L
         for _ in range(100):
-            sinLam, cosLam = math.sin(lam), math.cos(lam)
-            sinSigma = math.sqrt((cosU2*sinLam)**2 + (cosU1*sinU2 - sinU1*cosU2*cosLam)**2)
+            sinLambda, cosLambda = math.sin(lambda_lon), math.cos(lambda_lon)
+            sinSigma = math.sqrt((cosU2 * sinLambda) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda) ** 2)
             if sinSigma == 0: return 0.0
-            cosSigma = sinU1*sinU2 + cosU1*cosU2*cosLam
+            cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda
             sigma = math.atan2(sinSigma, cosSigma)
-            sinAlpha = cosU1*cosU2*sinLam/sinSigma
-            cosSqAlpha = 1 - sinAlpha**2
-            cos2SigmaM = cosSigma - 2*sinU1*sinU2/cosSqAlpha if cosSqAlpha != 0 else 0
-            C = f/16*cosSqAlpha*(4+f*(4-3*cosSqAlpha))
-            lam_prev = lam
-            lam = L + (1-f)*C*sinAlpha*(sigma + f*sinAlpha*(cos2SigmaM+C*cosSigma*(-1+2*cos2SigmaM**2)))
-            if abs(lam - lam_prev) < 1e-12: break
-        uSq = cosSqAlpha*(a**2-b**2)/(b**2)
-        A = 1 + uSq/16384*(4096+uSq*(-768+uSq*(320-175*uSq)))
-        B = uSq/1024*(256+uSq*(-128+uSq*(74-47*uSq)))
-        dS = B*sinSigma*(cos2SigmaM+B/4*(cosSigma*(-1+2*cos2SigmaM**2)-B/6*cos2SigmaM*(-3+4*sinSigma**2)*(-3+4*cos2SigmaM**2)))
-        return round(b*A*(sigma-dS)/1000, 2)
+            sinAlpha = cosU1 * cosU2 * sinLambda / sinSigma
+            cosSqAlpha = 1 - sinAlpha ** 2
+            cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha if cosSqAlpha != 0 else 0
+            C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha))
+            lambdaPrev = lambda_lon
+            lambda_lon = L + (1 - f) * C * sinAlpha * (sigma + f * sinAlpha * (cos2SigmaM + C * cosSigma * (-1 + 2 * cos2SigmaM ** 2)))
+            if abs(lambda_lon - lambdaPrev) < 1e-12: break
+        uSq = cosSqAlpha * (a ** 2 - b ** 2) / (b ** 2)
+        A = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)))
+        B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)))
+        deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * cos2SigmaM ** 2) - B / 6 * cos2SigmaM * (-3 + 4 * sinSigma ** 2) * (-3 + 4 * cos2SigmaM ** 2)))
+        s = b * A * (sigma - deltaSigma)
+        return round(s / 1000, 2)
     except Exception:
         dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
-        m_a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+        m_a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
         return round(6371.0 * 2 * math.atan2(math.sqrt(m_a), math.sqrt(1 - m_a)), 2)
 
 # ==============================================================================
-# 🗺️ RESOLUÇÃO MULTI-FONTE PARALELIZADA COM TIMEOUT RÍGIDO (PROBLEMA 2, 4)
+# 🗺️ GEOCODIFICAÇÃO PARALELIZADA (ARCGIS + NOMINATIM + PHOTON)
 # ==============================================================================
 def executar_reverse_geocoding_enrichment(lat, lon):
-    """Problema 4 Solucionado: Cache persistente em coordenadas arredondadas que trunca requisições duplicadas à malha"""
     rev_key = f"{round(lat,5)}|{round(lon,5)}"
-    if rev_key in cache_reverse:
-        return cache_reverse[rev_key]
-        
+    if rev_key in cache_reverse: return cache_reverse[rev_key]
+    
     res = {"logradouro": "", "bairro": "", "cidade": "", "municipio": "", "distrito": "", "estado": "", "cep": ""}
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&addressdetails=1"
-        r = session.get(url, headers={"User-Agent": "GerenciadorRotasUniversais/7.0"}, timeout=4)
+        r = session.get(url, headers={"User-Agent": "GerenciadorRotasUniversais/6.0"}, timeout=4)
         if r.status_code == 200:
             a = r.json().get("address", {})
             res["logradouro"] = a.get("road", a.get("pedestrian", ""))
@@ -237,7 +260,7 @@ def executar_reverse_geocoding_enrichment(lat, lon):
 def API_ArcGIS(query):
     try:
         url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=1&sourceCountry=BRA&outFields=*"
-        r = session.get(url, timeout=3).json() # Problema 1: Reutilização correta da session ativa
+        r = session.get(url, timeout=4).json()
         if r.get('candidates'):
             c = r['candidates'][0]
             attr = c.get('attributes', {})
@@ -248,7 +271,7 @@ def API_ArcGIS(query):
 def API_Nominatim(query):
     try:
         url = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query)}&limit=1&addressdetails=1&countrycodes=br"
-        r = session.get(url, headers={"User-Agent": "GerenciadorRotasUniversais/7.0"}, timeout=3).json()
+        r = session.get(url, headers={"User-Agent": "GerenciadorRotasUniversais/6.0"}, timeout=4).json()
         if r:
             a = r[0]
             addr = a.get("address", {})
@@ -259,7 +282,7 @@ def API_Nominatim(query):
 def API_Photon(query):
     try:
         url = f"https://photon.komoot.io/api/?q={requests.utils.quote(query)}&limit=1&filter=countrycode:br"
-        r = session.get(url, timeout=3).json()
+        r = session.get(url, timeout=4).json()
         if r.get("features"):
             f = r["features"][0]
             lon, lat = f["geometry"]["coordinates"]
@@ -269,7 +292,7 @@ def API_Photon(query):
     return None
 
 def API_Overpass_POIs(texto_norm):
-    if len(texto_norm) < 10 or not parece_poi(texto_norm): return None
+    if len(texto_norm) < 10: return None
     if texto_norm in cache_poi: return cache_poi[texto_norm]
     try:
         texto_seguro = re.escape(texto_norm)
@@ -306,8 +329,7 @@ def processar_consenso_e_pontuacao_centesimal(candidatos, texto_cru):
     vencedor = candidatos[0]
     score_limitado = min(int(vencedor["score_final"]), 100)
     
-    # Problema 5 Solucionado: Piso alterado para 70, poupando milhares de consultas ao Nominatim Reverse
-    if score_limitado < 70:
+    if score_limitado < 85:
         m = executar_reverse_geocoding_enrichment(vencedor["lat"], vencedor["lon"])
     else:
         m = {"logradouro": texto_cru.upper(), "bairro": vencedor["bairro"], "cidade": vencedor["cidade"], "municipio": vencedor["cidade"], "distrito": "", "estado": vencedor["estado"], "cep": ""}
@@ -319,22 +341,16 @@ def processar_consenso_e_pontuacao_centesimal(candidatos, texto_cru):
     
     return vencedor["lat"], vencedor["lon"], endereco_f, confianca, score_limitado, m["distrito"], m["municipio"], vencedor["fonte"]
 
-# ==============================================================================
-# 🎚️ ORQUESTRADOR MULTI-FONTE PARALELO EM CASCATA REAL (PROBLEMA 2, 6, 10)
-# ==============================================================================
 def obter_coordenadas_e_endereco_oficial(localidade):
-    """Problema 10 Implementado: Estratégia hierárquica completa em cache estruturado e curto-circuito de I/O"""
     texto_cru = str(localidade).strip()
     if not texto_cru or texto_cru.lower() == 'nan': 
         return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A"
     
-    # Camada 6 Solucionada: A chave agora baseia-se na string higienizada unificada, impedindo duplicidades léxicas
     cache_key = normalizar_endereco_universal(texto_cru)
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
         return c["lat"], c["lon"], c["endereco"], c["confianca"], c["score_num"], c["distrito"], c["municipio"], c["fonte"]
         
-    # Short-Circuit Nível 1: Validação Postal direta dos Correios
     cep_estrito = detectar_cep_parcial(texto_cru)
     if cep_estrito:
         logr, bair, loca, uf = camada_postal_redundante(cep_estrito)
@@ -349,23 +365,20 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     texto_expandido = expandir_contexto_incompleto(texto_cru)
     candidatos_validos = []
 
-    # Short-Circuit Nível 2: Varredura de Infraestruturas de POIs chaves
-    res_poi = API_Overpass_POIs(cache_key)
-    if res_poi: candidatos_validos.append(res_poi)
+    if parece_poi(cache_key):
+        res_poi = API_Overpass_POIs(cache_key)
+        if res_poi: candidatos_validos.append(res_poi)
 
-    # --- PROBLEMA 2 & 6 SOLUCIONADOS: Concorrência real paralela via ThreadPool Único com timeout estrito de 4s ---
-    executor = st.session_state["executor_global"]
     fs = [
-        executor.submit(API_ArcGIS, texto_expandido),
-        executor.submit(API_Nominatim, texto_expandido),
-        executor.submit(API_Photon, texto_expandido)
+        st.session_state["executor_global"].submit(API_ArcGIS, texto_expandido),
+        st.session_state["executor_global"].submit(API_Nominatim, texto_expandido),
+        st.session_state["executor_global"].submit(API_Photon, texto_expandido)
     ]
     for futuro in as_completed(fs):
         try:
-            res = futuro.result(timeout=4) # Protege o worker contra travamentos de barramento de sockets
+            res = futuro.result(timeout=4)
             if res: candidatos_validos.append(res)
-        except Exception:
-            pass
+        except Exception: pass
             
     res_final = processar_consenso_e_pontuacao_centesimal(candidatos_validos, texto_cru)
     if res_final:
@@ -378,12 +391,9 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     return 0.0, 0.0, texto_expandido, "BAIXA", 0, "", "", "N/A"
 
 # ==============================================================================
-# 🚀 MOTOR DE ROTEAMENTO (GOOGLE PREVIEW PRIORITÁRIO COM VALIDAÇÃO RÍGIDA)
+# 🚀 MOTOR DE ROTEAMENTO (GOOGLE PREVIEW PRIORIZADO + OSRM FALLBACK)
 # ==============================================================================
-cache_google = Cache("./cache_google")
-
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    """Problema 1 & 3 Solucionados: Validação robusta de payloads, cache direcional exato e User-Agent Real de Navegador"""
     cache_key = f"{normalizar_endereco_universal(origem_raw)}|{normalizar_endereco_universal(destino_raw)}"
     if cache_key in cache_google: return cache_google[cache_key]
 
@@ -395,17 +405,12 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
     url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(str(origem_raw).strip())}&destination={requests.utils.quote(str(destino_raw).strip())}&travelmode=driving"
     
-    # Problema 6 (User-Agent): Headers atualizados para emular comportamento de navegador real, evitando banimentos por IP
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.google.com/maps",
-        "Accept": "*/*"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "Referer": "https://www.google.com/maps", "Accept": "*/*"}
+    
     try:
         resposta = session.get(url_api, headers=headers, timeout=8)
         texto_resposta = resposta.text
         
-        # Problema 1: Filtro de validação de consistência interna do documento retornado
         if len(texto_resposta) < 500 or "directions" not in texto_resposta.lower():
             return None
             
@@ -417,19 +422,11 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         
         if match_km and match_tempo:
             km_puro = float(match_km[0].replace('.', '').replace(',', '.'))
-            
-            # Problema 4 (Validação): Aborta em caso de desvios impossíveis contra a malha geodésica em linha reta
             if dist_linha_reta > 0 and (km_puro < dist_linha_reta * 0.8 or km_puro > dist_linha_reta * 4.0):
                 return None
                 
             envolve_balsa = "Sim" if any(re.search(p, texto_resposta.lower()) for p in [r'\"utilizar\s+balsa\b', r'\"pegar\s+balsa\b', r'\"ferry\b']) else "Não"
-            
-            # Problema 7 (Score Google): Computação granular da confiabilidade do scraper
-            score_google = 70
-            if km_puro > 0: score_google += 10
-            if match_tempo[0]: score_google += 10
-            if km_puro >= dist_linha_reta: score_google += 10
-            
+            score_google = 70 + (10 if km_puro > 0 else 0) + (10 if match_tempo[0] else 0) + (10 if km_puro >= dist_linha_reta else 0)
             res = (km_puro, match_tempo[0], link_maps, envolve_balsa, score_google)
             cache_google.set(cache_key, res, expire=2592000)
             return res
@@ -457,12 +454,10 @@ def obter_fator_desvio_rodoviario(linha_reta):
     return 1.12
 
 def calcular_pipeline_logistico(origem, destino):
-    """Problema 4 (Métricas): Instrumentação completa dos tempos de resposta internos do core"""
     start_total = time.time()
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Problema 3 Solucionado: Chave direcional limpa exata maximizando reaproveitamento de rotas
     chave_rota_cache = f"ROTA_{normalizar_endereco_universal(origem_clean)}->{normalizar_endereco_universal(destino_clean)}"
     if chave_rota_cache in cache_rotas:
         return cache_rotas[chave_rota_cache]
@@ -482,12 +477,11 @@ def calcular_pipeline_logistico(origem, destino):
 
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(end_oficial_o)}&destination={requests.utils.quote(end_oficial_d)}&travelmode=driving"
 
-    # PRIORIDADE INVERTIDA SOLUCIONADA: Google Preview lidera a busca rodoviária corporativa
     res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=usar_coords)
     if res_google:
         tempo_roteamento = round(time.time() - start_rot, 2)
         tempo_total = round(time.time() - start_total, 2)
-        retorno = (res_google[0], res_google[1], link_fallback, res_google[3], dist_linha_reta, "Google Preview", res_google[4], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total)
+        retorno = (res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
         return retorno
 
@@ -517,7 +511,7 @@ def embrulhar_task_paralela(item):
     return idx, calcular_pipeline_logistico(orig, dest)
 
 # ==============================================================================
-# 🚗 INTERFACE VISUAL NO STREAMLIT (PROCESSAMENTO EM LOTE VIA ITERTUPLES)
+# 🚗 INTERFACE VISUAL NO STREAMLIT (MANIPULAÇÃO EM LOTE PARALELIZADA)
 # ==============================================================================
 st.title("🚗 Gerenciador de Rotas Inteligentes")
 st.subheader("Engine de Resolução Espacial Nacional — Operação Corporativa")
@@ -544,7 +538,6 @@ if arquivo_carregado is not None:
             ]
             for col in novas_colunas: df[col] = None
                 
-            # Problema 5 Solucionado: itertuples() implementado para vazão massiva de dados (10k+ registros)
             tarefas = []
             for linha in df.itertuples(index=True):
                 origem = str(getattr(linha, 'Origem', '')).strip()
@@ -552,10 +545,8 @@ if arquivo_carregado is not None:
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                     tarefas.append((linha.Index, origem, destino))
             
-            # Problema 6 Solucionado: Mapeamento concorrente re-aproveitando diretamente o Pool de Threads Global do Streamlit
             resultados_mapeados = {}
             executor_lote = st.session_state["executor_global"]
-            
             futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in tarefas}
             
             concluidos = 0
@@ -567,10 +558,9 @@ if arquivo_carregado is not None:
                 resultados_mapeados[idx] = res_pipeline
                 concluidos += 1
                 
-                container_status.text(f"🚀 Roteamento Assíncrono Cascata: {concluidos} de {len(tarefas)} processados...")
+                container_status.text(f"🚀 Roteamento Assíncrono: {concluidos} de {len(tarefas)} processados...")
                 barra_progresso.progress(concluidos / len(tarefas))
             
-            # Desempacotamento regulamentar de 26 elementos alinhado 1:1
             for idx, res in resultados_mapeados.items():
                 df.at[idx, 'Distancia'] = res[0]; df.at[idx, 'Tempo'] = res[1]
                 df.at[idx, 'Link da Rota'] = res[2]; df.at[idx, 'Balsas'] = res[3]
