@@ -13,13 +13,13 @@ st.set_page_config(
     layout="centered"
 )
 
-def extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d, origem_txt, destino_txt):
+def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=True):
     """
     CAMADA BRUTA - Intercepta a API de direções do Google Maps.
     Força o cálculo e o traçado RÍGIDO pelos pontos geográficos exatos (Lat/Lon),
     eliminando qualquer chance de desvio semântico por texto.
     """
-    if lat_o and lon_o and lat_d and lon_d and lat_o != 0.0 and lat_d != 0.0:
+    if usar_coordenadas and lat_o and lon_o and lat_d and lon_d and lat_o != 0.0 and lat_d != 0.0:
         origem_param = f"{lat_o},{lon_o}"
         destino_param = f"{lat_d},{lon_d}"
         
@@ -30,8 +30,8 @@ def extrair_dados_reais_google(lat_o, lon_o, lat_d, lon_d, origem_txt, destino_t
         link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
     else:
         # Fallback caso as coordenadas falhem completamente
-        origem_enc = requests.utils.quote(f"{origem_txt}".strip())
-        destino_enc = requests.utils.quote(f"{destino_txt}".strip())
+        origem_enc = requests.utils.quote(f"{origem_raw}".strip())
+        destino_enc = requests.utils.quote(f"{destino_raw}".strip())
         url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_enc}!1m2!1m1!1s{destino_enc}!3e0"
         link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_enc}&destination={destino_enc}&travelmode=driving"
     
@@ -106,6 +106,28 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     except Exception:
         return 0.0
 
+def buscar_via_cep(cep):
+    """Busca estruturada e imutável na API nacional aberta dos Correios (ViaCEP)"""
+    cep_limpo = re.sub(r'\D', '', str(cep))
+    if len(cep_limpo) == 8:
+        try:
+            res = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=5).json()
+            if "erro" not in res:
+                logradouro = res.get('logradouro', '').strip()
+                bairro = res.get('bairro', '').strip()
+                localidade = res.get('localidade', '').strip()
+                uf = res.get('uf', '').strip()
+                
+                if uf.upper() == "DF" and "ZONA INDUSTRIAL" in bairro.upper():
+                    bairro = "SIG"
+                
+                componentes = [logradouro, bairro, localidade, uf]
+                endereco_formatado = ", ".join([c for c in components if c])
+                return endereco_formatado + f", {res.get('cep')}"
+        except Exception:
+            pass
+    return None
+
 def obter_coordenadas_e_endereco_oficial_osm(localidade):
     """
     CAMADA GEOGRÁFICA INTEROPERÁVEL (OpenStreetMap/Nominatim + ViaCEP).
@@ -145,7 +167,6 @@ def obter_coordenadas_e_endereco_oficial_osm(localidade):
             pass
 
     # 2. SE FOR ENDEREÇO TEXTUAL COMUM: GEOCODIFICAÇÃO VIA OPENSTREETMAP (NOMINATIM)
-    # Garante âncoras regionais implícitas baseadas em termos logísticos urbanos do DF se o usuário omitir o estado
     tokens_df = ["QR ", "QN ", "QS ", "QNL ", "QNJ ", "QNM ", "QNO ", "SAMAMBAIA", "CEILANDIA", "CEILÂNDIA", "TAGUATINGA", "UCB", "CATOLICA", "UNB", "UNICEUB", "CEUB"]
     sufixo_regional = ""
     if any(t in texto_upper for t in tokens_df) and "DF" not in texto_upper and "BRAS" not in texto_upper:
@@ -163,7 +184,6 @@ def obter_coordenadas_e_endereco_oficial_osm(localidade):
             lat = float(melhor_opcao['lat'])
             lon = float(melhor_opcao['lon'])
             
-            # Reconstrói dinamicamente o endereço usando as tags estruturadas do OpenStreetMap
             addr_details = melhor_opcao.get('address', {})
             rua = addr_details.get('road', addr_details.get('suburb', '')).strip()
             bairro_osm = addr_details.get('neighbourhood', addr_details.get('suburb', '')).strip()
@@ -171,7 +191,6 @@ def obter_coordenadas_e_endereco_oficial_osm(localidade):
             estado_osm = addr_details.get('state', '').strip()
             cep_osm = addr_details.get('postcode', '').strip()
             
-            # Se o OpenStreetMap trouxer um CEP válido na busca textual, faz a dupla checagem reversa automática
             if cep_osm and len(re.sub(r'\D', '', cep_osm)) == 8:
                 endereco_correios = buscar_via_cep(re.sub(r'\D', '', cep_osm))
                 if endereco_correios:
@@ -188,18 +207,22 @@ def obter_coordenadas_e_endereco_oficial_osm(localidade):
         
     return 0.0, 0.0, texto_str
 
-def calcular_pipeline_logistico(origem_bruta, destino_bruto):
-    """Pipeline focado em amarrações numéricas via coordenadas OpenStreetMap -> Google Maps"""
+def calcular_pipeline_logistico(origem, destino):
+    """Pipeline central avançado com alinhamento estrito de parâmetros"""
+    origem_clean = str(origem).strip()
+    destino_clean = str(destino).strip()
     
     # Resolve as coordenadas e os endereços formais via ecossistema OpenStreetMap
-    lat_o, lon_o, origem_oficial = obter_coordenadas_e_endereco_oficial_osm(origem_bruta)
-    lat_d, lon_d, destino_oficial = obter_coordenadas_e_endereco_oficial_osm(destino_bruto)
+    lat_o, lon_o, origem_oficial = obter_coordenadas_e_endereco_oficial_osm(origem_clean)
+    lat_d, lon_d, destino_oficial = obter_coordenadas_e_endereco_oficial_osm(destino_clean)
     
     # Cálculo analítico de linha reta via Vincenty
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
     # Executa o scraping usando as coordenadas numéricas absolutas (Garante precisão milimétrica)
     usar_coords = True if (lat_o != 0.0 and lat_d != 0.0 and dist_linha_reta < 180.0) else False
+    
+    # Chamada corrigida com a quantidade e ordem exata de parâmetros esperados pela função
     dados_reais = extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
     if dados_reais:
