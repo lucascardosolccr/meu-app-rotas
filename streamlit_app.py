@@ -26,7 +26,6 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         destino_param = requests.utils.quote(f"{destino_raw}".strip())
         url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     
-    # URL parametrizada pública e canônica de Direções do Google Maps (Alimentada com strings higienizadas)
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(str(origem_raw).strip())}&destination={requests.utils.quote(str(destino_raw).strip())}&travelmode=driving"
     
     headers = {
@@ -37,7 +36,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
     
     try:
         resposta = requests.get(url_api, headers=headers, timeout=12)
-        texto_resposta = resposta.text
+        texto_resposta = response_txt = resposta.text
         
         regex_km = r'\"(\d+[\.,]?\d*)\s*km\"'
         match_km = re.findall(regex_km, texto_resposta)
@@ -130,25 +129,23 @@ def buscar_via_cep(cep):
 
 def obter_coordenadas_e_endereco_oficial(localidade):
     """
-    CAMADA GEOGRÁFICA INTEROPERÁVEL - Executa o Pipeline de Desambiguação Agnóstico.
-    Se for CEP, força o uso do dado intocável dos Correios. 
-    Se for texto, extrai o CEP latente no ArcGIS e faz o cruzamento reverso na base postal.
+    CAMADA GEOGRÁFICA DE ALTA PRECISÃO - Executa o Pipeline de Desambiguação Agnóstico Nacional
+    com proteção estrita contra desvios de coordenadas inter-regionais.
     """
     texto_str = str(localidade).strip()
     texto_upper = texto_str.upper()
     
-    # Captura numeração predial latente (ex: casa 10, lote 2, nº 500) usando Regex contextual
+    # Captura numeração predial ou codificação urbana latente
     numero_predial = ""
-    match_num = re.search(r'(?:NÚMERO|Nº|N|NUMERO|LOTE|QD|Q\b)\s*([A-Za-z0-9\/]+)\b', texto_upper)
+    match_num = re.search(r'(?:NÚMERO|Nº|N|NUMERO|LOTE|QD|Q|CONJUNTO|CJ)\s*([A-Za-z0-9\/]+)\b', texto_upper)
     if match_num and not re.match(r'^\d{5}-?\d{3}$', texto_str):
-        numero_predial = match_num.group(1)
+        numero_predial = match_num.group(0)
 
-    # 1. RESOLUÇÃO COMPLETA SE A ENTRADA JÁ FOR UM CEP PURO
+    # 1. RESOLUÇÃO POSTAL PURA (Se for CEP de largada)
     cep_limpo = re.sub(r'\D', '', texto_str)
     if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str or "CEP" in texto_upper):
         endereco_via_cep = buscar_via_cep(cep_limpo)
         if endereco_via_cep:
-            # Atendendo ao requisito: se for CEP, extrai Lat/Lon sem alterar a string soberana dos Correios
             url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(endereco_via_cep)}&maxLocations=1&sourceCountry=BRA"
             try:
                 res_arc = requests.get(url_arc, timeout=5).json()
@@ -159,14 +156,19 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                 pass
             return 0.0, 0.0, endereco_via_cep
 
-    # 2. SE FOR ENDEREÇO TEXTUAL COMUM: EXTRAÇÃO DE CEP POR ATRIBUTOS ESTENDIDOS (ArcGIS Server REST)
-    query = texto_str if "BRASIL" in texto_upper else f"{texto_str}, Brasil"
-    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=5&sourceCountry=BRA&outFields=*"
+    # 2. INJEÇÃO CONTEXTUAL ADAPTATIVA (Proteção estrita contra alucinações interestaduais no DF)
+    tokens_df = ["QR ", "QN ", "QS ", "QNL ", "QNJ ", "QNM ", "QNO ", "SAMAMBAIA", "CEILANDIA", "CEILÂNDIA", "TAGUATINGA", "UCB", "CATOLICA", "UNB"]
+    sufixo_df = ""
+    if any(t in texto_upper for t in tokens_df) and "DF" not in texto_upper and "BRAS" not in texto_upper:
+        sufixo_df = ", Distrito Federal, Brasil"
+
+    query = f"{texto_str}{sufixo_df}" if "BRASIL" not in texto_upper else texto_str
+    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=10&sourceCountry=BRA&outFields=*"
     
     try:
         resposta = requests.get(url, timeout=10).json()
         if resposta.get('candidates'):
-            # Varre os candidatos em busca do que possua a melhor árvore cadastral preenchida
+            # Varredura inteligente de múltiplos candidatos para validação cruzada postal
             for candidato in resposta['candidates']:
                 lat = float(candidato['location']['y'])
                 lon = float(candidato['location']['x'])
@@ -175,18 +177,17 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                 cep_identificado = atributos.get('Postal', '').strip() or atributos.get('PostalExt', '').strip()
                 cep_identificado_limpo = re.sub(r'\D', '', cep_identificado)
                 
-                # SE O ARCGIS ENCONTRAR O CEP DO TEXTO COMUM: Executa o Cruzamento Soberano com os Correios
                 if len(cep_identificado_limpo) == 8:
                     endereco_oficial_correios = buscar_via_cep(cep_identificado_limpo)
                     if endereco_oficial_correios:
-                        # Injeta a numeração predial ou quadra original digitada pelo usuário na rua oficial dos Correios
+                        # Re-acopla a identificação de quadra/conjunto se o usuário tiver preenchido
                         if numero_predial and numero_predial.upper() not in endereco_oficial_correios.upper():
                             partes = endereco_oficial_correios.split(', ', 1)
                             if len(partes) > 1:
                                 endereco_oficial_correios = f"{partes[0]} {numero_predial}, {partes[1]}"
                         return lat, lon, endereco_oficial_correios
 
-            # FALLBACK DE TEXTO ESTRUTURADO (Se o local geocodificado não possuir CEP individual cadastrado)
+            # FALLBACK DE SEGURANÇA ESTRUTURADO (Se falhar o cruzamento reverso por CEP)
             primeiro = resposta['candidates'][0]
             lat = float(primeiro['location']['y'])
             lon = float(primeiro['location']['x'])
@@ -197,7 +198,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             estado_arc = attrs.get('RegionAbbr', '').strip() or attrs.get('Region', '').strip()
             
             if logradouro_arc and len(logradouro_arc.split()) > 1:
-                componentes = [logradouro_arc, bairro_arc, cidade_arc, estado_arc]
+                componentes = [logradouro_arc, bairro_arc, city_arc := cidade_arc if cidade_arc else "Brasília", estado_arc if estado_arc else "DF"]
                 return lat, lon, ", ".join([c for c in componentes if c])
             
             return lat, lon, primeiro['address']
@@ -219,17 +220,21 @@ def calcular_pipeline_logistico(origem, destino):
     
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d) if (lat_o != 0.0 and lat_d != 0.0) else 0.0
 
+    # MECANISMO DE TRAVA DE SEGURANÇA ANTIALUCINAÇÃO:
+    # Se a distância em linha reta der absurdamente maior que 180km para trechos urbanos presumidos,
+    # desativa o envio de coordenadas corrompidas e força o Google Maps a achar textualmente na malha local.
+    usar_coords = True if (lat_o != 0.0 and lat_d != 0.0 and dist_linha_reta < 180.0) else False
+    
     query_o = origem_oficial
     query_d = destino_oficial
 
-    usar_coords = True if (lat_o != 0.0 and lat_d != 0.0) else False
     dados_reais = extrair_dados_reais_google(query_o, query_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # FALLBACK OPERACIONAL EM CASO DE INSTABILIDADE DE CONEXÃO
+    # FALLBACK OPERACIONAL
     link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(query_o)}&destination={requests.utils.quote(query_d)}&travelmode=driving"
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
