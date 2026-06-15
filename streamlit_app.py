@@ -13,44 +13,121 @@ st.set_page_config(
     layout="centered"
 )
 
-def normalizar_texto_endereco(texto):
+# ==========================================
+# CAMADA 1: HIGIENIZAÇÃO UNIVERSAL DE TEXTO
+# ==========================================
+def higienizar_string_universal(texto):
     """
-    CAMADA 1 e 2: LIMPEZA E PADRONIZAÇÃO - Expande abreviações e limpa espaçamentos.
+    Remove ruídos gramaticais e padroniza abreviações comuns de logradouros
+    brasileiros sem prender o código a nenhuma cidade específica.
     """
-    if not texto or pd.isna(texto):
+    if not texto or texto == 'nan':
         return ""
-    txt = str(texto).strip()
     
+    txt = str(texto).strip()
+    # Remove espaços duplos e caracteres invisíveis
+    txt = re.sub(r'\s+', ' ', txt)
+    
+    # Dicionário de abreviações universais (Válido para todo o território nacional)
     abreviacoes = {
-        r'\bAV\b': 'Avenida',
-        r'\bR\b': 'Rua',
-        r'\bQD\b': 'Quadra',
-        r'\bLT\b': 'Lote',
-        r'\bCJ\b': 'Conjunto',
-        r'\bBL\b': 'Bloco',
-        r'\bAPT\b': 'Apartamento',
-        r'\bCH\b': 'Chácara',
-        r'\bCHAC\b': 'Chácara'
+        r"\bav\b\.?": "Avenida",
+        r"\br\b\.?": "Rua",
+        r"\bqd\b\.?": "Quadra",
+        r"\blt\b\.?": "Lote",
+        r"\bcj\b\.?": "Conjunto",
+        r"\bbl\b\.?": "Bloco",
+        r"\bapt\b\.?": "Apartamento",
+        r"\bap\b\.?": "Apartamento",
+        r"\brod\b\.?": "Rodovia",
+        r"\bestr\b\.?": "Estrada"
     }
+    
     for padrao, substituicao in abreviacoes.items():
         txt = re.sub(padrao, substituicao, txt, flags=re.IGNORECASE)
-    
-    txt = re.sub(r'\s+', ' ', txt)
+        
     return txt
 
-def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=True):
+# ==========================================
+# CAMADA 2: RESOLUÇÃO UNIVERSAL DE ENDEREÇOS
+# ==========================================
+def obter_coordenadas_e_endereco_oficial(localidade):
     """
-    CAMADA BRUTA - Intercepta a API interna de direções do Google Maps.
+    Pipeline dinâmico e agnóstico. Classifica o tipo de endereço por metadados (ArcGIS)
+    e decide se a geocodificação é confiável ou se necessita de enriquecimento por string.
     """
-    if usar_coordenadas and lat_o and lon_o and lat_d and lon_d and lat_o != 0.0 and lat_d != 0.0:
+    texto_puro = str(localidade).strip()
+    texto_limpo = higienizar_string_universal(texto_puro)
+    
+    # Se a entrada contiver um padrão de CEP, limpa e valida via ViaCEP
+    cep_localizado = re.sub(r'\D', '', texto_limpo)
+    if len(cep_localizado) == 8 and (texto_puro.isdigit() or "-" in texto_puro):
+        try:
+            res_cep = requests.get(f"https://viacep.com.br/ws/{cep_localizado}/json/", timeout=5).json()
+            if "erro" not in res_cep:
+                componentes = [res_cep.get('logradouro'), res_cep.get('bairro'), res_cep.get('localidade'), res_cep.get('uf')]
+                texto_limpo = ", ".join([c for c in componentes if c]) + f", {res_cep.get('cep')}, Brasil"
+        except Exception:
+            pass
+
+    # Garante o escopo nacional se o usuário omitir o país
+    query = texto_limpo if "brasil" in texto_limpo.lower() else f"{texto_limpo}, Brasil"
+    
+    # Consultando o ArcGIS com outFields=* para obter o 'Addr_type' (Tipo de correspondência)
+    url_arcgis = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA&outFields=*"
+    
+    try:
+        resposta = requests.get(url_arcgis, timeout=10).json()
+        if resposta.get('candidates'):
+            # Seleciona o candidato com maior score de aderência textual
+            candidato = max(resposta['candidates'], key=lambda x: x.get('score', 0))
+            
+            lat = float(candidato['location']['y'])
+            lon = float(candidato['location']['x'])
+            endereco_reconstruido = candidato['address']
+            
+            # Captura metadados de qualidade do próprio geocodificador
+            atributos = candidato.get('attributes', {})
+            tipo_endereco = atributos.get('Addr_type', '') # Ex: 'PointAddress', 'StreetName', 'POI', 'Locality'
+            
+            # Se o geocodificador reconstruiu as chaves estruturadas, nós as usamos
+            logradouro_arc = atributos.get('StAddr', '').strip()
+            bairro_arc = atributos.get('Neighborhood', '').strip()
+            cidade_arc = atributos.get('City', '').strip()
+            estado_arc = atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()
+            
+            if logradouro_arc and cidade_arc:
+                componentes_reconstruidos = [logradouro_arc, bairro_arc, cidade_arc, estado_arc]
+                endereco_reconstruido = ", ".join([c for c in componentes_reconstruidos if c])
+            
+            # CRÍTICO: Passamos o tipo_endereco adiante para o pipeline logístico tomar decisões de injeção
+            return lat, lon, endereco_reconstruido, tipo_endereco
+            
+    except Exception:
+        pass
+        
+    # Fallback agnóstico caso o ArcGIS falhe por completo
+    return 0.0, 0.0, query, "Unknown"
+
+# ==========================================
+# CAMADA 3: INTERCEPTAÇÃO INTELIGENTE GOOGLE
+# ==========================================
+def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, usar_coordenadas):
+    """
+    Intercepta as direções baseando-se na inteligência de metadados. 
+    Evita Geocoding Drift chaveando dinamicamente entre Coordenadas e Strings Estruturadas.
+    """
+    if usar_coordenadas and lat_o and lon_o and lat_d and lon_d:
         origem_param = f"{lat_o},{lon_o}"
         destino_param = f"{lat_d},{lon_d}"
+        url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     else:
-        origem_param = requests.utils.quote(f"{origem_raw}".strip())
-        destino_param = requests.utils.quote(f"{destino_raw}".strip())
-        
-    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
-    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(str(origem_raw).strip())}&destination={requests.utils.quote(str(destino_raw).strip())}&travelmode=driving"
+        # Se for um POI ou local sem número, injeta a string ultra-estruturada limpa pelo resolvedor
+        origem_param = requests.utils.quote(str(origem_raw).strip())
+        destino_param = requests.utils.quote(str(destino_raw).strip())
+        url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
+    
+    # URL pública canônica baseada nas strings limpas para garantir fidelidade no clique do usuário
+    link_maps = f"http://googleusercontent.com/maps.google.com/5{requests.utils.quote(str(origem_raw).strip())}&destination={requests.utils.quote(str(destino_raw).strip())}&travelmode=driving"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -73,23 +150,17 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         
         if km_txt and tempo_txt:
             km_puro = float(km_txt.replace('.', '').replace(',', '.'))
-            
             envolve_balsa = "Não"
-            padroes_balsa = [r'\"utilizar\s+balsa\b', r'\"pegar\s+balsa\b', r'\"travessia\s+de\s+balsa\b']
-            if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
+            if any(re.search(p, texto_resposta.lower()) for p in [r'\"utilizar\s+balsa\b', r'\"pegar\s+balsa\b', r'\"ferry\b']):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps,外 := envolve_balsa if '外' in locals() else envolve_balsa
-            
+            return km_puro, tempo_txt, link_maps, envolve_balsa
     except Exception:
         pass
-        
     return None
 
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     """Cálculo local da Linha Reta Geodésica (Vincenty, 1975)"""
-    if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0:
-        return 0.0
     try:
         a = 6378137.0
         b = 6356752.314245
@@ -123,178 +194,48 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     except Exception:
         return 0.0
 
-def camada_postal_redundante(cep_alvo):
-    """CAMADA 3: RESOLUÇÃO POSTAL REDUNDANTE (ViaCEP + BrasilAPI)"""
-    cep_limpo = re.sub(r'\D', '', str(cep_alvo))
-    if len(cep_limpo) == 8:
-        # Tentativa 1: ViaCEP
-        try:
-            res = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=4).json()
-            if "erro" not in res:
-                return res.get('logradouro', ''), res.get('bairro', ''), res.get('localidade', ''), res.get('uf', '')
-        except Exception:
-            pass
-        # Tentativa 2: BrasilAPI
-        try:
-            res = requests.get(f"https://brasilapi.com.br/api/cep/v1/{cep_limpo}", timeout=4).json()
-            if "name" not in res:
-                return res.get('street', ''), res.get('neighborhood', ''), res.get('city', ''), res.get('state', '')
-        except Exception:
-            pass
-    return "", "", "", ""
-
-def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
-    """
-    CAMADA GEOGRÁFICA INTEROPERÁVEL - Geocodificação Dinâmica Multi-Provedor Sem Filtros Fixos.
-    """
-    texto_str = normalizar_texto_endereco(localidade)
-    texto_upper = texto_str.upper()
-    foi_resolvido_por_cep = False
-    
-    # Isola frações urbanas para reanexação lógica final (Camada 5)
-    fracao_predial = ""
-    match_fracao = re.search(r'\b(CONJUNTO|CJ|QUADRA|QD|BLOCO|BL|LOTE|LT|CHÁCARA|CHACARA|NÚMERO|Nº|NUMERO|N|CASA|AP|KM)\s*([A-Za-z0-9\/.]+)\b', texto_upper)
-    if match_fracao and not re.match(r'^\d{5}-?\d{3}$', texto_str):
-        fracao_predial = match_fracao.group(0)
-
-    # 1. RESOLUÇÃO POSTAL COM REDUNDÂNCIA (Camada 3)
-    match_cep = re.search(r'\b\d{5}-?\d{3}\b', texto_str)
-    if match_cep or (len(re.sub(r'\D', '', texto_str)) == 8 and texto_str.isdigit()):
-        cep_alvo = match_cep.group(0).replace("-", "") if match_cep else re.sub(r'\D', '', texto_str)
-        logr, bair, loca, uf = camada_postal_redundante(cep_alvo)
-        if loca:
-            endereco_oficial_cep = ", ".join([c for c in [logr, fracao_predial if fracao_predial else "", bair, loca, uf] if c.strip()]) + ", Brasil"
-            
-            url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(endereco_oficial_cep)}&limit=1&countrycodes=br"
-            headers_osm = {"User-Agent": "GerenciadorRotasAgnostico/6.0 (suporte_dados@logistica.com)"}
-            try:
-                res_osm = requests.get(url_osm, headers=headers_osm, timeout=4).json()
-                if res_osm:
-                    return float(res_osm[0]['lat']), float(res_osm[0]['lon']), endereco_oficial_cep, uf.upper()
-            except Exception:
-                pass
-            return 0.0, 0.0, endereco_oficial_cep, uf.upper()
-
-    # 2. GEOCODIFICAÇÃO MULTI-FONTE E ENRIQUECIMENTO (Camada 4, 6 e 8)
-    query = f"{texto_str}, {uf_limite_obrigatorio}, Brasil" if uf_limite_obrigatorio and uf_limite_obrigatorio not in texto_upper else f"{texto_str}, Brasil" if "BRASIL" not in texto_upper else texto_str
-    
-    # Candidato Provedor A: ArcGIS Server REST
-    url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA&outFields=*"
-    try:
-        resposta = requests.get(url_arc, timeout=6).json()
-        if resposta.get('candidates'):
-            candidato = resposta['candidates'][0]
-            atributos = candidato.get('attributes', {})
-            estado_arc = (atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()).upper()
-            
-            if not uf_limite_obrigatorio or estado_arc == uf_limite_obrigatorio.upper():
-                lat = float(candidato['location']['y'])
-                lon = float(candidato['location']['x'])
-                logradouro_arc = atributos.get('StAddr', '').strip()
-                bairro_arc = atributos.get('Neighborhood', '').strip()
-                cidade_arc = atributos.get('City', '').strip()
-                
-                if logradouro_arc and len(logradouro_arc.split()) > 1:
-                    componentes_arc = [logradouro_arc, fracao_predial if fracao_predial else "", bairro_arc, cidade_arc, estado_arc]
-                    endereco_completo = ", ".join([c for c in componentes_arc if c.strip()])
-                    return lat, lon, f"{endereco_completo}, Brasil", estado_arc
-                return lat, lon, f"{candidato['address']}, Brasil", estado_arc
-    except Exception:
-        pass
-
-    # Candidato Provedor B: OpenStreetMap Nominatim Engine
-    url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query)}&limit=2&addressdetails=1&countrycodes=br"
-    headers_osm = {"User-Agent": "GerenciadorRotasAgnostico/6.0 (suporte_dados@logistica.com)"}
-    try:
-        res_osm = requests.get(url_osm, headers=headers_osm, timeout=6).json()
-        if res_osm:
-            opcao = res_osm[0]
-            details = opcao.get('address', {})
-            estado_osm = details.get('state', '').strip().upper()
-            
-            lat = float(opcao['lat'])
-            lon = float(opcao['lon'])
-            rua = details.get('road', details.get('pedestrian', ''))
-            bair_o = details.get('neighbourhood', details.get('suburb', ''))
-            cide_o = details.get('city', details.get('town', ''))
-            
-            componentes_osm = [texto_str if len(texto_str) > len(rua) else rua, fracao_predial if fracao_predial else "", bair_o, cide_o, details.get('state', '')]
-            endereco_osm = ", ".join([c for c in componentes_osm if c.strip()]) + ", Brasil"
-            return lat, lon, endereco_osm, estado_osm[:2]
-    except Exception:
-        pass
-        
-    return 0.0, 0.0, query, uf_limite_obrigatorio if uf_limite_obrigatorio else "ND"
-
+# ==========================================
+# CAMADA 4: PIPELINE LOGÍSTICO CENTRAL
+# ==========================================
 def calcular_pipeline_logistico(origem, destino):
-    """Pipeline central avançado 100% agnóstico com Filtro de Inconsistência Geodésica"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Pré-Varredura de Metadados Postais para extração de UF âncora explícita
-    uf_ancora = ""
-    cep_o_match = re.search(r'\b\d{5}-?\d{3}\b', origem_clean)
-    cep_d_match = re.search(r'\b\d{5}-?\d{3}\b', destino_clean)
+    # Processa as localidades e extrai as coordenadas + o tipo estrutural do endereço
+    lat_o, lon_o, origem_oficial, tipo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
+    lat_d, lon_d, destino_oficial, tipo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
-    if cep_o_match:
-        _, _, _, uf_o = camada_postal_redundante(cep_o_match.group(0))
-        if uf_o: uf_ancora = uf_o.upper()
-    elif cep_d_match:
-        _, _, _, uf_d = camada_postal_redundante(cep_d_match.group(0))
-        if uf_d: uf_ancora = uf_d.upper()
-        
-    if not uf_ancora:
-        match_sigla = re.search(r'\b(DF|GO|SP|RJ|MG|BA|PR|SC|RS|CE|PE|AM|PA|MT|MS)\b', origem_clean.upper() + " " + destino_clean.upper())
-        if match_sigla:
-            uf_ancora = match_sigla.group(1)
+    dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d) if (lat_o != 0.0 and lat_d != 0.0) else 0.0
 
-    # Resolve os dados estruturados nas APIs geográficas
-    lat_o, lon_o, origem_oficial, uf_final_o = obter_coordenadas_e_endereco_oficial(origem_clean, uf_ancora)
-    lat_d, lon_d, destino_oficial, uf_final_d = obter_coordenadas_e_endereco_oficial(destino_clean, uf_ancora if uf_ancora else uf_final_o)
-    
-    # Camada 9: Computa o vetor analítico de linha reta teórica perfeito
-    dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
-    
-    query_o = origem_oficial
-    query_d = destino_oficial
-    
+    # REGRA DE OURO AUTOMÁTICA: 
+    # Se o endereço for classificado como localidade ampla (Locality), bairro (Neighborhood) ou POI, 
+    # NUNCA usamos a coordenada crua para a busca do Google. Forçamos a string limpa e estruturada.
+    # Coordenadas cruas ficam restritas a precisões cirúrgicas ('PointAddress' ou 'Building').
     usar_coords = True
-    
-    # --- CAMADA DE INTELIGÊNCIA GEOMÉTRICA CONTRA ALUCINAÇÕES (A Trava de Escala) ---
-    # Se a linha reta calculada pelas APIs der maior que 150 km, mas o usuário NÃO especificou 
-    # siglas de estados diferentes na planilha (indicando que deveria ser uma viagem curta local), 
-    # o sistema detecta uma falha cadastral de homônimo. Coordenadas ruins são abortadas na hora.
-    if dist_linha_reta > 150.0:
-        siglas_encontradas = re.findall(r'\b(DF|GO|SP|RJ|MG|BA|PR|SC|RS|CE|PE|AM|PA|MT|MS)\b', origem_clean.upper() + " " + destino_clean.upper())
-        if len(set(siglas_encontradas)) <= 1:
-            usar_coords = False # Desativa as coordenadas e força o roteamento por texto limpo no Google
-
-    dados_reais = extrair_dados_reais_google(query_o, query_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
+    if tipo_o in ['POI', 'Locality', 'Neighborhood', 'Unknown'] or tipo_d in ['POI', 'Locality', 'Neighborhood', 'Unknown']:
+        usar_coords = False
+        
+    # Dispara a busca no motor do Google Maps
+    dados_reais = extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
-        
-        # Filtro de Contingência Viária pós-Google Maps
-        if km_google > 150.0 and dist_linha_reta < 60.0 and usar_coords:
-            dados_reais_seguros = extrair_dados_reais_google(query_o, query_d, 0.0, 0.0, 0.0, 0.0, usar_coordenadas=False)
-            if dados_reais_seguros:
-                return dados_reais_seguros[0], dados_reais_seguros[1], dados_reais_seguros[2], dados_reais_seguros[3], dist_linha_reta
-                
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # FALLBACK OPERACIONAL EM CASO DE ADVERSIDADE DE INTERNET
-    link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(query_o)}&destination={requests.utils.quote(query_d)}&travelmode=driving"
+    # FALLBACK OPERACIONAL EM CASO DE QUIDAM DE REDE
+    link_maps_fallback = f"http://googleusercontent.com/maps.google.com/5{requests.utils.quote(origem_oficial)}&destination={requests.utils.quote(destino_oficial)}&travelmode=driving"
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
     minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
+    tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min"
     
-    tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
     return km_terrestre, tempo_txt, link_maps_fallback, "Não", dist_linha_reta
 
-# --- INTERFACE VISUAL NO STREAMLIT ---
+# ==========================================
+# INTERFACE GRÁFICA (STREAMLIT)
+# ==========================================
 st.title("🚗 Gerenciador de Rotas Inteligentes")
-st.subheader("Engine de Resolução Espacial Agnóstica — Operação Gratuita")
-st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
+st.subheader("Engine Dinâmica de Resolução e Classificação de Endereços")
 
 arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"])
 
@@ -302,11 +243,11 @@ if arquivo_carregado is not None:
     df = pd.read_excel(arquivo_carregado)
     
     if 'Origem' not in df.columns or 'Destino' not in df.columns:
-        st.error("Erro de Validação: Certifique-se de que a planilha possui as colunas obrigatórias 'Origem' e 'Destino'.")
+        st.error("Erro: A planilha precisa conter as colunas exatas 'Origem' e 'Destino'.")
     else:
-        st.success("Tabela de dados detectada com sucesso! Pronto para processar.")
+        st.success("Dados carregados com sucesso!")
         
-        if st.button("Iniciar Processamento em Lote"):
+        if st.button("Processar Rotas em Lote"):
             for col in ['Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']:
                 df[col] = None
 
@@ -318,8 +259,8 @@ if arquivo_carregado is not None:
                 origem = str(linha['Origem']).strip()
                 destino = str(linha['Destino']).strip()
                 
-                if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
-                    container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
+                if origin := (origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan'):
+                    container_status.text(f"🔢 Linha {index + 1}/{total_linhas}: {origem} ➔ {destino}")
                     
                     km, tempo, link, balsa_status, linha_reta = calcular_pipeline_logistico(origem, destino)
                     
@@ -329,7 +270,7 @@ if arquivo_carregado is not None:
                     df.at[index, 'Balsas'] = balsa_status
                     df.at[index, 'Linha Reta'] = linha_reta
                     
-                    time.sleep(1.0)
+                    time.sleep(0.8)
                 
                 barra_progresso.progress((index + 1) / total_linhas)
             
@@ -341,19 +282,17 @@ if arquivo_carregado is not None:
             for col_orig in df.columns:
                 if col_orig not in ordem_finais:
                     ordem_finais.insert(0, col_orig)
-            df = df.reindex(columns=ordem_colunas if 'ordem_colunas' in locals() else ordem_finais)
+            df = df.reindex(columns=ordem_finais)
             
             output_buffer = io.BytesIO()
             with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False)
-            dados_excel = output_buffer.getvalue()
             
             st.write("---")
             st.balloons()
-            
             st.download_button(
                 label="📥 Baixar Planilha Logística Processada",
-                data=dados_excel,
-                file_name="planilha_rotas_calculada.xlsx",
+                data=output_buffer.getvalue(),
+                file_name="rotas_resolvidas_automatico.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
