@@ -13,6 +13,25 @@ st.set_page_config(
     layout="centered"
 )
 
+def calcular_similaridade_tokens(string1, string2):
+    """
+    MÉTRICA MATEMÁTICA DE INTERSEÇÃO - Ciência de Dados Geográficos.
+    Calcula a similaridade entre duas strings com base na coincidência de tokens (palavras).
+    Garante resolução universal de entidades sem termos fixos no código.
+    """
+    # Limpa e quebra as strings em conjuntos de palavras significativas (comprimento > 2)
+    words1 = set(re.findall(r'\b\w{3,}\b', string1.upper()))
+    words2 = set(re.findall(r'\b\w{3,}\b', string2.upper()))
+    
+    if not words1:
+        return 0.0
+        
+    # Calcula a interseção (palavras em comum)
+    intersecao = words1.intersection(words2)
+    
+    # Retorna a razão entre palavras coincidentes e o total digitado pelo usuário
+    return len(intersecao) / len(words1)
+
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=True):
     """
     CAMADA BRUTA - Intercepta a API interna de direções do Google Maps.
@@ -26,7 +45,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         destino_param = requests.utils.quote(f"{destino_raw}".strip())
         url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     
-    # URL parametrizada pública e canônica de Direções do Google Maps (Impede desvios do buscador)
+    # URL de Direções Canônicas (Garante trancamento da rota no endereço tratado)
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(str(origem_raw).strip())}&destination={requests.utils.quote(str(destino_raw).strip())}&travelmode=driving"
     
     headers = {
@@ -108,13 +127,13 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
 
 def obter_coordenadas_e_endereco_oficial(localidade):
     """
-    CAMADA GEOGRÁFICA INTEROPERÁVEL - Executa o Pipeline de Desambiguação Agnóstico.
-    Se for CEP, força o uso do dado intocável dos Correios. Se for texto, estrutura via ArcGIS.
+    CAMADA GEOGRÁFICA INTEROPERÁVEL UNIVERSAL.
+    Mapeia e valida qualquer endereço ou CEP em território nacional por similaridade estatística de tokens.
     """
     texto_str = str(localidade).strip()
     foi_resolvido_por_cep = False
     
-    # 1. INTERCEPTAÇÃO POSTAL SOBERANA (ViaCEP)
+    # 1. RESOLUÇÃO POSTAL SOBERANA (ViaCEP)
     cep_limpo = re.sub(r'\D', '', texto_str)
     if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str):
         try:
@@ -125,11 +144,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                 localidade_nome = res_cep.get('localidade', '').strip()
                 uf = res_cep.get('uf', '').strip()
                 
-                # Higienização automática de termos ambíguos na malha urbana do DF
-                if uf.upper() == "DF" and "ZONA INDUSTRIAL" in bairro.upper():
-                    bairro = "SIG"
-                
-                # Monta a assinatura hierárquica imutável dos Correios
                 componentes_cep = [logradouro, bairro, localidade_nome, uf]
                 texto_str = ", ".join([c for c in componentes_cep if c])
                 texto_str += f", {res_cep.get('cep', cep_limpo)}, Brasil"
@@ -137,59 +151,69 @@ def obter_coordenadas_e_endereco_oficial(localidade):
         except Exception:
             pass
 
-    # 2. SE FOR ENDEREÇO TEXTUAL COMUM: ENGENHARIA DE ATRIBUTOS ESTENDIDOS (ArcGIS)
+    # 2. RESOLUÇÃO GEOGRÁFICA UNIVERSAL POR MATRIZ DE SEMELHANÇA
     query = texto_str
-    eh_poi_df = any(token in texto_str.upper() for token in ["UNIVERSIDADE", "UNB", "CATÓLICA", "CATOLICA", "UNICEUB", "TAGUATINGA", "SAMAMBAIA", "PONTE ALTA"])
-    
     if "BRASIL" not in texto_str.upper():
-        query = f"{texto_str}, Brasília, DF, Brasil" if eh_poi_df else f"{texto_str}, Brasil"
+        query = f"{texto_str}, Brasil"
             
-    # Ativação do parâmetro outFields=* para varredura completa da árvore imobiliária
-    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA&outFields=*"
+    # Alarga a busca para trazer até 10 candidatos potenciais da árvore imobiliária global do ArcGIS
+    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=10&sourceCountry=BRA&outFields=*"
     
     try:
         resposta = requests.get(url, timeout=10).json()
         if resposta.get('candidates'):
+            melhor_candidato = None
+            maior_score_similaridade = -1.0
+            
             for candidato in resposta['candidates']:
                 address_out = candidato['address'].upper()
                 
-                if eh_poi_df and "DF" not in address_out and "BRASÍLIA" not in address_out and "BRASILIA" not in address_out:
-                    continue
-                    
-                lat = float(candidato['location']['y'])
-                lon = float(candidato['location']['x'])
+                # Executa o cálculo estatístico de proximidade semântica
+                score_atual = calcular_similaridade_tokens(texto_str, address_out)
                 
-                # Se viemos pelo fluxo do ViaCEP, mantemos a string oficial e capturamos apenas Lat/Lon
-                if foi_resolvido_por_cep:
-                    return lat, lon, texto_str.replace(", Brasil", "")
-                
-                # Tratamento de Endereço Comum: Reconstrói dinamicamente os pedaços para evitar strings resumidas
-                atributos = candidato.get('attributes', {})
-                logradouro_arc = atributos.get('StAddr', '').strip()
-                bairro_arc = atributos.get('Neighborhood', '').strip()
-                cidade_arc = atributos.get('City', '').strip()
-                estado_arc = atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()
-                
-                if logradouro_arc and len(logradouro_arc.split()) > 1:
-                    componentes_reconstruidos = [logradouro_arc, bairro_arc, cidade_arc, estado_arc]
-                    endereco_completo = ", ".join([c for c in componentes_reconstruidos if c])
-                    return lat, lon, endereco_completo
-                
-                return lat, lon, candidato['address']
+                # Critério de desempate científico pelo score bruto do geocodificador se a similaridade empatar
+                if score_atual > maior_score_similaridade:
+                    maior_score_similaridade = score_atual
+                    melhor_candidato = candidato
+                elif score_atual == maior_score_similaridade and melhor_candidato:
+                    if candidato.get('score', 0) > melhor_candidato.get('score', 0):
+                        melhor_candidato = candidato
             
-            primeiro = resposta['candidates'][0]
-            return float(primeiro['location']['y']), float(primeiro['location']['x']), texto_str if foi_resolvido_por_cep else primeiro['address']
+            if not melhor_candidato:
+                melhor_candidato = resposta['candidates'][0]
+                
+            lat = float(melhor_candidato['location']['y'])
+            lon = float(melhor_candidato['location']['x'])
+            
+            if foi_resolvido_por_cep:
+                return lat, lon, texto_str.replace(", Brasil", "")
+            
+            # Extração e remontagem estruturada universal dos atributos do local
+            atributos = melhor_candidato.get('attributes', {})
+            logradouro_arc = atributos.get('StAddr', '').strip()
+            bairro_arc = atributos.get('Neighborhood', '').strip()
+            cidade_arc = atributos.get('City', '').strip()
+            estado_arc = atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()
+            postal_arc = atributos.get('Postal', '').strip()
+            
+            if logradouro_arc and len(logradouro_arc.split()) > 1:
+                componentes_reconstruidos = [logradouro_arc, bairro_arc, cidade_arc, estado_arc]
+                endereco_completo = ", ".join([c for c in componentes_reconstruidos if c])
+                if postal_arc:
+                    endereco_completo += f", {postal_arc}"
+                return lat, lon, endereco_completo
+            
+            return lat, lon, melhor_candidato['address']
     except Exception:
         pass
         
     return 0.0, 0.0, texto_str
 
 def calcular_pipeline_logistico(origem, destino):
-    """Pipeline central avançado com injeção contextual de strings e coordenadas"""
+    """Pipeline central avançado com injeção de strings tratadas"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Executa a desambiguação e higienização em lote na largada
     dados_geo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
     dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
@@ -198,23 +222,15 @@ def calcular_pipeline_logistico(origem, destino):
     
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d) if (lat_o != 0.0 and lat_d != 0.0) else 0.0
 
-    origem_is_poi = any(k in origem_oficial.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
-    destino_is_poi = any(k in destino_oficial.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
-
-    query_o = f"{origem_oficial}, Brasília, DF, Brasil" if (origem_is_poi and "BRASIL" not in origem_oficial.upper()) else origem_oficial
-    query_d = f"{destino_oficial}, Brasília, DF, Brasil" if (destino_is_poi and "BRASIL" not in destino_oficial.upper()) else destino_oficial
-
-    usar_coords = not (origem_is_poi or destino_is_poi)
-    
-    # Envia a query contendo a frase estruturada intocável direto para o motor do Google
-    dados_reais = extrair_dados_reais_google(query_o, query_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
+    # Força a busca das direções rodoviárias com as strings ricas geradas pela matriz de semelhança
+    dados_reais = extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=True)
     
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # FALLBACK OPERACIONAL SECUNDÁRIO E CANÔNICO
-    link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(query_o)}&destination={requests.utils.quote(query_d)}&travelmode=driving"
+    # FALLBACK OPERACIONAL
+    link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_oficial)}&destination={requests.utils.quote(destino_oficial)}&travelmode=driving"
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
     minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
@@ -299,6 +315,6 @@ if arquivo_carregado is not None:
                 Este software implementa um ecossistema de **Engenharia Reversa de Redes** operando em quatro camadas:
                 1. **Vetorização de Lote:** Extrai os eixos de texto das células da planilha carregada.
                 2. **Mapeamento de API Viva Interna (Camada A):** Dispara requisições ao endpoint corporativo do Google Maps extraindo KMs e tempos rodoviários em tempo real.
-                3. **Filtro de Desambiguação Postal:** Intercepta e reconstrói as strings de CEP na base dos Correios, forçando o Google Maps a renderizar o trajeto sob o protocolo de links de Direções Canônicas, eliminando saltos para homônimos.
+                3. **Mapeamento Semântico Adaptável Universais:** Executa a quebra de strings em tokens e calcula a interseção vetorial textual. Escolhe o endereço canônico mais próximo da intenção do usuário sem qualquer termo fixado no código de forma rígida, servindo para qualquer rua, local ou estado do Brasil.
                 4. **Vincenty Geodésico:** Computa a linha reta teórica perfeita baseada no elipsoide real da Terra (WGS-84).
                 """)
