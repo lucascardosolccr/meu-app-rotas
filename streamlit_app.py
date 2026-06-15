@@ -9,6 +9,7 @@ import os
 import pickle
 import logging
 import atexit
+import random
 from typing import Optional, Tuple, Dict, List
 from unidecode import unidecode
 from rapidfuzz import process, fuzz
@@ -35,10 +36,15 @@ logger = logging.getLogger(__name__)
 # 🔐 CARREGAMENTO DE VARIÁVEIS DE AMBIENTE
 # ==============================================================================
 load_dotenv()
-ORS_API_KEY = os.getenv("ORS_API_KEY", "5b3ce3597851110001cf6248a7b8b6ac4e6d4e00b7c6f8b4e5b3aa60")
 
-if ORS_API_KEY == "5b3ce3597851110001cf6248a7b8b6ac4e6d4e00b7c6f8b4e5b3aa60":
-    logger.warning("⚠️  Usando ORS_API_KEY padrão. Configure variável de ambiente para produção!")
+# MELHORIA 2: API Key obrigatória, sem fallback inseguro
+ORS_API_KEY = os.getenv("ORS_API_KEY")
+if not ORS_API_KEY:
+    logger.error("❌ ORS_API_KEY não configurada! Configure a variável de ambiente.")
+    st.error("❌ ORS_API_KEY não configurada. Adicione ao .env ou variáveis de ambiente.")
+    raise RuntimeError("ORS_API_KEY obrigatória não encontrada")
+
+logger.info("✅ ORS_API_KEY carregada com sucesso")
 
 # ==============================================================================
 # 🎨 CONFIGURAÇÃO CANÔNICA DE UI/UX DO STREAMLIT
@@ -79,17 +85,25 @@ def cleanup_recursos():
     if "executor_global" in st.session_state:
         executor = st.session_state["executor_global"]
         executor.shutdown(wait=False)
-        logger.info("✅ ThreadPoolExecutor finalizado")
+        logger.info("✅ ThreadPoolExecutor global finalizado")
     
-    # Fechar caches
+    if "geo_pool" in st.session_state:
+        geo_pool = st.session_state["geo_pool"]
+        geo_pool.shutdown(wait=False)
+        logger.info("✅ ThreadPoolExecutor de geocodificação finalizado")
+    
+    # Fechar caches com limpeza
     try:
         if "cache_geo" in globals():
+            cache_geo.cull()
             cache_geo.close()
         if "cache_rotas" in globals():
+            cache_rotas.cull()
             cache_rotas.close()
         if "cache_poi" in globals():
+            cache_poi.cull()
             cache_poi.close()
-        logger.info("✅ Caches fechados")
+        logger.info("✅ Caches fechados e limpos")
     except Exception as e:
         logger.error(f"❌ Erro ao fechar caches: {e}")
 
@@ -98,7 +112,7 @@ atexit.register(cleanup_recursos)
 # ==============================================================================
 # 🧠 PERSISTÊNCIA EM DISCO E AMBIENTE GLOBAL
 # ==============================================================================
-# MELHORIA: Usar parâmetros de limite de tamanho
+# MELHORIA 6: Usar parâmetros de limite de tamanho com cull periódico
 cache_geo = Cache("./cache_geo", size_limit=500_000_000)      # 500 MB
 cache_rotas = Cache("./cache_rotas", size_limit=300_000_000)  # 300 MB
 cache_poi = Cache("./cache_poi", size_limit=200_000_000)      # 200 MB
@@ -110,13 +124,19 @@ if "ibge_estados" not in st.session_state:
 if "ibge_municipios" not in st.session_state:
     st.session_state["ibge_municipios"] = {}
 
+# MELHORIA 8: Usar tuple em vez de lista para economizar RAM
 if "lista_municipios" not in st.session_state:
-    st.session_state["lista_municipios"] = []
+    st.session_state["lista_municipios"] = ()
 
-# MELHORIA 4: Pool global reutilizado entre execuções do Streamlit (com cleanup)
+# MELHORIA 3: Pool global único para roteamento (5 workers)
 if "executor_global" not in st.session_state:
     st.session_state["executor_global"] = ThreadPoolExecutor(max_workers=5)
-    logger.info("🚀 ThreadPoolExecutor global inicializado")
+    logger.info("🚀 ThreadPoolExecutor global (roteamento) inicializado")
+
+# MELHORIA 3: Pool separado para geocodificação (3 workers)
+if "geo_pool" not in st.session_state:
+    st.session_state["geo_pool"] = ThreadPoolExecutor(max_workers=3)
+    logger.info("🚀 ThreadPoolExecutor (geocodificação) inicializado")
 
 SINONIMOS_SEMANTICOS = {
     "UNB": "UNIVERSIDADE DE BRASILIA",
@@ -144,7 +164,8 @@ def inicializar_infraestrutura_ibge_local() -> None:
                 dados = pickle.load(f)
                 st.session_state["ibge_municipios"] = dados.get("municipios", {})
                 st.session_state["ibge_estados"] = dados.get("estados", {})
-                st.session_state["lista_municipios"] = list(dados.get("municipios", {}).keys())
+                # MELHORIA 8: Usar tuple em vez de list
+                st.session_state["lista_municipios"] = tuple(dados.get("municipios", {}).keys())
                 logger.info(f"✅ IBGE carregado do cache: {len(st.session_state['lista_municipios'])} municípios")
                 return
         except Exception as e:
@@ -177,7 +198,8 @@ def inicializar_infraestrutura_ibge_local() -> None:
 
         st.session_state["ibge_municipios"] = base_municipios
         st.session_state["ibge_estados"] = base_estados
-        st.session_state["lista_municipios"] = list(base_municipios.keys())
+        # MELHORIA 8: Usar tuple
+        st.session_state["lista_municipios"] = tuple(base_municipios.keys())
     except Exception as e:
         logger.error(f"❌ Erro ao carregar IBGE: {e}")
 
@@ -289,7 +311,9 @@ def detectar_cep_parcial(texto: str) -> Optional[str]:
 # 🗺️ RESOLUÇÃO MULTI-FONTE CADASTRAIS
 # ==============================================================================
 def calcular_distancia_vincenty(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calcula distância geodésica usando fórmula de Vincenty (WGS-84)"""
+    """Calcula distância geodésica usando fórmula de Vincenty (WGS-84)
+    MELHORIA 4: Proteção contra divisão por zero
+    """
     if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0:
         logger.debug("⚠️  Coordenadas inválidas (0,0) detectadas")
         return 0.0
@@ -312,6 +336,11 @@ def calcular_distancia_vincenty(lat1: float, lon1: float, lat2: float, lon2: flo
             sigma = math.atan2(sinSigma, cosSigma)
             sinAlpha = cosU1*cosU2*sinLambda/sinSigma
             cosSqAlpha = 1 - sinAlpha**2
+            
+            # MELHORIA 4: Proteção contra instabilidade numérica
+            if abs(cosSqAlpha) < 1e-12:
+                cosSqAlpha = 0
+            
             cos2SigmaM = cosSigma - 2*sinU1*sinU2/cosSqAlpha if cosSqAlpha != 0 else 0
             C = f/16*cosSqAlpha*(4 + f*(4 - 3*cosSqAlpha))
             lambdaPrev = lambda_lon
@@ -319,7 +348,7 @@ def calcular_distancia_vincenty(lat1: float, lon1: float, lat2: float, lon2: flo
             if abs(lambda_lon - lambdaPrev) < 1e-12:
                 break
         
-        uSq = cosSqAlpha*(a**2 - b**2)/(b**2)
+        uSq = cosSqAlpha*(a**2 - b**2)/(b**2) if cosSqAlpha != 0 else 0
         A = 1 + uSq/16384*(4096 + uSq*(-768 + uSq*(320 - 175*uSq)))
         B = uSq/1024*(256 + uSq*(-128 + uSq*(74 - 47*uSq)))
         deltaSigma = B*sinSigma*(cos2SigmaM + B/4*(cosSigma*(-1 + 2*cos2SigmaM**2) - B/6*cos2SigmaM*(-3 + 4*sinSigma**2)*(-3 + 4*cos2SigmaM**2)))
@@ -422,13 +451,14 @@ def API_Photon(query: str) -> Optional[Dict]:
     return None
 
 def API_Overpass_POIs(texto_norm: str) -> Optional[Dict]:
-    """MELHORIA 2: Busca POIs via Overpass com timeout melhorado (5s)"""
+    """MELHORIA 5: Query Overpass otimizada com limite de tamanho"""
     if texto_norm in cache_poi:
         logger.debug(f"💾 POI em cache: {texto_norm}")
         return cache_poi[texto_norm]
     
     try:
-        texto_seguro = re.escape(texto_norm)
+        # MELHORIA 5: Limitar tamanho do query para evitar overload
+        texto_seguro = re.escape(texto_norm[:80])
         query_osm = f"""
         [out:json][timeout:5];
         (
@@ -462,19 +492,18 @@ def API_Overpass_POIs(texto_norm: str) -> Optional[Dict]:
     cache_poi.set(texto_norm, None, expire=86400)
     return None
 
-# MELHORIA 10: Geocodificadores primários executados em paralelo
-def geocodificar_paralelo(query: str) -> List[Dict]:
+# MELHORIA 3: Usar pool global em vez de criar novo
+def geocodificar_paralelo(query: str, pool: ThreadPoolExecutor) -> List[Dict]:
     """Dispara ArcGIS + Nominatim + Photon ao mesmo tempo; retorna todos os resultados válidos"""
     candidatos = []
     provedores = [API_ArcGIS, API_Nominatim, API_Photon]
     
     try:
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            futuros = {pool.submit(fn, query): fn.__name__ for fn in provedores}
-            for fut in as_completed(futuros):
-                res = fut.result()
-                if res:
-                    candidatos.append(res)
+        futuros = {pool.submit(fn, query): fn.__name__ for fn in provedores}
+        for fut in as_completed(futuros):
+            res = fut.result()
+            if res:
+                candidatos.append(res)
         logger.info(f"🌐 Geocodificação paralela: {len(candidatos)} resultado(s) obtido(s)")
     except Exception as e:
         logger.error(f"❌ Erro em geocodificação paralela: {e}")
@@ -482,7 +511,9 @@ def geocodificar_paralelo(query: str) -> List[Dict]:
     return candidatos
 
 def processar_consenso_e_pontuacao_centesimal(candidatos: List[Dict], texto_cru: str) -> Optional[Tuple]:
-    """Processa consenso espacial e calcula score final"""
+    """Processa consenso espacial e calcula score final
+    MELHORIA 7: Threshold para reverse geocoding aumentado para 70
+    """
     if not candidatos:
         return None
 
@@ -507,9 +538,9 @@ def processar_consenso_e_pontuacao_centesimal(candidatos: List[Dict], texto_cru:
     candidatos.sort(key=lambda x: x["score_final"], reverse=True)
     vencedor = candidatos[0]
 
-    # MELHORIA 3: Reverse geocoding só se score insatisfatório
+    # MELHORIA 7: Threshold aumentado para 70 (antes 85) para reduzir chamadas Nominatim
     m = {"logradouro":"","bairro":"","cidade":"","municipio":"","distrito":"","estado":"","cep":""}
-    if vencedor["score_final"] < 85:
+    if vencedor["score_final"] < 70:
         m = executar_reverse_geocoding_enrichment(vencedor["lat"], vencedor["lon"])
         if m["cep"]:
             vencedor["score_final"] += 10
@@ -537,7 +568,7 @@ def processar_consenso_e_pontuacao_centesimal(candidatos: List[Dict], texto_cru:
 # ==============================================================================
 # 🎚️ PIPELINE SEQUENCIAL EM CASCATA INTELIGENTE
 # ==============================================================================
-def obter_coordenadas_e_endereco_oficial(localidade: str) -> Tuple:
+def obter_coordenadas_e_endereco_oficial(localidade: str, pool: ThreadPoolExecutor) -> Tuple:
     """Pipeline cascata: CEP → POI → Geocodificadores → Fallback geodésico"""
     texto_cru = str(localidade).strip()
     if not texto_cru or texto_cru.lower() == 'nan':
@@ -582,8 +613,8 @@ def obter_coordenadas_e_endereco_oficial(localidade: str) -> Tuple:
                 logger.info(f"✅ POI resolvido: {texto_norm}")
                 return res_final
 
-    # Estratégia 3: Geocodificação paralela (MELHORIA 10)
-    candidatos_validos = geocodificar_paralelo(texto_expandido)
+    # Estratégia 3: Geocodificação paralela com pool reutilizado (MELHORIA 3)
+    candidatos_validos = geocodificar_paralelo(texto_expandido, pool)
 
     res_final = processar_consenso_e_pontuacao_centesimal(candidatos_validos, texto_cru)
     if res_final:
@@ -602,8 +633,13 @@ def obter_coordenadas_e_endereco_oficial(localidade: str) -> Tuple:
 # 🚀 MOTOR DE ROTEAMENTO
 # ==============================================================================
 def rota_osrm(lat_o: float, lon_o: float, lat_d: float, lon_d: float) -> Optional[Tuple]:
-    """Cálculo de rota via OSRM (Open Source Routing Machine)"""
+    """Cálculo de rota via OSRM (Open Source Routing Machine)
+    MELHORIA 9: Sleep aleatório para evitar throttling
+    """
     try:
+        # MELHORIA 9: Sleep aleatório pequeno para evitar 429
+        time.sleep(random.uniform(0.1, 0.3))
+        
         url = (f"https://router.project-osrm.org/route/v1/driving/"
                f"{lon_o},{lat_o};{lon_d},{lat_d}?overview=false")
         r = session.get(url, timeout=5).json()
@@ -650,21 +686,23 @@ def obter_fator_desvio_rodoviario(linha_reta: float) -> float:
         return 1.18
     return 1.12
 
-def calcular_pipeline_logistico(origem: str, destino: str) -> Tuple:
-    """Pipeline completo: geocodificação + roteamento + cache"""
+def calcular_pipeline_logistico(origem: str, destino: str, pool: ThreadPoolExecutor) -> Tuple:
+    """Pipeline completo: geocodificação + roteamento + cache
+    MELHORIA 1: Chave de cache assimétrica (A→B ≠ B→A)
+    """
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
 
-    # MELHORIA 5: Chave simétrica A→B igual a B→A
-    chave_rota_cache = "ROTA_" + "_".join(sorted([origem_clean, destino_clean]))
+    # MELHORIA 1: Chave assimétrica - A→B ≠ B→A
+    chave_rota_cache = f"ROTA_{origem_clean}_{destino_clean}"
     if chave_rota_cache in cache_rotas:
         logger.debug(f"💾 Rota em cache: {chave_rota_cache}")
         return cache_rotas[chave_rota_cache]
 
     logger.info(f"🔄 Processando rota: {origem_clean} → {destino_clean}")
     
-    lat_o, lon_o, o_oficial, conf_o, score_o, dist_o, mun_o = obter_coordenadas_e_endereco_oficial(origem_clean)
-    lat_d, lon_d, d_oficial, conf_d, score_d, dist_d, mun_d = obter_coordenadas_e_endereco_oficial(destino_clean)
+    lat_o, lon_o, o_oficial, conf_o, score_o, dist_o, mun_o = obter_coordenadas_e_endereco_oficial(origem_clean, pool)
+    lat_d, lon_d, d_oficial, conf_d, score_d, dist_d, mun_d = obter_coordenadas_e_endereco_oficial(destino_clean, pool)
 
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
@@ -711,10 +749,10 @@ def calcular_pipeline_logistico(origem: str, destino: str) -> Tuple:
     cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
     return retorno
 
-def embrulhar_task_paralela(item: Tuple) -> Tuple:
+def embrulhar_task_paralela(item: Tuple, pool: ThreadPoolExecutor) -> Tuple:
     """Wrapper para execução paralela de cálculo de rotas"""
     idx, orig, dest = item
-    return idx, calcular_pipeline_logistico(orig, dest)
+    return idx, calcular_pipeline_logistico(orig, dest, pool)
 
 # ==============================================================================
 # 🚗 INTERFACE VISUAL NO STREAMLIT
@@ -758,10 +796,16 @@ if arquivo_carregado is not None:
 
                 logger.info(f"🎯 Total de tarefas: {len(tarefas)}")
 
-                # MELHORIA 4: Reutiliza executor global em vez de criar novo
+                # MELHORIA 3: Usar pool de geocodificação reutilizável
+                geo_pool = st.session_state["geo_pool"]
+                
+                # Criar função wrapper que inclui o pool
+                def wrapper_com_pool(item):
+                    return embrulhar_task_paralela(item, geo_pool)
+
                 lote_executor = st.session_state["executor_global"]
                 resultados_mapeados = {}
-                futuros = {lote_executor.submit(embrulhar_task_paralela, t): t for t in tarefas}
+                futuros = {lote_executor.submit(wrapper_com_pool, t): t for t in tarefas}
 
                 concluidos = 0
                 for f in as_completed(futuros):
@@ -772,7 +816,7 @@ if arquivo_carregado is not None:
                         container_status.text(f"🚀 Processamento: {concluidos} de {len(tarefas)} rotas calculadas...")
                         barra_progresso.progress(concluidos / len(tarefas))
                     except Exception as e:
-                        logger.error(f"❌ Erro ao processar tarefa {f}: {e}")
+                        logger.error(f"❌ Erro ao processar tarefa: {e}")
                         st.error(f"Erro ao processar linha: {e}")
 
                 # Preencher resultados
