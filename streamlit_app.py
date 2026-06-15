@@ -26,7 +26,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         destino_param = requests.utils.quote(f"{destino_raw}".strip())
         url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     
-    # URL parametrizada pública e canônica de Direções do Google Maps
+    # URL parametrizada pública e canônica de Direções do Google Maps (Alimentada com strings higienizadas)
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(str(origem_raw).strip())}&destination={requests.utils.quote(str(destino_raw).strip())}&travelmode=driving"
     
     headers = {
@@ -118,7 +118,6 @@ def buscar_via_cep(cep):
                 localidade = res.get('localidade', '').strip()
                 uf = res.get('uf', '').strip()
                 
-                # Normalização genérica para o ecossistema do DF (SIG / Setor de Indústrias)
                 if uf.upper() == "DF" and "ZONA INDUSTRIAL" in bairro.upper():
                     bairro = "SIG"
                 
@@ -131,66 +130,77 @@ def buscar_via_cep(cep):
 
 def obter_coordenadas_e_endereco_oficial(localidade):
     """
-    CAMADA GEOGRÁFICA UNIVERSAL - Traduz e amarra qualquer texto comum a um CEP válido
-    através de geocodificação cruzada com a base postal nacional, de forma 100% dinâmica.
+    CAMADA GEOGRÁFICA INTEROPERÁVEL - Executa o Pipeline de Desambiguação Agnóstico.
+    Se for CEP, força o uso do dado intocável dos Correios. 
+    Se for texto, extrai o CEP latente no ArcGIS e faz o cruzamento reverso na base postal.
     """
     texto_str = str(localidade).strip()
     texto_upper = texto_str.upper()
     
-    # Extrai números isolados que possam representar numeração predial (Ex: Casa 12, Bloco B, nº 400)
+    # Captura numeração predial latente (ex: casa 10, lote 2, nº 500) usando Regex contextual
     numero_predial = ""
-    match_num = re.search(r'(?:NÚMERO|Nº|N|NUMERO|\b)\s*(\d+)\b', texto_upper)
+    match_num = re.search(r'(?:NÚMERO|Nº|N|NUMERO|LOTE|QD|Q\b)\s*([A-Za-z0-9\/]+)\b', texto_upper)
     if match_num and not re.match(r'^\d{5}-?\d{3}$', texto_str):
         numero_predial = match_num.group(1)
 
-    # 1. TRATAMENTO DIRETO SE A ENTRADA JÁ FOR UM CEP
+    # 1. RESOLUÇÃO COMPLETA SE A ENTRADA JÁ FOR UM CEP PURO
     cep_limpo = re.sub(r'\D', '', texto_str)
     if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str or "CEP" in texto_upper):
         endereco_via_cep = buscar_via_cep(cep_limpo)
         if endereco_via_cep:
+            # Atendendo ao requisito: se for CEP, extrai Lat/Lon sem alterar a string soberana dos Correios
+            url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(endereco_via_cep)}&maxLocations=1&sourceCountry=BRA"
+            try:
+                res_arc = requests.get(url_arc, timeout=5).json()
+                if res_arc.get('candidates'):
+                    loc = res_arc['candidates'][0]['location']
+                    return float(loc['y']), float(loc['x']), endereco_via_cep
+            except Exception:
+                pass
             return 0.0, 0.0, endereco_via_cep
 
-    # 2. SE FOR TEXTO: CRUZA DADOS VIA ARCGIS REST PARA EXTRAIR O CEP DA RUA/LOCALIDADE
-    query = texto_str
-    if "BRASIL" not in texto_upper:
-        query = f"{texto_str}, Brasil"
-        
-    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA&outFields=*"
+    # 2. SE FOR ENDEREÇO TEXTUAL COMUM: EXTRAÇÃO DE CEP POR ATRIBUTOS ESTENDIDOS (ArcGIS Server REST)
+    query = texto_str if "BRASIL" in texto_upper else f"{texto_str}, Brasil"
+    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=5&sourceCountry=BRA&outFields=*"
     
     try:
         resposta = requests.get(url, timeout=10).json()
         if resposta.get('candidates'):
-            candidato = resposta['candidates'][0]
-            lat = float(candidato['location']['y'])
-            lon = float(candidato['location']['x'])
-            
-            # Captura o código postal (CEP) retornado dinamicamente pelo servidor geográfico
-            atributos = candidato.get('attributes', {})
-            cep_identificado = atributos.get('Postal', '').strip() or atributos.get('PostalExt', '').strip()
-            cep_identificado_limpo = re.sub(r'\D', '', cep_identificado)
-            
-            # Se o servidor identificou um CEP válido para este local, amarra o endereço de forma soberana ao ViaCEP
-            if len(cep_identificado_limpo) == 8:
-                endereco_oficial_correios = buscar_via_cep(cep_identificado_limpo)
-                if endereco_oficial_correios:
-                    # Se havia um número predial na digitação original do usuário, preserva-o na string final
-                    if numero_predial and numero_predial not in endereco_oficial_correios:
-                        partes = endereco_oficial_correios.split(', ', 1)
-                        if len(partes) > 1:
-                            endereco_oficial_correios = f"{partes[0]}, {numero_predial}, {partes[1]}"
-                    return lat, lon, endereco_oficial_correios
-            
-            # Tratamento secundário (Fallback de texto estruturado caso o local não possua CEP individualizado)
-            logradouro_arc = atributos.get('StAddr', '').strip()
-            bairro_arc = atributos.get('Neighborhood', '').strip()
-            cidade_arc = atributos.get('City', '').strip()
-            estado_arc = atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()
+            # Varre os candidatos em busca do que possua a melhor árvore cadastral preenchida
+            for candidato in resposta['candidates']:
+                lat = float(candidato['location']['y'])
+                lon = float(candidato['location']['x'])
+                
+                atributos = candidato.get('attributes', {})
+                cep_identificado = atributos.get('Postal', '').strip() or atributos.get('PostalExt', '').strip()
+                cep_identificado_limpo = re.sub(r'\D', '', cep_identificado)
+                
+                # SE O ARCGIS ENCONTRAR O CEP DO TEXTO COMUM: Executa o Cruzamento Soberano com os Correios
+                if len(cep_identificado_limpo) == 8:
+                    endereco_oficial_correios = buscar_via_cep(cep_identificado_limpo)
+                    if endereco_oficial_correios:
+                        # Injeta a numeração predial ou quadra original digitada pelo usuário na rua oficial dos Correios
+                        if numero_predial and numero_predial.upper() not in endereco_oficial_correios.upper():
+                            partes = endereco_oficial_correios.split(', ', 1)
+                            if len(partes) > 1:
+                                endereco_oficial_correios = f"{partes[0]} {numero_predial}, {partes[1]}"
+                        return lat, lon, endereco_oficial_correios
+
+            # FALLBACK DE TEXTO ESTRUTURADO (Se o local geocodificado não possuir CEP individual cadastrado)
+            primeiro = resposta['candidates'][0]
+            lat = float(primeiro['location']['y'])
+            lon = float(primeiro['location']['x'])
+            attrs = primeiro.get('attributes', {})
+            logradouro_arc = attrs.get('StAddr', '').strip()
+            bairro_arc = attrs.get('Neighborhood', '').strip()
+            cidade_arc = attrs.get('City', '').strip()
+            estado_arc = attrs.get('RegionAbbr', '').strip() or attrs.get('Region', '').strip()
             
             if logradouro_arc and len(logradouro_arc.split()) > 1:
                 componentes = [logradouro_arc, bairro_arc, cidade_arc, estado_arc]
                 return lat, lon, ", ".join([c for c in componentes if c])
             
-            return lat, lon, candidato['address']
+            return lat, lon, primeiro['address']
     except Exception:
         pass
         
@@ -201,7 +211,6 @@ def calcular_pipeline_logistico(origem, destino):
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Executa a limpeza geográfica universal e desambiguação automatizada baseada em CEP
     dados_geo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
     dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
@@ -210,20 +219,17 @@ def calcular_pipeline_logistico(origem, destino):
     
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d) if (lat_o != 0.0 and lat_d != 0.0) else 0.0
 
-    # Injeta os endereços canônicos atrelados ao CEP estruturado direto no Google Maps
     query_o = origem_oficial
     query_d = destino_oficial
 
-    # Define o uso de coordenadas apenas se o mapeamento lat/lon for totalmente confiável
     usar_coords = True if (lat_o != 0.0 and lat_d != 0.0) else False
-    
     dados_reais = extrair_dados_reais_google(query_o, query_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # FALLBACK OPERACIONAL EM CASO DE INSTABILIDADE DE REDE
+    # FALLBACK OPERACIONAL EM CASO DE INSTABILIDADE DE CONEXÃO
     link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(query_o)}&destination={requests.utils.quote(query_d)}&travelmode=driving"
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
@@ -299,16 +305,3 @@ if arquivo_carregado is not None:
                 file_name="planilha_rotas_calculada.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-            
-            # --- SEÇÃO DE AUDITORIA, DOCUMENTAÇÃO E REFERÊNCIAS CIENTÍFICAS ---
-            st.write("---")
-            st.subheader("📘 Documentação Técnico-Científica e Auditoria")
-            
-            with st.expander("1. Engenharia de Funcionamento do Aplicativo"):
-                st.markdown("""
-                Este software implementa um ecossistema de **Engenharia Reversa de Redes** operando em quatro camadas:
-                1. **Vetorização de Lote:** Extrai os eixos de texto das células da planilha carregada.
-                2. **Mapeamento de API Viva Interna (Camada A):** Dispara requisições ao endpoint corporativo do Google Maps extraindo KMs e tempos rodoviários em tempo real.
-                3. **Filtro de Desambiguação Postal Universal:** Converte textos textuais comuns em coordenadas, extrai o código postal latente mapeado pelos servidores cartográficos e reconstrói as strings de busca cruzando o dado diretamente na base dos Correios, forçando o Google Maps a traçar trajetos 100% canônicos e livres de homônimos.
-                4. **Vincenty Geodésico:** Computa a linha reta teórica perfeita baseada no elipsoide real da Terra (WGS-84).
-                """)
