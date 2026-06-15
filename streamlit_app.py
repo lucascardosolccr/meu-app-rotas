@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 # ==============================================================================
-# 🧠 MEMÓRIA CACHE DE LONGO PRAZO E INFRAESTRUTURA DE DADOS (CAMADA OTIMIZADA)
+# 🧠 MEMÓRIA CACHE DE LONGO PRAZO (CAMADA OTIMIZADA)
 # ==============================================================================
 if "cache_geocodificacao" not in st.session_state:
     st.session_state["cache_geocodificacao"] = {}
@@ -88,7 +88,6 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            # LINHA CORRIGIDA: Retorno purificado de sintaxe e livre de resíduos
             return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
@@ -155,7 +154,8 @@ def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
     """
     CAMADA GEOGRÁFICA INTEROPERÁVEL - Geocodificação Dinâmica Multi-Provedor Sem Filtros Fixos.
     """
-    texto_str = normalizar_texto_endereco(localidade)
+    # Chamada corrigida alinhada com a assinatura correta da linha 17
+    texto_str = normalizar_endereco_universal(localidade)
     texto_upper = texto_str.upper()
     foi_resolvido_por_cep = False
     
@@ -203,7 +203,7 @@ def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
                 cidade_arc = atributos.get('City', '').strip()
                 
                 if logradouro_arc and len(logradouro_arc.split()) > 1:
-                    componentes_arc = [logradouro_arc, fracao_predial if fracao_predial else "", bairro_arc, city_arc := cidade_arc, estado_arc]
+                    componentes_arc = [logradouro_arc, fracao_predial if fracao_predial else "", bairro_arc, cidade_arc, estado_arc]
                     endereco_completo = ", ".join([c for c in componentes_arc if c.strip()])
                     return lat, lon, f"{endereco_completo}, Brasil", estado_arc
                 return lat, lon, f"{candidato['address']}, Brasil", estado_arc
@@ -295,7 +295,7 @@ def calcular_pipeline_logistico(origem, destino):
 
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # FALLBACK OPERACIONAL COM CORREÇÃO DE VÍRGULA COMPILADA
+    # FALLBACK OPERACIONAL
     link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(query_o)}&destination={requests.utils.quote(query_d)}&travelmode=driving"
     km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
