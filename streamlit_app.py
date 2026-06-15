@@ -25,8 +25,6 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         destino_param = requests.utils.quote(f"{destino_raw}".strip())
         
     url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
-    
-    # URL parametrizada pública e canônica de Direções do Google Maps
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(str(origem_raw).strip())}&destination={requests.utils.quote(str(destino_raw).strip())}&travelmode=driving"
     
     headers = {
@@ -52,15 +50,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             km_puro = float(km_txt.replace('.', '').replace(',', '.'))
             
             envolve_balsa = "Não"
-            padroes_balsa = [
-                r'\"utilizar\s+balsa\b', 
-                r'\"pegar\s+balsa\b', 
-                r'\"travessia\s+de\s+balsa\b', 
-                r'\"balsa\s+de\s+veículos\b',
-                r'\"ferry\b',
-                r'\"travessia\s+por\s+balsa\b'
-            ]
-            
+            padroes_balsa = [r'\"utilizar\s+balsa\b', r'\"pegar\s+balsa\b', r'\"travessia\s+de\s+balsa\b']
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
@@ -108,149 +98,119 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
     except Exception:
         return 0.0
 
-def buscar_via_cep(cep):
-    """Busca estruturada e imutável na API nacional aberta dos Correios (ViaCEP)"""
-    cep_limpo = re.sub(r'\D', '', str(cep))
-    if len(cep_limpo) == 8:
-        try:
-            res = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=5).json()
-            if "erro" not in res:
-                logradouro = res.get('logradouro', '').strip()
-                bairro = res.get('bairro', '').strip()
-                localidade = res.get('localidade', '').strip()
-                uf = res.get('uf', '').strip()
-                
-                if uf.upper() == "DF" and "ZONA INDUSTRIAL" in bairro.upper():
-                    bairro = "SIG"
-                
-                componentes = [logradouro, bairro, localidade, uf]
-                endereco_formatado = ", ".join([c for c in componentes if c])
-                return endereco_formatado + f", {res.get('cep')}"
-        except Exception:
-            pass
-    return None
-
 def obter_coordenadas_e_endereco_oficial(localidade):
     """
-    CAMADA GEOGRÁFICA INTEROPERÁVEL - Validação de Endereço via Feedback Loop Postal.
-    Extrai o CEP através do OpenStreetMap e faz a busca reversa cruzada no ViaCEP.
+    CAMADA GEOGRÁFICA INTEROPERÁVEL - Resolução direta e qualificação estruturada de strings.
+    Se for CEP, usa a base postal puramente. Se for texto comum, normaliza gramaticalmente.
     """
     texto_str = str(localidade).strip()
     texto_upper = texto_str.upper()
     
-    # Captura frações numéricas urbanas latentes (ex: Conjunto 08, Chácara 14, QNL 9)
-    fração_urbana = ""
-    match_fração = re.search(r'\b(CONJUNTO|CJ|QUADRA|QD|BLOCO|BL|LOTE|LT|CHÁCARA|CHACARA|NÚMERO|Nº|N|NUMERO|QNL|QR)\s*([A-Za-z0-9\/.]+)\b', texto_upper)
-    if match_fração and not re.match(r'^\d{5}-?\d{3}$', texto_str):
-        fração_urbana = match_fração.group(0)
-
-    # 1. RESOLUÇÃO COMPLETA SE A ENTRADA JÁ FOR UM CEP PURO
+    # 1. TRATAMENTO SOBERANO SE A ENTRADA JÁ FOR UM CEP PURO (ViaCEP)
     cep_limpo = re.sub(r'\D', '', texto_str)
     if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str or "CEP" in texto_upper):
-        endereco_via_cep = buscar_via_cep(cep_limpo)
-        if endereco_via_cep:
-            url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(endereco_via_cep + ', Brasil')}&limit=1"
-            headers_osm = {"User-Agent": "GerenciadorRotasInteligentes/3.0 (lucasccruz@gmail.com)"}
-            try:
+        try:
+            res_cep = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=5).json()
+            if "erro" not in res_cep:
+                logradouro = res_cep.get('logradouro', '').strip()
+                bairro = res_cep.get('bairro', '').strip()
+                localidade_nome = res_cep.get('localidade', '').strip()
+                uf = res_cep.get('uf', '').strip()
+                
+                if uf.upper() == "DF" and "ZONA INDUSTRIAL" in bairro.upper():
+                    bairro = "SIG"
+                
+                componentes_cep = [logradouro, bairro, localidade_nome, uf]
+                endereco_oficial_cep = ", ".join([c for c in componentes_cep if c]) + f", {cep_limpo}, Brasil"
+                
+                # Obtém coordenadas de suporte via OpenStreetMap para cálculo geodésico
+                url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(endereco_oficial_cep)}&limit=1&countrycodes=br"
+                headers_osm = {"User-Agent": "GerenciadorRotasInteligentes/4.0 (lucasccruz@gmail.com)"}
                 res_osm = requests.get(url_osm, headers=headers_osm, timeout=5).json()
-                if res_osm:
-                    return float(res_osm[0]['lat']), float(res_osm[0]['lon']), endereco_via_cep
-            except Exception:
-                pass
-            return 0.0, 0.0, endereco_via_cep
+                lat, lon = (float(res_osm[0]['lat']), float(res_osm[0]['lon'])) if res_osm else (0.0, 0.0)
+                
+                return lat, lon, endereco_oficial_cep
+        except Exception:
+            pass
 
-    # 2. SE FOR ENDEREÇO TEXTUAL COMUM: ENGENHARIA DE BUSCA VIA OPENSTREETMAP (NOMINATIM)
-    query = texto_str if "BRASIL" in texto_upper else f"{texto_str}, Brasil"
-    url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query)}&limit=5&addressdetails=1"
-    headers_osm = {"User-Agent": "GerenciadorRotasInteligentes/3.0 (lucasccruz@gmail.com)"}
+    # 2. SE FOR ENDEREÇO TEXTUAL COMUM: ENRIQUECIMENTO E STRIP SEMÂNTICO (OpenStreetMap Nominatim)
+    # Proteção contextual: se identificar siglas típicas do DF mas faltar escopo, complementa programaticamente
+    tokens_df = ["QR ", "QN ", "QS ", "QNL ", "QNJ ", "QNM ", "QNO ", "SAMAMBAIA", "CEILANDIA", "CEILÂNDIA", "TAGUATINGA", "UCB", "CATOLICA", "UNB", "UNICEUB", "CEUB"]
+    sufixo_regional = ""
+    if any(t in texto_upper for t in tokens_df) and "DF" not in texto_upper and "BRAS" not in texto_upper:
+        sufixo_regional = ", Brasília, DF"
+
+    query = f"{texto_str}{sufixo_regional}, Brasil" if "BRASIL" not in texto_upper else texto_str
+    
+    # Consulta direta no OpenStreetMap travando o país (countrycodes=br) para colher lat/lon estáveis
+    url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query)}&limit=1&addressdetails=1&countrycodes=br"
+    headers_osm = {"User-Agent": "GerenciadorRotasInteligentes/4.0 (lucasccruz@gmail.com)"}
     
     try:
-        resposta = requests.get(url_osm, headers=headers_osm, timeout=10).json()
+        resposta = requests.get(url_osm, headers=headers_osm, timeout=6).json()
         if resposta:
-            for candidato in resposta:
-                lat = float(candidato['lat'])
-                lon = float(candidato['lon'])
-                
-                addr_details = candidato.get('address', {})
-                cep_identificado = addr_details.get('postcode', '').strip()
-                cep_identificado_limpo = re.sub(r'\D', '', cep_identificado)
-                
-                # FUSION FEEDBACK LOOP: Se o OSM encontrar um CEP válido, cruza de forma soberana com os Correios
-                if len(cep_identificado_limpo) == 8:
-                    endereco_oficial_correios = buscar_via_cep(cep_identificado_limpo)
-                    if endereco_oficial_correios:
-                        # Re-anexa as informações de quadra, conjunto ou chácara digitados pelo usuário
-                        if fração_urbana and fração_urbana.upper() not in endereco_oficial_correios.upper():
-                            partes = endereco_oficial_correios.split(', ', 1)
-                            if len(partes) > 1:
-                                endereco_oficial_correios = f"{partes[0]} {fração_urbana.title()}, {partes[1]}"
-                        return lat, lon, endereco_oficial_correios
-
-            # FALLBACK DE RECONSTRUTOR ESTRUTURADO (Se o local geocodificado não possuir CEP individual)
-            primeiro = resposta[0]
-            lat = float(primeiro['lat'])
-            lon = float(primeiro['lon'])
-            details = primeiro.get('address', {})
+            opcao = resposta[0]
+            lat = float(opcao['lat'])
+            lon = float(opcao['lon'])
+            
+            # Reconstrói a string de busca enriquecida com o bairro, cidade e estado reais retornados pela malha geográfica
+            details = opcao.get('address', {})
             rua = details.get('road', details.get('pedestrian', '')).strip()
-            bairro_osm = details.get('neighbourhood', details.get('suburb', details.get('city_district', ''))).strip()
-            cidade_osm = details.get('city', details.get('town', '')).strip()
-            estado_osm = details.get('state', '').strip()
+            bairro = details.get('neighbourhood', details.get('suburb', details.get('city_district', ''))).strip()
+            cidade = details.get('city', details.get('town', details.get('municipality', ''))).strip()
+            estado = details.get('state', '').strip()
             
+            # Se a rua mapeada for condizente, monta a assinatura rica de texto que o Google Maps adora receber
             if rua and len(rua.split()) > 1:
-                componentes = [rua, bairro_osm, cidade_osm, estado_osm]
-                return lat, lon, ", ".join([c for c in componentes if c])
-            
-            return lat, lon, primeiro['display_name']
+                componentes_osm = [texto_str if len(texto_str) > len(rua) else rua, bairro, cidade, estado]
+                endereco_estruturado = ", ".join([c for c in componentes_osm if c]) + ", Brasil"
+                return lat, lon, endereco_estruturado
+                
+            return lat, lon, f"{opcao['display_name']}"
     except Exception:
         pass
         
-    return 0.0, 0.0, texto_str
+    return 0.0, 0.0, query
 
 def calcular_pipeline_logistico(origem, destino):
-    """Pipeline central avançado com injeção contextual de strings e coordenadas"""
+    """Pipeline focado em estabilidade de strings tratadas de alta prioridade"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Paridade de funções corrigida para chamada unificada
-    dados_geo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
-    dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
-    
-    lat_o, lon_o, origem_oficial = dados_geo_o if dados_geo_o else (0.0, 0.0, origem_clean)
-    lat_d, lon_d, destino_oficial = dados_geo_d if dados_geo_d else (0.0, 0.0, destino_clean)
+    # Resolve as strings qualificadas nas APIs geográficas
+    lat_o, lon_o, origem_oficial = obter_coordenadas_e_endereco_oficial(origem_clean)
+    lat_d, lon_d, destino_oficial = obter_coordenadas_e_endereco_oficial(destino_clean)
     
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
-    query_o = origem_oficial
-    query_d = destino_oficial
-
-    # Definição de flag de segurança contra coordenadas corrompidas
-    usar_coords = True if (lat_o != 0.0 and lat_d != 0.0 and dist_linha_reta < 150.0) else False
-    dados_reais = extrair_dados_reais_google(query_o, query_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
+    # Executa a chamada forçando TEXTO (usar_coordenadas=False) para pontos institucionais complexos ou
+    # usando COORDENADAS se os dois pontos forem mapeados com segurança matemática perfeita em linha reta curta
+    usar_coords = True if (lat_o != 0.0 and lat_d != 0.0 and dist_linha_reta < 100.0) else False
+    
+    dados_reais = extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         
-        # FILTRO DE AUDITORIA DE MALHA
-        if km_google > 120.0 and dist_linha_reta < 45.0:
-            dados_reais_seguros = extrair_dados_reais_google(query_o, query_d, 0.0, 0.0, 0.0, 0.0, usar_coordenadas=False)
+        # --- FILTRO CONTRA DEFEITO DE COORDENADAS INTERESTADUAIS ---
+        # Se a rota rodoviária explodir de forma absurda em relação à linha reta, roda o plano de evacuação textual pura
+        if km_google > 120.0 and dist_linha_reta < 40.0:
+            dados_reais_seguros = extrair_dados_reais_google(origem_oficial, destino_oficial, 0.0, 0.0, 0.0, 0.0, usar_coordenadas=False)
             if dados_reais_seguros:
                 return dados_reais_seguros[0], dados_reais_seguros[1], dados_reais_seguros[2], dados_reais_seguros[3], dist_linha_reta
                 
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # FALLBACK OPERACIONAL SECUNDÁRIO E CANÔNICO CORRIGIDO (Correção do NameError de minutos)
-    link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(query_o)}&destination={requests.utils.quote(query_d)}&travelmode=driving"
+    # CONTINGÊNCIA EM CASO DE TIMEOUT DA API INTERNA
+    link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_oficial)}&destination={requests.utils.quote(destino_oficial)}&travelmode=driving"
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
-    v_comercial = 65.0 if km_terrestre >= 150 else 45.0
-    minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
-    
-    # Tratamento corrigido e saneado substituindo a variável fantasma 'minutes' por 'minutos'
-    tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
+    minutos = round((km_terrestre / 45.0) * 60) if km_terrestre > 0.0 else 0
+    tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min"
     return km_terrestre, tempo_txt, link_maps_fallback, "Não", dist_linha_reta
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
 st.title("🚗 Gerenciador de Rotas Inteligentes")
-st.subheader("Engine de Interceptação de API Viva — Operação Gratuita")
+st.subheader("Engine de Alta Fidelidade Textual e Logística — Operação Gratuita")
 st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
 
 arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"])
