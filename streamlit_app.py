@@ -6,31 +6,24 @@ import math
 import io
 import re
 import os
+import pickle
 from unidecode import unidecode
 from rapidfuzz import process, fuzz
-from diskcache import Cache
+from concurrent.futures import ThreadPoolExecutor
 
-# Configuração de UI/UX Canônica do Streamlit
+# Configuração canônica de UI/UX do Streamlit
 st.set_page_config(
     page_title="Gerenciador de Rotas Inteligentes", 
     page_icon="🚗", 
     layout="centered"
 )
 
-# ==============================================================================
-# 🧠 CAMADA 10 & 16: CACHE PERSISTENTE DE ALTA PERFORMANCE (DISKCACHE)
-# ==============================================================================
-# Instancia o cache persistente no diretório local do container (Mantém os dados por 30+ dias)
-cache_geo = Cache("./cache_geo")
+# Definição dos arquivos de persistência local em disco
+CACHE_IBGE_PATH = "municipios_ibge.pkl"
 
-# Dicionários em Memória RAM para a Malha de Validação do IBGE
-if "ibge_estados" not in st.session_state:
-    st.session_state["ibge_estados"] = {}
+if "cache_geocodificacao" not in st.session_state:
+    st.session_state["cache_geocodificacao"] = {}
 
-if "ibge_municipios" not in st.session_state:
-    st.session_state["ibge_municipios"] = {}
-
-# Camada 24: Dicionário Nacional de Sinônimos e Termos Correlatos
 SINONIMOS_SEMANTICOS = {
     "UNB": "UNIVERSIDADE DE BRASILIA",
     "CATOLICA": "UNIVERSIDADE CATOLICA",
@@ -40,136 +33,107 @@ SINONIMOS_SEMANTICOS = {
     "RODOVIARIA": "TERMINAL RODOVIARIO"
 }
 
-# Camada 11: Catálogo Taxonômico de Palavras-Chave de POIs (Pontos de Interesse)
-POI_KEYWORDS = [
-    "AEROPORTO", "HOSPITAL", "UNIVERSIDADE", "FACULDADE", "ESCOLA",
-    "SHOPPING", "HOTEL", "RODOVIARIA", "ESTADIO", "MINISTERIO",
-    "IBAMA", "ANTAQ", "INCRA", "CONDOMINIO", "PARQUE", "FAZENDA", "ASSENTAMENTO"
-]
-
-# Camada 2.5: Catálogo Cartográfico de Localidades de Referência Metropolitana
-LOCALIDADES_DF = [
-    "TAGUATINGA", "TAGUATINGA NORTE", "TAGUATINGA SUL", "CEILANDIA", 
-    "CEILANDIA NORTE", "CEILANDIA SUL", "SAMAMBAIA", "SAMAMBAIA NORTE", 
-    "SAMAMBAIA SUL", "RECANTO DAS EMAS", "GUARA", "GUARA I", "GUARA II", 
+LOCALIDADES_FUZZY_BASE = [
+    "TAGUATINGA", "CEILANDIA", "SAMAMBAIA", "RECANTO DAS EMAS", "GUARA", 
     "GAMA", "SOBRADINHO", "PLANALTINA", "ASA NORTE", "ASA SUL", "PONTE ALTA"
 ]
 
 # ==============================================================================
-# 🎛️ INFRAESTRUTURA DE INTEGRAÇÃO CADASTRAL IBGE (CAMADA 19 E 20)
+# 🎛️ CAMADA DE SEGURANÇA E CACHE PERSISTENTE IBGE (OTIMIZAÇÃO DE INICIALIZAÇÃO)
 # ==============================================================================
-def carregar_infraestrutura_ibge():
-    """Consome as APIs de Localidades do IBGE para blindagem de escopo de municípios"""
-    if not st.session_state["ibge_estados"]:
+def carregar_base_municipios_ibge():
+    """Garante carga instantânea via serialização pkl local, mitigando requisições massivas"""
+    if os.path.exists(CACHE_IBGE_PATH):
         try:
-            r = requests.get("https://servicodados.ibge.gov.br/api/v1/localidades/estados", timeout=5)
-            if r.status_code == 200:
-                for est in r.json():
-                    st.session_state["ibge_estados"][est["sigla"]] = unidecode(est["nome"]).upper()
+            with open(CACHE_IBGE_PATH, "rb") as f:
+                return pickle.load(f)
         except Exception:
             pass
             
-    if not st.session_state["ibge_municipios"]:
-        try:
-            r = requests.get("https://servicodados.ibge.gov.br/api/v1/localidades/municipios", timeout=6)
-            if r.status_code == 200:
-                for mun in r.json():
-                    nome_norm = unidecode(mun["nome"]).upper().strip()
-                    st.session_state["ibge_municipios"][nome_norm] = {
-                        "id": mun["id"],
-                        "uf": mun["microrregiao"]["mesorregiao"]["UF"]["sigla"].upper()
-                    }
-        except Exception:
-            pass
+    base_municipios = {}
+    try:
+        r = requests.get("https://servicodados.ibge.gov.br/api/v1/localidades/municipios", timeout=10)
+        if r.status_code == 200:
+            for mun in r.json():
+                nome_norm = unidecode(mun["nome"]).upper().strip()
+                base_municipios[nome_norm] = {
+                    "id": mun["id"],
+                    "uf": mun["microrregiao"]["mesorregiao"]["UF"]["sigla"].upper(),
+                    "nome_oficial": mun["nome"]
+                }
+            with open(CACHE_IBGE_PATH, "wb") as f:
+                pickle.dump(base_municipios, f)
+    except Exception:
+        pass
+    return base_municipios
 
-# Dispara a inicialização das tabelas de consulta IBGE
-carregar_infraestrutura_ibge()
+# Carrega o catálogo de cidades de forma performática na RAM
+IBGE_MUNICIPIOS = carregar_base_municipios_ibge()
 
 # ==============================================================================
-# 🧹 CAMADA 1, 2, 2.5, 21, 22, 23 & 24: ENGINE DE RESOLUÇÃO SEMÂNTICA AVANÇADA
+# 🧹 PIPELINE DE ENGENHARIA DE STRINGS E RESOLUÇÃO SEMÂNTICA (CAMADA 1, 2, 2.5)
 # ==============================================================================
 def normalizar_endereco_universal(texto):
-    """Camada 1 e 24: Limpeza Unicode, Remoção de lixo invisível e expansão de Sinônimos"""
+    """Camada 1 e 24: Limpeza Unicode, higienização e expansão estruturada de sinônimos"""
     if not texto or pd.isna(texto):
         return ""
     t = str(texto).strip()
-    t = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', t)  # Sanatiza caracteres de controle ASCII ocunltos
+    t = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', t)  # Expruga caracteres invisíveis
     t = unidecode(t).upper()
     
-    # Dicionário de Expansão Léxica de Abreviações
     abreviacoes = {
         r'\bAV\b': 'AVENIDA', r'\bR\b': 'RUA', r'\bQD\b': 'QUADRA', r'\bLT\b': 'LOTE',
         r'\bCJ\b': 'CONJUNTO', r'\bCONJ\b': 'CONJUNTO', r'\bBL\b': 'BLOCO', r'\bAPT\b': 'APARTAMENTO',
-        r'\bST\b': 'SETOR', r'\bCH\b': 'CHACARA', r'\bCHAC\b': 'CHACARA', r'\bSHIS\b': 'SETOR DE HABITACOES INDIVIDUAIS SUL'
+        r'\bST\b': 'SETOR', r'\bCH\b': 'CHACARA', r'\bSHIS\b': 'SETOR DE HABITACOES INDIVIDUAIS SUL'
     }
     for padrao, expansao in abreviacoes.items():
         t = re.sub(padrao, expansao, t)
         
-    # Camada 24: Substituição Semântica de Siglas Institucionais / Nome Popular
     for chave, valor in SINONIMOS_SEMANTICOS.items():
         t = re.sub(r'\b' + chave + r'\b', valor, t)
         
-    t = re.sub(r'\s+', ' ', t)
     return t.strip()
 
 def corrigir_toponimo_fuzzy(texto_normalizado):
-    """Camada 2.5: Fuzzy Matching via RapidFuzz C++ Engine para correção ortográfica"""
+    """Camada 2: Aplica similaridade via RapidFuzz para reparar grafias truncadas"""
     if not texto_normalizado:
         return texto_normalizado
-    
-    # Varre os tokens buscando casamento parcial de alta fidelidade nas localidades mapeadas
-    melhor_match = process.extractOne(texto_normalizado, LOCALIDADES_DF, scorer=fuzz.WRatio)
-    if melhor_match:
-        nome, score, _ = melhor_match
-        if score >= 88:
-            return nome
+    match = process.extractOne(texto_normalizado, LOCALIDADES_FUZZY_BASE, scorer=fuzz.WRatio)
+    if match and match[1] >= 88:
+        return match[0]
     return texto_normalizado
 
 def inferir_estado_ibge(texto_normalizado):
-    """Camada 21: Deduz dinamicamente a UF baseando-se no catálogo do IBGE"""
+    """Deduz dinamicamente a UF baseando-se no dicionário serializado do IBGE"""
     palavras = texto_normalizado.split()
     for i in range(len(palavras)):
         for j in range(i + 1, len(palavras) + 1):
             chunk = " ".join(palavras[i:j])
-            if chunk in st.session_state["ibge_municipios"]:
-                return st.session_state["ibge_municipios"][chunk]["uf"]
+            if chunk in IBGE_MUNICIPIOS:
+                return IBGE_MUNICIPIOS[chunk]["uf"]
     return None
 
-def expandir_contexto_adaptativo(texto):
-    """Camada 22 e 23: Filtra endereços curtos e injeta âncora territorial contra homônimos"""
+def expandir_contexto_incompleto(texto):
+    """Garante amarração contextual mínima para inputs parciais/bairros sem UF"""
     texto_norm = normalizar_endereco_universal(texto)
     texto_norm = corrigir_toponimo_fuzzy(texto_norm)
     tokens = texto_norm.split()
     
-    # Camada 22: Detecção de endereço incompleto/muito curto
     if len(tokens) <= 2 or not any(c.isdigit() for c in texto_norm):
-        uf_deduzida = inferir_estado_ibge(texto_norm)
-        if uf_deduzida:
-            return f"{texto_norm}, {uf_deduzida}, BRASIL"
+        uf_inferida = inferir_estado_ibge(texto_norm)
+        if uf_inferida:
+            return f"{texto_norm}, {uf_inferida}, BRASIL"
             
     if "BRASIL" not in texto_norm:
         return f"{texto_norm}, BRASIL"
     return texto_norm
 
-def parece_poi(texto_normalizado):
-    """Camada 11: Analisa se o input se enquadra na categoria de ponto de interesse"""
-    return any(keyword in texto_normalizado for keyword in POI_KEYWORDS)
-
-def detectar_cep_parcial(texto):
-    """Camada 3 (Aproximação): Identifica e higieniza padrões numéricos de CEP fragmentados"""
-    numeros = re.sub(r'\D', '', str(texto))
-    if len(numeros) >= 5 and len(numeros) <= 8:
-        if len(numeros) < 8:
-            numeros = numeros.ljust(8, '0') # Preenche com zeros à direita se parcial (Ex: 72000 -> 72000000)
-        return numeros
-    return None
-
 # ==============================================================================
-# 🗺️ RESOLUÇÃO MULTI-FONTE, OVERPASS E CONSENSO (CAMADA 3, 4, 5, 6, 7, 8, 9, 12, 13, 14, 17)
+# 🗺️ RESOLUÇÃO MULTI-FONTE, PARALELISMO ASSÍNCRONO E CONCORDÂNCIA SEMÂNTICA
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=True):
     """
-    CAMADA BRUTA PRESERVADA - Intercepta a API interna de direções do Google Maps.
+    CAMADA BRUTA RETIDA - FALLBACK SECUNDÁRIO DO MOTOR DE ROTEAMENTO
     """
     if usar_coordenadas and lat_o and lon_o and lat_d and lon_d and lat_o != 0.0 and lat_d != 0.0:
         origem_param = f"{lat_o},{lon_o}"
@@ -181,286 +145,240 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(str(origem_raw).strip())}&destination={requests.utils.quote(str(destino_raw).strip())}&travelmode=driving"
-    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.google.com/maps",
-        "Accept": "*/*"
+        "Referer": "https://www.google.com/maps", "Accept": "*/*"
     }
-    
     try:
-        resposta = requests.get(url_api, headers=headers, timeout=12)
+        resposta = requests.get(url_api, headers=headers, timeout=8)
         texto_resposta = resposta.text
-        
-        regex_km = r'\"(\d+[\.,]?\d*)\s*km\"'
-        match_km = re.findall(regex_km, texto_resposta)
-        
-        regex_tempo = r'\"(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)\"'
-        match_tempo = re.findall(regex_tempo, texto_resposta)
-        
-        km_txt = match_km[0] if match_km else ""
-        tempo_txt = match_tempo[0] if match_tempo else ""
-        
-        if km_txt and tempo_txt:
-            km_puro = float(km_txt.replace('.', '').replace(',', '.'))
-            envolve_balsa = "Não"
-            padroes_balsa = [
-                r'\"utilizar\s+balsa\b', r'\"pegar\s+balsa\b', r'\"travessia\s+de\s+balsa\b',
-                r'\"balsa\s+de\s+veículos\b', r'\"ferry\b', r'\"travessia\s+por\s+balsa\b'
-            ]
-            
-            if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
-                envolve_balsa = "Sim"
-                
-            return km_puro, tempo_txt, link_maps, envolve_balsa
+        match_km = re.findall(r'\"(\d+[\.,]?\d*)\s*km\"', texto_resposta)
+        match_tempo = re.findall(r'\"(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)\"', texto_resposta)
+        if match_km and match_tempo:
+            km_puro = float(match_km[0].replace('.', '').replace(',', '.'))
+            envolve_balsa = "Sim" if any(re.search(p, texto_resposta.lower()) for p in [r'\"utilizar\s+balsa\b', r'\"pegar\s+balsa\b']) else "Não"
+            return km_puro, match_tempo[0], link_maps, envolve_balsa
     except Exception:
         pass
     return None
 
-def camada_postal_redundante(cep_limpo):
-    """Camada 3: Resolução Postal com Tolerância a Falhas e Redundância Real"""
+def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
+    """Cálculo Matemático da Linha Reta Geodésica Teórica Perfeita (WGS-84)"""
+    if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0: return 0.0
     try:
-        res = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=4).json()
-        if "erro" not in res:
-            return res.get('logradouro', ''), res.get('bairro', ''), res.get('localidade', ''), res.get('uf', '')
-    except Exception:
-        pass
-    try:
-        res = requests.get(f"https://brasilapi.com.br/api/cep/v1/{cep_limpo}", timeout=4).json()
-        if "name" not in res:
-            return res.get('street', ''), res.get('neighborhood', ''), res.get('city', ''), res.get('state', '')
-    except Exception:
-        pass
-    return "", "", "", ""
+        a, b, f = 6378137.0, 6356752.314245, 1 / 298.257223563
+        L = math.radians(lon2 - lon1)
+        U1, U2 = math.atan((1 - f) * math.tan(math.radians(lat1))), math.atan((1 - f) * math.tan(math.radians(lat2)))
+        sinU1, cosU1 = math.sin(U1), math.cos(U1)
+        sinU2, cosU2 = math.sin(U2), math.cos(U2)
+        lambda_lon = L
+        for _ in range(100):
+            sinLambda, cosLambda = math.sin(lambda_lon), math.cos(lambda_lon)
+            sinSigma = math.sqrt((cosU2 * sinLambda) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda) ** 2)
+            if sinSigma == 0: return 0.0
+            cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda
+            sigma = math.atan2(sinSigma, cosSigma)
+            sinAlpha = cosU1 * cosU2 * sinLambda / sinSigma
+            cosSqAlpha = 1 - sinAlpha ** 2
+            cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha if cosSqAlpha != 0 else 0
+            C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha))
+            lambdaPrev = lambda_lon
+            lambda_lon = L + (1 - f) * C * sinAlpha * (sigma + f * sinAlpha * (cos2SigmaM + C * cosSigma * (-1 + 2 * cos2SigmaM ** 2)))
+            if abs(lambda_lon - lambdaPrev) < 1e-12: break
+        uSq = cosSqAlpha * (a ** 2 - b ** 2) / (b ** 2)
+        A = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)))
+        B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)))
+        deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * cos2SigmaM ** 2) - B / 6 * cos2SigmaM * (-3 + 4 * sinSigma ** 2) * (-3 + 4 * cos2SigmaM ** 2)))
+        return round((b * A * (sigma - deltaSigma)) / 1000, 2)
+    except Exception: return 0.0
 
-def geocodificar_photon_engine(endereco):
-    """Camada 4: Motor de busca de apoio Photon API (Baseado em Elasticsearch sobre OSM)"""
+def executar_reverse_geocoding_enrichment(lat, lon):
+    """Camada 6 e 7: Enriquecimento cadastral máximo via geocodificação reversa síncrona"""
+    res = {"logradouro": "", "bairro": "", "cidade": "", "municipio": "", "distrito": "", "estado": "", "cep": ""}
     try:
-        url = f"https://photon.komoot.io/api/?q={requests.utils.quote(endereco)}&limit=1"
-        r = requests.get(url, timeout=5)
+        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&addressdetails=1"
+        r = requests.get(url, headers={"User-Agent": "GerenciadorRotasUniversais/6.0"}, timeout=4)
         if r.status_code == 200:
-            data = r.json()
-            if data.get("features"):
-                f = data["features"][0]
-                lon, lat = f["geometry"]["coordinates"]
-                props = f.get("properties", {})
-                
-                # Coleta propriedades para remontagem taxonômica
-                name = props.get("name", "")
-                street = props.get("street", "")
-                city = props.get("city", "")
-                state = props.get("state", "")
-                
-                addr_rebuilt = ", ".join([c for c in [street if street else name, city, state] if c]) + ", BRASIL"
-                return {"lat": lat, "lon": lon, "endereco": addr_rebuilt, "fonte": "PHOTON", "score": 75}
+            a = r.json().get("address", {})
+            res["logradouro"] = a.get("road", a.get("pedestrian", ""))
+            res["bairro"] = a.get("neighbourhood", a.get("suburb", a.get("city_district", "")))
+            res["cidade"] = a.get("city", a.get("town", a.get("municipality", "")))
+            res["municipio"] = a.get("municipality", res["cidade"])
+            res["distrito"] = a.get("city_district", a.get("suburb", ""))
+            res["estado"] = a.get("state", "").upper()
+            res["cep"] = a.get("postcode", "")
     except Exception:
         pass
+    return res
+
+# --- ENGINES INDEPENDENTES PARA O EXECUTOR PARALELO (CAMADA 4 & 5) ---
+def API_ArcGIS(query):
+    try:
+        url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=1&sourceCountry=BRA&outFields=*"
+        r = requests.get(url, timeout=4).json()
+        if r.get('candidates'):
+            c = r['candidates'][0]
+            attr = c.get('attributes', {})
+            return {
+                "lat": float(c['location']['y']), "lon": float(c['location']['x']), "fonte": "ARCGIS", "score_base": 30,
+                "cidade": attr.get('City', '').upper(), "estado": attr.get('RegionAbbr', '').upper(), "bairro": attr.get('Neighborhood', '').upper()
+            }
+    except Exception: pass
     return None
 
-def buscar_poi_overpass_api(texto_normalizado):
-    """Camada 5 e 12: Consulta de infraestruturas imobiliárias e POIs complexos via Overpass"""
+def API_Nominatim(query):
+    try:
+        url = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query)}&limit=1&addressdetails=1&countrycodes=br"
+        r = requests.get(url, headers={"User-Agent": "GerenciadorRotasUniversais/6.0"}, timeout=4).json()
+        if r:
+            a = r[0]
+            addr = a.get("address", {})
+            return {
+                "lat": float(a['lat']), "lon": float(a['lon']), "fonte": "NOMINATIM", "score_base": 25,
+                "cidade": addr.get('city', addr.get('town', '')).upper(), "estado": addr.get('state', '').upper(), "bairro": addr.get('neighbourhood', addr.get('suburb', '')).upper()
+            }
+    except Exception: pass
+    return None
+
+def API_Photon(query):
+    try:
+        url = f"https://photon.komoot.io/api/?q={requests.utils.quote(query)}&limit=1"
+        r = requests.get(url, timeout=4).json()
+        if r.get("features"):
+            f = r["features"][0]
+            lon, lat = f["geometry"]["coordinates"]
+            props = f.get("properties", {})
+            return {
+                "lat": lat, "lon": lon, "fonte": "PHOTON", "score_base": 20,
+                "cidade": props.get("city", "").upper(), "estado": props.get("state", "").upper(), "bairro": props.get("district", "").upper()
+            }
+    except Exception: pass
+    return None
+
+def API_Overpass_POIs(texto_norm):
+    """Camada 5: Busca direcionada e qualificada a estruturas de POIs chaves do OpenStreetMap"""
     try:
         query_osm = f"""
-        [out:json][timeout:12];
+        [out:json][timeout:8];
         (
-          node["name"~"{texto_normalizado}",i];
-          way["name"~"{texto_normalizado}",i];
-          relation["name"~"{texto_normalizado}",i];
+          node["name"~"{texto_norm}",i]["amenity"];way["name"~"{texto_norm}",i]["amenity"];
+          node["name"~"{texto_norm}",i]["building"];way["name"~"{texto_norm}",i]["building"];
+          node["name"~"{texto_norm}",i]["healthcare"];way["name"~"{texto_norm}",i]["healthcare"];
+          node["name"~"{texto_norm}",i]["education"];way["name"~"{texto_norm}",i]["education"];
         );
         out center;
         """
-        r = requests.post("https://overpass-api.de/api/interpreter", data={"data": query_osm}, timeout=12)
+        r = requests.post("https://overpass-api.de/api/interpreter", data={"data": query_osm}, timeout=8)
         if r.status_code == 200:
-            elements = r.json().get("elements", [])
-            if elements:
-                el = elements[0]
-                lat = el.get("lat", el.get("center", {}).get("lat", 0.0))
-                lon = el.get("lon", el.get("center", {}).get("lon", 0.0))
-                tags = el.get("tags", {})
-                name = tags.get("name", texto_normalizado)
-                
-                # Extração estendida de atributos do OSM
-                bairro = tags.get("addr:suburb", tags.get("addr:neighbourhood", ""))
-                cidade = tags.get("addr:city", "")
-                
-                endereco_montado = ", ".join([c for c in [name, bairro, cidade] if c]) + ", BRASIL"
-                return {"lat": lat, "lon": lon, "endereco": endereco_montado, "fonte": "OVERPASS", "score": 95}
-    except Exception:
-        pass
+            elems = r.json().get("elements", [])
+            if elems:
+                e = elems[0]
+                lat = e.get("lat", e.get("center", {}).get("lat", 0.0))
+                lon = e.get("lon", e.get("center", {}).get("lon", 0.0))
+                tags = e.get("tags", {})
+                return {
+                    "lat": lat, "lon": lon, "fonte": "OVERPASS", "score_base": 35,
+                    "cidade": tags.get("addr:city", "").upper(), "estado": tags.get("addr:state", "").upper(), "bairro": tags.get("addr:suburb", "").upper()
+                }
+    except Exception: pass
     return None
 
-def executar_reverse_geocoding_enrichment(lat, lon):
-    """Camada 6, 7 e 17: Engenharia Reversa Nominatim com Enriquecimento Máximo de Atributos"""
-    resultado = {
-        "logradouro": "", "bairro": "", "cidade": "", "municipio": "", 
-        "distrito": "", "estado": "", "cep": "", "suburb": "", "hamlet": "", "village": ""
-    }
-    try:
-        url_rev = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&addressdetails=1"
-        headers = {"User-Agent": "GerenciadorRotasUniversais/6.0 (suporte@logistica.com)"}
-        r = requests.get(url_rev, headers=headers, timeout=5)
-        if r.status_code == 200:
-            addr = r.json().get("address", {})
-            resultado["logradouro"] = addr.get("road", addr.get("pedestrian", ""))
-            resultado["bairro"] = addr.get("neighbourhood", addr.get("suburb", addr.get("city_district", "")))
-            resultado["cidade"] = addr.get("city", addr.get("town", addr.get("municipality", "")))
-            resultado["municipio"] = addr.get("municipality", addr.get("city", ""))
-            resultado["distrito"] = addr.get("city_district", addr.get("suburb", ""))
-            resultado["estado"] = addr.get("state", "").upper()
-            resultado["cep"] = addr.get("postcode", "")
-            resultado["suburb"] = addr.get("suburb", "")
-            resultado["hamlet"] = addr.get("hamlet", "")
-            resultado["village"] = addr.get("village", "")
-    except Exception:
-        pass
-    return resultado
-
-def escolher_melhor_resultado_consenso(resultados):
-    """Camada 8, 9, 25, 26, 27, 28 e 29: Modelo de Votação por Proximidade e Score Centesimal"""
-    if not resultados:
-        return None
-    if len(resultados) == 1:
-        return resultados[0]
+def processar_consenso_e_pontuacao(candidatos, texto_cru):
+    """Camada 8 e 9: Avaliação por concordância de atributos político-administrativos"""
+    if not candidatos: return None
+    
+    for c1 in candidatos:
+        score_centesimal = c1["score_base"]
+        consenso_espacial = 0
         
-    # Camada 8 e 13: Computa a dispersão e votos de consenso entre as fontes ativas
-    for i, c1 in enumerate(resultados):
-        votos = 0
-        for j, c2 in enumerate(resultados):
-            if i != j:
+        for c2 in candidatos:
+            if c1["fonte"] != c2["fonte"]:
                 dist = calcular_distancia_vincenty(c1["lat"], c1["lon"], c2["lat"], c2["lon"])
-                # Janela de tolerância geodésica adaptativa (Média ponderada expandida para 10km se disperso)
-                if dist <= 10.0:  
-                    votos += 1
-        c1["consenso"] = votos
-
-    # Ordenação estruturada sob pesos hierárquicos das fontes
-    resultados.sort(key=lambda x: (x.get("consenso", 0), x.get("score", 0)), reverse=True)
-    return resultados[0]
+                if dist <= 10.0: consensus_weight = 25; consenso_espacial += 1
+                
+                # Validação Semântica Multivariável Cruzada (Corta homônimos de estado)
+                if c1["cidade"] and c1["cidade"] == c2["cidade"]: score_centesimal += 20
+                if c1["estado"] and c1["estado"] == c2["estado"]: score_centesimal += 15
+                if c1["bairro"] and c1["bairro"] == c2["bairro"]: score_centesimal += 10
+                
+        c1["score_final"] = score_centesimal + (consenso_espacial * 25)
+        
+    candidatos.sort(key=lambda x: x["score_final"], reverse=True)
+    vencedor = candidatos[0]
+    
+    # Executa o enriquecimento do campeão da linha
+    m = executar_reverse_geocoding_enrichment(vencedor["lat"], vencedor["lon"])
+    if m["cep"]: vencedor["score_final"] += 10
+    
+    confianca = "BAIXA"
+    if vencedor["score_final"] >= 95: confianca = "ALTISSIMA"
+    elif vencedor["score_final"] >= 80: confianca = "ALTA"
+    elif vencedor["score_final"] >= 65: confianca = "MEDIA"
+    
+    rua_f = m["logradouro"] if m["logradouro"] else texto_cru.upper()
+    endereco_f = ", ".join([c for c in [rua_f, m["bairro"], m["cidade"], m["estado"]] if c.strip()]) + ", BRASIL"
+    
+    return vencedor["lat"], vencedor["lon"], endereco_f, confianca, m["municipio"], m["distrito"]
 
 def obter_coordenadas_e_endereco_oficial(localidade):
-    """
-    CAMADA GEOGRÁFICA INTEROPERÁVEL REESTRUTURADA (Resolução Universal de 10 Camadas Lógicas)
-    """
+    """ORQUESTRADOR GERAL AS SÍNCRONO DA RESOLUÇÃO MULTI-FONTE PARALELIZADA"""
     texto_cru = str(localidade).strip()
-    if not texto_cru or texto_cru.lower() == 'nan':
-        return 0.0, 0.0, "", "BAIXA", "", ""
-        
-    # Camada 10 e 15: Check de Cache Persistente em Disco (DiskCache)
-    if texto_cru in cache_geo:
-        c = cache_geo[texto_cru]
-        return c["lat"], c["lon"], c["endereco"], c["confianca"], c["municipio"], c["distrito"]
-
-    texto_norm = normalizar_endereco_universal(texto_cru)
-    texto_expandido = expandir_contexto_adaptativo(texto_cru)
+    if not texto_cru or texto_cru.lower() == 'nan': return 0.0, 0.0, "", "BAIXA", "", ""
     
-    resultados_concorrentes = []
-
-    # Camada 3: Resolução Postal Inteligente via Verificação de Máscara Parcial
-    cep_detectado = detectar_cep_parcial(texto_cru)
-    if cep_detectado:
-        logr, bair, loca, uf = camada_postal_redundante(cep_detectado)
+    if texto_cru in st.session_state["cache_geocodificacao"]:
+        c = st.session_state["cache_geocodificacao"][texto_cru]
+        return c["lat"], c["lon"], c["endereco"], c["confianca"], c["municipio"], c["distrito"]
+        
+    # Camada 3: Filtro estrito de CEP Completo
+    digits_cep = re.sub(r'\D', '', texto_cru)
+    if len(digits_cep) == 8 and (texto_cru.isdigit() or "-" in texto_cru):
+        logr, bair, loca, uf = camada_postal_redundante(digits_cep)
         if loca:
-            addr_correios = ", ".join([c for c in [logr, bair, loca, uf] if c.strip()]) + f", CEP {cep_detectado}, BRASIL"
-            url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(addr_correios)}&maxLocations=1&sourceCountry=BRA"
-            try:
-                res_arc = requests.get(url_arc, timeout=4).json()
-                if res_arc.get('candidates'):
-                    loc = res_arc['candidates'][0]['location']
-                    retorno = (float(loc['y']), float(loc['x']), addr_correios, "ALTISSIMA", loca, bair)
-                    cache_geo.set(texto_cru, {"lat": retorno[0], "lon": retorno[1], "endereco": retorno[2], "confianca": retorno[3], "municipio": retorno[4], "distrito": retorno[5]}, expire=2592000)
-                    return retorno
-            except Exception:
-                pass
-            return 0.0, 0.0, addr_correios, "ALTA", loca, bair
+            addr_c = f"{logr}, {bair}, {loca}, {uf}, CEP {digits_cep}, BRASIL"
+            res_arc = API_ArcGIS(addr_c)
+            lat, lon = (res_arc["lat"], res_arc["lon"]) if res_arc else (0.0, 0.0)
+            return lat, lon, addr_c, "ALTISSIMA", loca, bair
 
-    # Camada 5 e 12: Ativação de POI Search Avançado via Overpass API
-    if parece_poi(texto_norm):
-        poi_res = buscar_poi_overpass_api(texto_norm)
-        if poi_res:
-            resultados_concorrentes.append(poi_res)
-
-    # Camada 4: Geocodificador Primário (ArcGIS REST Server - Score 30)
-    url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(texto_expandido)}&maxLocations=2&sourceCountry=BRA&outFields=StAddr,Neighborhood,City,RegionAbbr"
-    try:
-        res_arc = requests.get(url_arc, timeout=5).json()
-        if res_arc.get('candidates'):
-            cand = res_arc['candidates'][0]
-            resultados_concorrentes.append({
-                "lat": float(cand['location']['y']), "lon": float(cand['location']['x']),
-                "endereco": cand.get('address', texto_expandido), "fonte": "ARCGIS", "score": 30
-            })
-    except Exception:
-        pass
-
-    # Camada 4: Geocodificador Secundário (Nominatim OpenStreetMap - Score 25)
-    url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(texto_expandido)}&limit=1&addressdetails=1&countrycodes=br"
-    headers = {"User-Agent": "GerenciadorRotasUniversais/6.0 (suporte@logistica.com)"}
-    try:
-        res_osm = requests.get(url_osm, headers=headers, timeout=5).json()
-        if res_osm:
-            alvo = res_osm[0]
-            resultados_concorrentes.append({
-                "lat": float(alvo['lat']), "lon": float(alvo['lon']),
-                "endereco": alvo.get('display_name', texto_expandido), "fonte": "NOMINATIM", "score": 25
-            })
-    except Exception:
-        pass
-
-    # Camada 4: Geocodificador Terciário (Photon Komoot API - Score 20)
-    photon_res = geocodificar_photon_engine(texto_expandido)
-    if photon_res:
-        resultados_concorrentes.append(photon_res)
-
-    # Processamento das Camadas de Votação por Consenso e Enriquecimento Cadastral Reverso
-    vencedor = escolher_melhor_resultado_consenso(resultados_concorrentes)
-    if vencedor:
-        metadados_reversos = executar_reverse_geocoding_enrichment(vencedor["lat"], vencedor["lon"])
+    texto_expandido = expandir_contexto_incompleto(texto_cru)
+    texto_norm = normalizar_endereco_universal(texto_cru)
+    
+    # --- PROCESSAMENTO PARALELO ASSÍNCRONO EM THREADPOOL (CAMADA 4) ---
+    candidatos_validos = []
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        f_arc = executor.submit(API_ArcGIS, texto_expandido)
+        f_osm = executor.submit(API_Nominatim, texto_expandido)
+        f_pho = executor.submit(API_Photon, texto_expandido)
+        f_poi = executor.submit(API_Overpass_POIs, texto_norm)
         
-        # Camada 14, 25, 26, 27: Matriz de Pontuação Centesimal por Completude de Atributos
-        score_acumulado = vencedor["score"]
-        if vencedor.get("consenso", 0) > 0: score_acumulado += 25  # Bônus de voto de consenso
-        if metadados_reversos["cep"]: score_acumulado += 10
-        if metadados_reversos["bairro"]: score_acumulado += 5
-        if metadados_reversos["cidade"]: score_acumulado += 5
-        if any(c.isdigit() for c in texto_cru): score_acumulado += 10
-        if len(texto_cru.split()) >= 4: score_acumulado += 10
+        for f in [f_arc, f_osm, f_pho, f_poi]:
+            res = f.result()
+            if res: candidatos_validos.append(res)
+            
+    res_final = processar_consenso_e_pontuacao(candidatos_validos, texto_cru)
+    if res_final:
+        st.session_state["cache_geocodificacao"][texto_cru] = {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "municipio": res_final[4], "distrito": res_final[5]}
+        return res_final
         
-        # Camada 29: Classificação Qualitativa da Confiança Cadastral
-        confianca = "BAIXA"
-        if score_acumulado >= 95: confianca = "ALTISSIMA"
-        elif score_acumulado >= 85: confianca = "ALTA"
-        elif score_acumulado >= 70: confianca = "MEDIA"
-        
-        rua_final = metadados_reversos["logradouro"] if metadados_reversos["logradouro"] else texto_cru
-        componentes_saneados = [rua_final, metadados_reversos["bairro"], metadados_reversos["cidade"], metadados_reversos["estado"]]
-        endereco_final = ", ".join([c for c in componentes_saneados if c.strip()]) + ", BRASIL"
-        
-        retorno = (vencedor["lat"], vencedor["lon"], endereco_final, confianca, metadados_reversos["municipio"], metadados_reversos["distrito"])
-        cache_geo.set(texto_cru, {"lat": retorno[0], "lon": retorno[1], "endereco": retorno[2], "confianca": retorno[3], "municipio": retorno[4], "distrito": retorno[5]}, expire=2592000)
-        return retorno
-
     return 0.0, 0.0, texto_expandido, "BAIXA", "", ""
 
 # ==============================================================================
-# 🚀 REDUNDÂNCIA DO MOTOR DE ROTEAMENTO (PARTE 6 — CAMADAS DE REDUNDÂNCIA VIVA)
+# 🚗 MOTORES DE ROTEAMENTO INTEGRAIS COM REDUNDÂNCIA (CAMADA 2 & 4 ROTA)
 # ==============================================================================
 def rota_osrm(lat_o, lon_o, lat_d, lon_d):
-    """Camada 2 de Roteamento Redundante: Engine Aberta OSRM (Gratuita e Sem Chaves)"""
+    """CAMADA PRINCIPAL ESTÁVEL DE ROTEAMENTO (OSRM ENGINE CORPORATIVO)"""
     try:
-        url_osrm = f"https://router.project-osrm.org/route/v1/driving/{lon_o},{lat_o};{lon_d},{lat_d}?overview=false"
-        r = requests.get(url_osrm, timeout=10).json()
+        url = f"https://router.project-osrm.org/route/v1/driving/{lon_o},{lat_o};{lon_d},{lat_d}?overview=false"
+        r = requests.get(url, timeout=6).json()
         if r.get("routes"):
-            rota = r["routes"][0]
-            km = round(rota["distance"] / 1000, 2)
-            minutos = round(rota["duration"] / 60)
-            tempo_str = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
-            return {"distancia": km, "tempo": tempo_str, "fonte": "OSRM", "score": 95}
-    except Exception:
-        pass
+            r_data = r["routes"][0]
+            km = round(r_data["distance"] / 1000, 2)
+            minutos = round(r_data["duration"] / 60)
+            tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min"
+            return km, tempo_txt, "OSRM", 95
+    except Exception: pass
     return None
 
-def obter_fator_desvio_rodoviario_adaptativo(linha_reta):
-    """Camada 4 de Roteamento: Modelo Polinomial Adaptativo Geodésico"""
+def obter_fator_desvio_rodoviario(linha_reta):
     if linha_reta < 5.0: return 1.45
     if linha_reta < 20.0: return 1.35
     if linha_reta < 100.0: return 1.25
@@ -468,52 +386,45 @@ def obter_fator_desvio_rodoviario_adaptativo(linha_reta):
     return 1.12
 
 def calcular_pipeline_logistico(origem, destino):
-    """Pipeline Central Agnóstico com Roteamento Universal de Contingência Síncrona"""
+    """Pipeline Central de Roteamento com Inversão Hierárquica Baseada em Estabilidade"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Processamento paralelo de desambiguação e extração de distritos imobiliários
     lat_o, lon_o, o_oficial, conf_o, mun_o, dist_o = obter_coordenadas_e_endereco_oficial(origem_clean)
     lat_d, lon_d, d_oficial, conf_d, mun_d, dist_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
     
-    # --------------------------------------------------------------------------
-    # 🔏 MECANISMO DE TRAVA GEODÉSICA DE EXCLUSÃO INTERESTADUAL DE COORDENADAS
-    # --------------------------------------------------------------------------
+    # Trava Antialucinação Geodésica de Segurança
     usar_coords = True if (lat_o != 0.0 and lat_d != 0.0) else False
     if usar_coords and dist_linha_reta > 150.0:
         siglas_originais = re.findall(r'\b(DF|GO|SP|RJ|MG|BA|PR|SC|RS|CE|PE|AM|PA|MT)\b', origem_clean.upper() + " " + destino_clean.upper())
-        if len(set(siglas_originais)) <= 1:
-            # Força o desligamento de pinos espaciais corrompidos e delega a busca semântica rica ao Google Maps
-            usar_coords = False
+        if len(set(siglas_originais)) <= 1: usar_coords = False
 
-    # ORQUESTRADOR CENTRAL DE ROTAS EM CASCATA DE REDUNDÂNCIA SÍNCRONA
-    # Provedor 1: Camada Corporativa Privada Google Preview (Scraper Engine)
-    google_res = extrair_dados_reais_google(o_oficial, d_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
-    if google_res and google_res[0] < (dist_linha_reta * 4.0):
-        return google_res[0], google_res[1], google_res[2], google_res[3], dist_linha_reta, "Google Preview", 100, conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
+    # --- EXECUÇÃO DO FLUXO DO MOTOR DE ROTAS EM CASCATA ---
+    # Provedor Líder e Principal (OSRM - Estabilidade e SLA Total)
+    if usar_coords:
+        res_osrm = rota_osrm(lat_o, lon_o, lat_d, lon_d)
+        if res_osrm:
+            link_m = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(o_oficial)}&destination={requests.utils.quote(d_oficial)}&travelmode=driving"
+            return res_osrm[0], res_osrm[1], link_m, "Não", dist_linha_reta, res_osrm[2], res_osrm[3], conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
 
-    # Provedor 2: Camada de Infraestrutura de Redundância Livre OSRM
-    if lat_o != 0.0 and lat_d != 0.0:
-        osrm_res = rota_osrm(lat_o, lon_o, lat_d, lon_d)
-        if osrm_res:
-            link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(o_oficial)}&destination={requests.utils.quote(d_oficial)}&travelmode=driving"
-            return osrm_res["distancia"], osrm_res["tempo"], link_fallback, "Não", dist_linha_reta, osrm_res["fonte"], osrm_res["score"], conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
+    # Fallback Secundário (Google Preview Scraper API)
+    res_google = extrair_dados_reais_google(o_oficial, d_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
+    if res_google and res_google[0] < (dist_linha_reta * 4.0):
+        return res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", 100, conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
 
-    # Provedor 3: Modelo Geodésico Adaptativo por Coeficiente de Redes (Erro Zero)
-    link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(o_oficial)}&destination={requests.utils.quote(d_oficial)}&travelmode=driving"
-    km_geodesico = round(dist_linha_reta * obter_fator_desvio_rodoviario_adaptativo(dist_linha_reta), 2)
-    v_comercial = 45.0 if km_geodesico < 50.0 else 65.0
-    minutos_est = round((km_geodesico / v_comercial) * 60) if km_geodesico > 0 else 0
-    tempo_geodesico = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
+    # Contingência Crítica de Fechamento (Modelo Geodésico Adaptativo - Erro Zero)
+    link_m = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(o_oficial)}&destination={requests.utils.quote(d_oficial)}&travelmode=driving"
+    km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
+    v_comercial = 45.0 if km_terrestre < 50.0 else 65.0
+    minutos_est = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0 else 0
+    tempo_geo = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
     
-    # LINHA 464 RETIFICADA: Vírgula inserida cirurgicamente antes de "Geodésico Adaptativo" impedindo quebras de sintaxe
-    return km_geodesico, tempo_geodesico, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
+    # RETORNO RETIFICADO DA EXPRESSÃO: Sem quebras de SyntaxError
+    return km_terrestre, tempo_geo, link_m, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
-st.title("🚗 Gerenciador de Rotas Inteligentes")
-st.subheader("Engine de Resolução Espacial Agnóstica — Operação Gratuita")
 st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
 
 arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"])
@@ -533,16 +444,14 @@ if arquivo_carregado is not None:
                 'Distrito Origem', 'Municipio Origem', 'Confianca Destino', 
                 'Distrito Destino', 'Municipio Destino'
             ]
-            for col in novas_colunas:
-                df[col] = None
+            for col in novas_colunas: df[col] = None
                 
             total_linhas = len(df)
             barra_progresso = st.progress(0)
             container_status = st.empty()
             
             for index, linha in df.iterrows():
-                origem = str(linha['Origem']).strip()
-                destino = str(linha['Destino']).strip()
+                origem, destino = str(linha['Origem']).strip(), str(linha['Destino']).strip()
                 
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
@@ -563,32 +472,24 @@ if arquivo_carregado is not None:
                     df.at[index, 'Distrito Destino'] = res_pipeline[11]
                     df.at[index, 'Municipio Destino'] = res_pipeline[12]
                     
-                    time.sleep(0.6)
-                    
+                    time.sleep(0.4)
                 barra_progresso.progress((index + 1) / total_linhas)
                 
-            container_status.empty()
-            barra_progresso.empty()
+            container_status.empty(); barra_progresso.empty()
             st.success("✨ Processamento em lote concluído com sucesso!")
             
-            ordem_colunas = [
+            ordem_finais = [
                 'Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta',
                 'Fonte da Rota', 'Score da Rota', 'Confianca Origem', 'Distrito Origem', 'Municipio Origem',
                 'Confianca Destino', 'Distrito Destino', 'Municipio Destino'
             ]
-            df = df.reindex(columns=ordem_colunas)
+            df = df.reindex(columns=ordem_finais)
             
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False)
-            dados_excel = output.getvalue()
+            output_buffer = io.BytesIO()
+            with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: df.to_excel(writer, index=False)
             
-            st.write("---")
-            st.balloons()
-            
+            st.write("---"); st.balloons()
             st.download_button(
-                label="📥 Baixar Planilha Logística Processada",
-                data=dados_excel,
-                file_name="planilha_rotas_calculada.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                label="📥 Baixar Planilha Logística Processada", data=output_buffer.getvalue(),
+                file_name="planilha_rotas_calculada.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
