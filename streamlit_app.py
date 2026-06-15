@@ -133,73 +133,74 @@ def buscar_via_cep(cep):
 def obter_coordenadas_e_endereco_oficial(localidade):
     """
     CAMADA GEOGRÁFICA INTEROPERÁVEL - Validação de Endereço via Feedback Loop Postal.
-    Extrai o CEP do ArcGIS e o valida de forma reversa e cruzada no ViaCEP.
+    Extrai o CEP através do OpenStreetMap e faz a busca reversa cruzada no ViaCEP.
     """
     texto_str = str(localidade).strip()
     texto_upper = texto_str.upper()
     
-    # Captura numeração predial ou codificação urbana latente (ex: Conjunto 08, Quadra 4, Bloco B, Lote 12, Nº 4)
-    identificacao_predial = ""
-    match_num = re.search(r'\b(CONJUNTO|CJ|QUADRA|QD|BLOCO|BL|LOTE|LT|NÚMERO|Nº|N|NUMERO)\s*([A-Za-z0-9\/.]+)\b', texto_upper)
-    if match_num and not re.match(r'^\d{5}-?\d{3}$', texto_str):
-        identificacao_predial = match_num.group(0)
+    # Captura frações numéricas urbanas latentes (ex: Conjunto 08, Chácara 14, QNL 9)
+    fração_urbana = ""
+    match_fração = re.search(r'\b(CONJUNTO|CJ|QUADRA|QD|BLOCO|BL|LOTE|LT|CHÁCARA|CHACARA|NÚMERO|Nº|N|NUMERO|QNL|QR)\s*([A-Za-z0-9\/.]+)\b', texto_upper)
+    if match_fração and not re.match(r'^\d{5}-?\d{3}$', texto_str):
+        fração_urbana = match_fração.group(0)
 
     # 1. RESOLUÇÃO COMPLETA SE A ENTRADA JÁ FOR UM CEP PURO
     cep_limpo = re.sub(r'\D', '', texto_str)
     if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str or "CEP" in texto_upper):
         endereco_via_cep = buscar_via_cep(cep_limpo)
         if endereco_via_cep:
-            url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(endereco_via_cep + ', Brasil')}&maxLocations=1&sourceCountry=BRA"
+            url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(endereco_via_cep + ', Brasil')}&limit=1"
+            headers_osm = {"User-Agent": "GerenciadorRotasInteligentes/3.0 (lucasccruz@gmail.com)"}
             try:
-                res_arc = requests.get(url_arc, timeout=5).json()
-                if res_arc.get('candidates'):
-                    loc = res_arc['candidates'][0]['location']
-                    return float(loc['y']), float(loc['x']), endereco_via_cep
+                res_osm = requests.get(url_osm, headers=headers_osm, timeout=5).json()
+                if res_osm:
+                    return float(res_osm[0]['lat']), float(res_osm[0]['lon']), endereco_via_cep
             except Exception:
                 pass
             return 0.0, 0.0, endereco_via_cep
 
-    # 2. SE FOR ENDEREÇO TEXTUAL COMUM: EXTRAÇÃO DE CEP POR ATRIBUTOS ESTENDIDOS (ArcGIS Server REST)
+    # 2. SE FOR ENDEREÇO TEXTUAL COMUM: ENGENHARIA DE BUSCA VIA OPENSTREETMAP (NOMINATIM)
     query = texto_str if "BRASIL" in texto_upper else f"{texto_str}, Brasil"
-    url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=5&sourceCountry=BRA&outFields=*"
+    url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query)}&limit=5&addressdetails=1"
+    headers_osm = {"User-Agent": "GerenciadorRotasInteligentes/3.0 (lucasccruz@gmail.com)"}
     
     try:
-        resposta = requests.get(url, timeout=10).json()
-        if resposta.get('candidates'):
-            for candidato in resposta['candidates']:
-                lat = float(candidato['location']['y'])
-                lon = float(candidato['location']['x'])
+        resposta = requests.get(url_osm, headers=headers_osm, timeout=10).json()
+        if resposta:
+            for candidato in resposta:
+                lat = float(candidato['lat'])
+                lon = float(candidato['lon'])
                 
-                atributos = candidato.get('attributes', {})
-                cep_identificado = atributos.get('Postal', '').strip() or atributos.get('PostalExt', '').strip()
+                addr_details = candidato.get('address', {})
+                cep_identificado = addr_details.get('postcode', '').strip()
                 cep_identificado_limpo = re.sub(r'\D', '', cep_identificado)
                 
-                # FUSION FEEDBACK LOOP: Se encontrar o CEP do texto comum, cruza de forma soberana com os Correios
+                # FUSION FEEDBACK LOOP: Se o OSM encontrar um CEP válido, cruza de forma soberana com os Correios
                 if len(cep_identificado_limpo) == 8:
                     endereco_oficial_correios = buscar_via_cep(cep_identificado_limpo)
                     if endereco_oficial_correios:
-                        # Re-anexa as informações de quadra, lote ou número predial digitados pelo usuário na rua oficial
-                        if identificacao_predial and identificacao_predial.upper() not in endereco_oficial_correios.upper():
+                        # Re-anexa as informações de quadra, conjunto ou chácara digitados pelo usuário
+                        if fração_urbana and fração_urbana.upper() not in endereco_oficial_correios.upper():
                             partes = endereco_oficial_correios.split(', ', 1)
                             if len(partes) > 1:
-                                endereco_oficial_correios = f"{partes[0]} {identificacao_predial.title()}, {partes[1]}"
+                                endereco_oficial_correios = f"{partes[0]} {fração_urbana.title()}, {partes[1]}"
                         return lat, lon, endereco_oficial_correios
 
-            # FALLBACK DE TEXTO ESTRUTURADO (Se falhar o cruzamento reverso por CEP)
-            primeiro = resposta['candidates'][0]
-            lat = float(primeiro['location']['y'])
-            lon = float(primeiro['location']['x'])
-            attrs = primeiro.get('attributes', {})
-            logradouro_arc = attrs.get('StAddr', '').strip()
-            bairro_arc = attrs.get('Neighborhood', '').strip()
-            cidade_arc = attrs.get('City', '').strip()
-            estado_arc = attrs.get('RegionAbbr', '').strip() or attrs.get('Region', '').strip()
+            # FALLBACK DE RECONSTRUTOR ESTRUTURADO (Se o local geocodificado não possuir CEP individual)
+            primeiro = resposta[0]
+            lat = float(primeiro['lat'])
+            lon = float(primeiro['lon'])
+            details = primeiro.get('address', {})
+            rua = details.get('road', details.get('pedestrian', '')).strip()
+            bairro_osm = details.get('neighbourhood', details.get('suburb', details.get('city_district', ''))).strip()
+            cidade_osm = details.get('city', details.get('town', '')).strip()
+            estado_osm = details.get('state', '').strip()
             
-            if logradouro_arc and len(logradouro_arc.split()) > 1:
-                componentes = [logradouro_arc, bairro_arc, cidade_arc, estado_arc]
+            if rua and len(rua.split()) > 1:
+                componentes = [rua, bairro_osm, cidade_osm, estado_osm]
                 return lat, lon, ", ".join([c for c in componentes if c])
             
-            return lat, lon, primeiro['address']
+            return lat, lon, primeiro['display_name']
     except Exception:
         pass
         
@@ -210,14 +211,13 @@ def calcular_pipeline_logistico(origem, destino):
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Executa a desambiguação estruturada cruzando os dados com a árvore postal brasileira
     dados_geo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
     dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
     lat_o, lon_o, origem_oficial = dados_geo_o if dados_geo_o else (0.0, 0.0, origem_clean)
     lat_d, lon_d, destino_oficial = dados_geo_d if dados_geo_d else (0.0, 0.0, destino_clean)
     
-    dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d) if (lat_o != 0.0 and lat_d != 0.0) else 0.0
+    dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
 
     query_o = origem_oficial
     query_d = destino_oficial
@@ -238,14 +238,14 @@ def calcular_pipeline_logistico(origem, destino):
                 
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # FALLBACK OPERACIONAL EM CASO DE INSTABILIDADE DE CONEXÃO
+    # FALLBACK OPERACIONAL SECUNDÁRIO E CANÔNICO
     link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(query_o)}&destination={requests.utils.quote(query_d)}&travelmode=driving"
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
     minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
     
     balsa_fallback = "Não"
-    tempo_txt = f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
+    tempo_txt = f"{minutos} min" if minutes < 60 else f"{minutos // 60} h {minutos % 60} min" if minutos % 60 > 0 else f"{minutos // 60} h"
     return km_terrestre, tempo_txt, link_maps_fallback, balsa_fallback, dist_linha_reta
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
@@ -286,7 +286,7 @@ if arquivo_carregado is not None:
                     df.at[index, 'Balsas'] = balsa_status
                     df.at[index, 'Linha Reta'] = linha_reta
                     
-                    time.sleep(0.8)
+                    time.sleep(1.0)
                 
                 barra_progresso.progress((index + 1) / total_linhas)
             
