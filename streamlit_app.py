@@ -7,7 +7,6 @@ import io
 import re
 import json
 from unidecode import unidecode
-from rapidfuzz import process, fuzz
 
 # Configuração da página do site seguindo rigorosamente as boas práticas de UI/UX
 st.set_page_config(
@@ -81,7 +80,7 @@ def normalizar_endereco_universal(texto):
     if not texto or pd.isna(texto):
         return ""
     t = str(texto).strip()
-    t = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', t)  # Remove caracteres invisíveis e invisíveis de controle
+    t = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', t)  # Remove caracteres invisíveis de controle
     t = unidecode(t).upper()
     
     # Tabela de expansão de abreviações e acentuações corrigidas
@@ -183,7 +182,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
     return None
 
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
-    """CÁLCULO GEODÉSICO PRESERVADO - Vincenty (1975)"""
+    """CÁLCULO GEODÉSICO PRESERVADA - Vincenty (1975)"""
     if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0:
         return 0.0
     try:
@@ -272,7 +271,6 @@ def escolher_melhor_resultado_consenso(resultados):
     if len(resultados) == 1:
         return resultados[0]
         
-    # Camada 8: Computa a matriz de vizinhança espacial para gerar os votos de consenso
     for i, c1 in enumerate(resultados):
         votos = 0
         for j, c2 in enumerate(resultados):
@@ -282,7 +280,6 @@ def escolher_melhor_resultado_consenso(resultados):
                     votos += 1
         c1["consenso"] = votos
 
-    # Camada 9 e 28: Ordenação ponderada combinando Score do Provedor + Votos do Consenso
     resultados.sort(key=lambda x: (x.get("consenso", 0), x.get("score", 0)), reverse=True)
     return resultados[0]
 
@@ -294,12 +291,10 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     if not texto_cru or texto_cru.lower() == 'nan':
         return 0.0, 0.0, "", "BAIXA", "", ""
         
-    # Camada 10: Cache Check de Longo Prazo
     if texto_cru in st.session_state["cache_geocodificacao"]:
-        c = st.session_state["cache_geocodificacao"][output_buffer := texto_cru]
+        c = st.session_state["cache_geocodificacao"][texto_cru]
         return c["lat"], c["lon"], c["endereco"], c["confianca"], c["municipio"], c["distrito"]
 
-    # Camadas de higienização sequencial
     texto_norm = normalizar_endereco_universal(texto_cru)
     texto_expandido = expandir_contexto_incompleto(texto_cru)
     
@@ -311,7 +306,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
         logr, bair, loca, uf = camada_postal_redundante(digits_cep)
         if loca:
             addr_correios = ", ".join([c for c in [logr, bair, loca, uf] if c.strip()]) + f", CEP {digits_cep}, BRASIL"
-            # Captura Lat/Lon para cálculo geodésico de suporte via ArcGIS
             url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(addr_correios)}&maxLocations=1&sourceCountry=BRA"
             try:
                 res_arc = requests.get(url_arc, timeout=4).json()
@@ -361,16 +355,13 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     # Processamento de Consenso e Enriquecimento Máximo
     vencedor = escolher_melhor_resultado_consenso(resultados_concorrentes)
     if vencedor:
-        # Camada 6, 7 e 17: Reverse Geocoding para Enriquecimento Cadastral
         metadados_reversos = executar_reverse_geocoding_enrichment(vencedor["lat"], vencedor["lon"])
         
-        # Computa o Score de Completude Dinâmico (Camada 25, 26, 27, 28)
         score_final = vencedor["score"]
         if metadados_reversos["cep"]: score_final += 10
         if metadados_reversos["bairro"]: score_final += 5
         if len(texto_cru.split()) >= 4: score_final += 10
         
-        # Camada 29: Classificação de Confiança Final
         confianca = "BAIXA"
         if score_final >= 95: confianca = "ALTISSIMA"
         elif score_final >= 85: confianca = "ALTA"
@@ -385,6 +376,24 @@ def obter_coordenadas_e_endereco_oficial(localidade):
         return retorno
 
     return 0.0, 0.0, texto_expandido, "BAIXA", "", ""
+
+def camada_postal_redundante(cep_alvo):
+    """Resolução postal redundante interna"""
+    cep_limpo = re.sub(r'\D', '', str(cep_alvo))
+    if len(cep_limpo) == 8:
+        try:
+            res = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=4).json()
+            if "erro" not in res:
+                return res.get('logradouro', ''), res.get('bairro', ''), res.get('localidade', ''), res.get('uf', '')
+        except Exception:
+            pass
+        try:
+            res = requests.get(f"https://brasilapi.com.br/api/cep/v1/{cep_limpo}", timeout=4).json()
+            if "name" not in res:
+                return res.get('street', ''), res.get('neighborhood', ''), res.get('city', ''), res.get('state', '')
+        except Exception:
+            pass
+    return "", "", "", ""
 
 # ==============================================================================
 # 🚀 BLINDAGEM DO MOTOR DE ROTAS MULTI-CAMADAS (PARTE 6 — CAMADAS DE 1 A 4)
@@ -428,8 +437,6 @@ def calcular_pipeline_logistico(origem, destino):
     # --------------------------------------------------------------------------
     usar_coords = True if (lat_o != 0.0 and lat_d != 0.0) else False
     if usar_coords and dist_linha_reta > 150.0:
-        # Se a linha reta apontar distâncias interestaduais massivas mas a digitação do usuário não tiver UFs explícitas distintas,
-        # anula o uso de coordenadas e delega para o tratamento de texto do servidor do Google Maps.
         siglas_originais = re.findall(r'\b(DF|GO|SP|RJ|MG|BA|PR|SC|RS|CE|PE|AM|PA|MT)\b', origem_clean.upper() + " " + destino_clean.upper())
         if len(set(siglas_originais)) <= 1:
             usar_coords = False
@@ -437,12 +444,12 @@ def calcular_pipeline_logistico(origem, destino):
     # ORQUESTRADOR CENTRAL DE ROTAS DE CONTINGÊNCIA (FALLBACK EM CASCATA)
     # Provedor Principal: Google Preview Engine
     google_res = extrair_dados_reais_google(o_oficial, d_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
-    if google_res and google_res[0] < (dist_linha_reta * 4.0):  # Validação de consistência viária contra anomalias
+    if google_res and google_res[0] < (dist_linha_reta * 4.0):
         return google_res[0], google_res[1], google_res[2], google_res[3], dist_linha_reta, "Google Preview", 100, conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
 
-    # Provedor Secundário: OSRM Engine
+    # LINHA CORRIGIDA: Remoção do operador walrus interno que disparava o SyntaxError
     if lat_o != 0.0 and lat_d != 0.0:
-        osrm_res = r_osrm := rota_osrm(lat_o, lon_o, lat_d, lon_d)
+        osrm_res = rota_osrm(lat_o, lon_o, lat_d, lon_d)
         if osrm_res:
             link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(o_oficial)}&destination={requests.utils.quote(d_oficial)}&travelmode=driving"
             return osrm_res["distancia"], osrm_res["tempo"], link_fallback, "Não", dist_linha_reta, osrm_res["fonte"], osrm_res["score"], conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
@@ -454,11 +461,9 @@ def calcular_pipeline_logistico(origem, destino):
     minutos_est = round((km_geodesico / v_comercial) * 60) if km_geodesico > 0 else 0
     tempo_geodesico = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
     
-    return km_geodesico, tempo_geodesico, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
+    return km_geodesico, tempo_geodesico, link_fallback, "Não", dist_linha_reta "Geodésico Adaptativo", 70, conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
 
-# ==============================================================================
-# 🚗 INTERFACE GRÁFICA DO SITE (STREAMLIT ENGINE)
-# ==============================================================================
+# --- INTERFACE VISUAL NO STREAMLIT ---
 st.write("Envie sua planilha Excel com as colunas **Origem** e **Destino** para processar as distâncias automaticamente.")
 
 arquivo_carregado = st.file_uploader("Arraste ou selecione seu arquivo Excel (.xlsx)", type=["xlsx"])
@@ -472,7 +477,6 @@ if arquivo_carregado is not None:
         st.success("Planilha carregada com sucesso!")
         
         if st.button("Iniciar Processamento das Rotas"):
-            # Expansão dinâmica do dataframe para acomodar as colunas cadastrais exigidas pelas novas camadas
             novas_colunas = [
                 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta', 
                 'Fonte da Rota', 'Score da Rota', 'Confianca Origem', 
@@ -490,10 +494,9 @@ if arquivo_carregado is not None:
                 origem = str(linha['Origem']).strip()
                 destino = str(linha['Destino']).strip()
                 
-                if json := (origem and destino and origem != 'nan' and destino != 'nan'):
+                if origem and destino and origem != 'nan' and destino != 'nan':
                     texto_status.text(f"🔢 Processando linha {index+1} de {total_linhas}: {origem} ➔ {destino}")
                     
-                    # Despacha o lote para execução do pipeline distribuído de roteamento
                     res_pipeline = calcular_pipeline_logistico(origem, destino)
                     
                     df.at[index, 'Distancia'] = res_pipeline[0]
@@ -516,7 +519,6 @@ if arquivo_carregado is not None:
                 
             texto_status.text("✨ Processamento concluído com sucesso!")
             
-            # Garante o alinhamento regulamentar e ordenação final da tabela de saída
             ordem_colunas = [
                 'Origem', 'Destino', 'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta',
                 'Fonte da Rota', 'Score da Rota', 'Confianca Origem', 'Distrito Origem', 'Municipio Origem',
