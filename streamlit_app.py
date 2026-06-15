@@ -182,7 +182,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
     return None
 
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
-    """CÁLCULO GEODÉSICO PRESERVADA - Vincenty (1975)"""
+    """CÁLCULO GEODÉSICO PRESERVADO - Vincenty (1975)"""
     if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0:
         return 0.0
     try:
@@ -447,7 +447,7 @@ def calcular_pipeline_logistico(origem, destino):
     if google_res and google_res[0] < (dist_linha_reta * 4.0):
         return google_res[0], google_res[1], google_res[2], google_res[3], dist_linha_reta, "Google Preview", 100, conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
 
-    # LINHA CORRIGIDA: Remoção do operador walrus interno que disparava o SyntaxError
+    # LINHA CORRIGIDA ANTERIORMENTE
     if lat_o != 0.0 and lat_d != 0.0:
         osrm_res = rota_osrm(lat_o, lon_o, lat_d, lon_d)
         if osrm_res:
@@ -461,7 +461,8 @@ def calcular_pipeline_logistico(origem, destino):
     minutos_est = round((km_geodesico / v_comercial) * 60) if km_geodesico > 0 else 0
     tempo_geodesico = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
     
-    return km_geodesico, tempo_geodesico, link_fallback, "Não", dist_linha_reta "Geodésico Adaptativo", 70, conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
+    # LINHA 464 CORRIGIDA: Inserção da vírgula para separar adequadamente os elementos retornados na tupla
+    return km_geodesico, tempo_geodesico, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, dist_o, mun_o, conf_d, dist_d, mun_d
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
 st.write("Envie sua planilha Excel com as colunas **Origem** e **Destino** para processar as distâncias automaticamente.")
