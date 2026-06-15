@@ -21,7 +21,6 @@ def normalizar_texto_endereco(texto):
         return ""
     txt = str(texto).strip()
     
-    # Dicionário de expansão para melhorar indexação nos buscadores de mapa
     abreviacoes = {
         r'\bAV\b': 'Avenida',
         r'\bR\b': 'Rua',
@@ -74,18 +73,11 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             km_puro = float(km_txt.replace('.', '').replace(',', '.'))
             
             envolve_balsa = "Não"
-            padroes_balsa = [
-                r'\"utilizar\s+balsa\b', 
-                r'\"pegar\s+balsa\b', 
-                r'\"travessia\s+de\s+balsa\b', 
-                r'\"balsa\s+de\s+veículos\b',
-                r'\"ferry\b',
-                r'\"travessia\s+por\s+balsa\b'
-            ]
+            padroes_balsa = [r'\"utilizar\s+balsa\b', r'\"pegar\s+balsa\b', r'\"travessia\s+de\s+balsa\b']
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps, envolve_balsa
+            return km_puro, tempo_txt, link_maps,外 := envolve_balsa if '外' in locals() else envolve_balsa
             
     except Exception:
         pass
@@ -144,7 +136,7 @@ def extrair_metadados_via_cep(cep_alvo):
 def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
     """
     CAMADA GEOGRÁFICA INTEROPERÁVEL - Executa o Pipeline de Desambiguação Multi-Provedor.
-    Se uf_limite_obrigatorio for informado, inibe vazamentos inter-regionais (Ex: Manaus).
+    Se uf_limite_obrigatorio for informado, inibe vazamentos inter-regionais.
     """
     texto_str = normalizar_texto_endereco(localidade)
     texto_upper = texto_str.upper()
@@ -177,7 +169,6 @@ def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
     if uf_limite_obrigatorio and uf_limite_obrigatorio not in texto_upper:
         query = f"{texto_str}, {uf_limite_obrigatorio}, Brasil"
     elif "BRASIL" not in texto_upper:
-        # Mantém fallback regionalizado caso venha de POIs conhecidos do DF
         eh_poi_df = any(token in texto_upper for token in ["UNIVERSIDADE", "UNB", "CATÓLICA", "CATOLICA", "UNICEUB", "TAGUATINGA", "SAMAMBAIA"])
         query = f"{texto_str}, Brasília, DF, Brasil" if eh_poi_df else f"{texto_str}, Brasil"
 
@@ -190,7 +181,6 @@ def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
                 atributos = candidato.get('attributes', {})
                 estado_arc = (atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()).upper()
                 
-                # TRAVA 3: Se o estado do candidato divergir da UF obrigatória da linha, ignora a alucinação (Ex: ignora AM se a linha é DF)
                 if uf_limite_obrigatorio and estado_arc and estado_arc != uf_limite_obrigatorio.upper():
                     continue
                 
@@ -241,11 +231,11 @@ def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
     return 0.0, 0.0, query, uf_limite_obrigatorio if uf_limite_obrigatorio else "ND"
 
 def calcular_pipeline_logistico(origem, destino):
-    """Pipeline central avançado com fusão de contexto horizontal e trava geodésica Vincenty"""
+    """Pipeline Universal de Roteamento Sem Amarras Fixas com Fusão de Contexto de Linha"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # TRAVA 2: Extração Semântica da UF Âncora da Linha para Fusão de Contexto
+    # ETAPA 1: Pré-Varredura de Metadados Postais da Linha para extrair a UF âncora
     uf_ancora = ""
     cep_o_match = re.search(r'\b\d{5}-?\d{3}\b', origem_clean)
     cep_d_match = re.search(r'\b\d{5}-?\d{3}\b', destino_clean)
@@ -258,12 +248,18 @@ def calcular_pipeline_logistico(origem, destino):
         if uf_d: uf_ancora = uf_d.upper()
         
     if not uf_ancora:
-        # Busca siglas explícitas escritas na linha da tabela
         match_sigla = re.search(r'\b(DF|GO|SP|RJ|MG|BA|PR|SC|RS|CE|PE|AM)\b', origem_clean.upper() + " " + destino_clean.upper())
         if match_sigla:
             uf_ancora = match_sigla.group(1)
+            
+    # DETECTOR DE TOPÔNIMOS EXCLUSIVOS: Se o destino carregar explicitamente o nome de Brasília ou UnB, força a âncora para o DF
+    if not uf_ancora:
+        if "BRASILIA" in destino_clean.upper() or "UNB" in destino_clean.upper() or "BRASÍLIA" in destino_clean.upper():
+            uf_ancora = "DF"
+        elif "BRASILIA" in origem_clean.upper() or "UNB" in origem_clean.upper() or "BRASÍLIA" in origem_clean.upper():
+            uf_ancora = "DF"
 
-    # Executa as buscas injetando a UF âncora da linha para amarrar os geocoders
+    # ETAPA 2: Resolve a localização aplicando a trava da UF âncora
     lat_o, lon_o, origem_oficial, uf_final_o = obter_coordenadas_e_endereco_oficial(origem_clean, uf_ancora)
     lat_d, lon_d, destino_oficial, uf_final_d = obter_coordenadas_e_endereco_oficial(destino_clean, uf_ancora if uf_ancora else uf_final_o)
     
@@ -272,7 +268,6 @@ def calcular_pipeline_logistico(origem, destino):
     origem_is_poi = any(k in origem_oficial.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
     destino_is_poi = any(k in destino_oficial.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
 
-    # Estruturação final das strings de consulta injetando o contexto regionalizado descoberto
     uf_aplicavel = uf_ancora if uf_ancora else (uf_final_o if uf_final_o and uf_final_o != "ND" else "DF")
     
     query_o = f"{origem_oficial}, {uf_aplicavel}, Brasil" if (origem_is_poi and "BRASIL" not in origem_oficial.upper()) else origem_oficial
@@ -280,15 +275,14 @@ def calcular_pipeline_logistico(origem, destino):
 
     usar_coords = not (origem_is_poi or destino_is_poi)
     if usar_coords and dist_linha_reta > 120.0:
-        usar_coords = False # Desativa coordenadas se a linha reta estourar a malha urbana curta
+        usar_coords = False 
     
     dados_reais = extrair_dados_reais_google(query_o, query_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         
-        # TRAVA 4: Auditoria Vincenty - Se o Google Maps retornar um valor absurdo devido a coordenadas truncadas,
-        # limpamos as coordenadas e forçamos o re-roteamento puro por texto estruturado regionalizado.
+        # --- FILTRO DE CONTENÇÃO CONTRA ALUCINAÇÕES INTERESTADUAIS (Gatilho Geodésico) ---
         if km_google > 120.0 and dist_linha_reta < 45.0:
             dados_reais_seguros = extrair_dados_reais_google(query_o, query_d, 0.0, 0.0, 0.0, 0.0, usar_coordenadas=False)
             if dados_reais_seguros:
@@ -296,7 +290,7 @@ def calcular_pipeline_logistico(origem, destino):
                 
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # FALLBACK OPERACIONAL SECUNDÁRIO
+    # FALLBACK OPERACIONAL
     link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(query_o)}&destination={requests.utils.quote(query_d)}&travelmode=driving"
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
@@ -307,7 +301,7 @@ def calcular_pipeline_logistico(origem, destino):
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
 st.title("🚗 Gerenciador de Rotas Inteligentes")
-st.subheader("Engine de Interceptação de API Viva — Operação Gratuita")
+st.subheader("Engine Logística Dinâmica Nacional — Operação Gratuita")
 st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
 
 arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"])
@@ -316,11 +310,11 @@ if arquivo_carregado is not None:
     df = pd.read_excel(arquivo_carregado)
     
     if 'Origem' not in df.columns or 'Destino' not in df.columns:
-        st.error("Erro de Validação: Certifique-se de que a planilha possui as colunas obrigatórias 'Origem' e 'Destino'.")
+        st.error("Erro de Validação: Planilha precisa conter as colunas 'Origem' e 'Destino'.")
     else:
-        st.success("Tabela de dados detectada com sucesso! Pronto para processar.")
+        st.success("Tabela carregada e validada com sucesso.")
         
-        if st.button("Iniciar Processamento em Lote"):
+        if st.button("Iniciar Processamento Universal"):
             for col in ['Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']:
                 df[col] = None
 
@@ -343,7 +337,7 @@ if arquivo_carregado is not None:
                     df.at[index, 'Balsas'] = balsa_status
                     df.at[index, 'Linha Reta'] = linha_reta
                     
-                    time.sleep(0.8)
+                    time.sleep(1.0)
                 
                 barra_progresso.progress((index + 1) / total_linhas)
             
@@ -371,16 +365,3 @@ if arquivo_carregado is not None:
                 file_name="planilha_rotas_calculada.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-            
-            # --- SEÇÃO DE AUDITORIA, DOCUMENTAÇÃO E REFERÊNCIAS CIENTÍFICAS ---
-            st.write("---")
-            st.subheader("📘 Documentação Técnico-Científica e Auditoria")
-            
-            with st.expander("1. Engenharia de Funcionamento do Aplicativo"):
-                st.markdown("""
-                Este software implementa um ecossistema de **Engenharia Reversa de Redes** operando em quatro camadas:
-                1. **Vetorização de Lote:** Extrai os eixos de texto das células da planilha carregada.
-                2. **Mapeamento de API Viva Interna (Camada A):** Dispara requisições ao endpoint corporativo do Google Maps extraindo KMs e tempos rodoviários em tempo real.
-                3. **Filtro de Desambiguação Postal (Context Fusion):** Intercepta e reconstrói as strings baseando-se na linha horizontal da tabela. Se a origem possui pistas de uma região (como DF), o script amarra compulsoriamente os próximos geocoders a essa UF, eliminando saltos interestaduais para homônimos.
-                4. **Vincenty Geodésico:** Computa a linha reta teórica perfeita baseada no elipsoide real da Terra (WGS-84).
-                """)
