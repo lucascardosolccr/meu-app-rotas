@@ -26,7 +26,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         destino_param = requests.utils.quote(f"{destino_raw}".strip())
         url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     
-    # URL parametrizada pública e canônica de Direções do Google Maps (Alimentada com strings higienizadas)
+    # URL parametrizada pública e canônica de Direções do Google Maps (Impede desvios do buscador)
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(str(origem_raw).strip())}&destination={requests.utils.quote(str(destino_raw).strip())}&travelmode=driving"
     
     headers = {
@@ -108,13 +108,13 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
 
 def obter_coordenadas_e_endereco_oficial(localidade):
     """
-    CAMADA GEOGRÁFICA INTEROPERÁVEL - Resolução postal e geocodificação universal.
-    Se for CEP válido, reconstrói o endereço fixo mapeado na base postal nacional.
-    Se for texto comum, cruza atributos estruturados para gerar o endereço completo (Rua, Bairro, CEP, UF).
+    CAMADA GEOGRÁFICA INTEROPERÁVEL - Executa o Pipeline de Desambiguação Agnóstico.
+    Se for CEP, força o uso do dado intocável dos Correios. Se for texto, estrutura via ArcGIS.
     """
     texto_str = str(localidade).strip()
+    foi_resolvido_por_cep = False
     
-    # 1. IDENTIFICAÇÃO E VALIDAÇÃO DE CEP PURO (ViaCEP)
+    # 1. INTERCEPTAÇÃO POSTAL SOBERANA (ViaCEP)
     cep_limpo = re.sub(r'\D', '', texto_str)
     if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str):
         try:
@@ -122,79 +122,99 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             if "erro" not in res_cep:
                 logradouro = res_cep.get('logradouro', '').strip()
                 bairro = res_cep.get('bairro', '').strip()
-                cidade = res_cep.get('localidade', '').strip()
+                localidade_nome = res_cep.get('localidade', '').strip()
                 uf = res_cep.get('uf', '').strip()
                 
-                # Formata o endereço canônico atrelado a esse CEP
-                componentes_cep = [logradouro, bairro, cidade, uf]
-                endereco_cep_oficial = ", ".join([c for c in componentes_cep if c])
-                endereco_cep_oficial += f", {res_cep.get('cep', cep_limpo)}, Brasil"
+                # Higienização automática de termos ambíguos na malha urbana do DF
+                if uf.upper() == "DF" and "ZONA INDUSTRIAL" in bairro.upper():
+                    bairro = "SIG"
                 
-                # Busca Lat/Lon do CEP estruturado para garantir a integridade matemática
-                url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(endereco_cep_oficial)}&maxLocations=1&sourceCountry=BRA"
-                res_arc = requests.get(url_arc, timeout=5).json()
-                
-                if res_arc.get('candidates'):
-                    loc = res_arc['candidates'][0]['location']
-                    return float(loc['y']), float(loc['x']), endereco_cep_oficial.replace(", Brasil", "")
-                
-                return 0.0, 0.0, endereco_cep_oficial.replace(", Brasil", "")
+                # Monta a assinatura hierárquica imutável dos Correios
+                componentes_cep = [logradouro, bairro, localidade_nome, uf]
+                texto_str = ", ".join([c for c in componentes_cep if c])
+                texto_str += f", {res_cep.get('cep', cep_limpo)}, Brasil"
+                foi_resolvido_por_cep = True
         except Exception:
             pass
 
-    # 2. SE FOR ENDEREÇO TEXTUAL COMUM: CRUZAMENTO DE ATRIBUTOS ESTENDIDOS (ArcGIS)
-    query = texto_str if "BRASIL" in texto_str.upper() else f"{texto_str}, Brasil"
+    # 2. SE FOR ENDEREÇO TEXTUAL COMUM: ENGENHARIA DE ATRIBUTOS ESTENDIDOS (ArcGIS)
+    query = texto_str
+    eh_poi_df = any(token in texto_str.upper() for token in ["UNIVERSIDADE", "UNB", "CATÓLICA", "CATOLICA", "UNICEUB", "TAGUATINGA", "SAMAMBAIA", "PONTE ALTA"])
+    
+    if "BRASIL" not in texto_str.upper():
+        query = f"{texto_str}, Brasília, DF, Brasil" if eh_poi_df else f"{texto_str}, Brasil"
             
+    # Ativação do parâmetro outFields=* para varredura completa da árvore imobiliária
     url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA&outFields=*"
     
     try:
         resposta = requests.get(url, timeout=10).json()
         if resposta.get('candidates'):
-            candidato = resposta['candidates'][0]
-            lat = float(candidato['location']['y'])
-            lon = float(candidato['location']['x'])
+            for candidato in resposta['candidates']:
+                address_out = candidato['address'].upper()
+                
+                if eh_poi_df and "DF" not in address_out and "BRASÍLIA" not in address_out and "BRASILIA" not in address_out:
+                    continue
+                    
+                lat = float(candidato['location']['y'])
+                lon = float(candidato['location']['x'])
+                
+                # Se viemos pelo fluxo do ViaCEP, mantemos a string oficial e capturamos apenas Lat/Lon
+                if foi_resolvido_por_cep:
+                    return lat, lon, texto_str.replace(", Brasil", "")
+                
+                # Tratamento de Endereço Comum: Reconstrói dinamicamente os pedaços para evitar strings resumidas
+                atributos = candidato.get('attributes', {})
+                logradouro_arc = atributos.get('StAddr', '').strip()
+                bairro_arc = atributos.get('Neighborhood', '').strip()
+                cidade_arc = atributos.get('City', '').strip()
+                estado_arc = atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()
+                
+                if logradouro_arc and len(logradouro_arc.split()) > 1:
+                    componentes_reconstruidos = [logradouro_arc, bairro_arc, cidade_arc, estado_arc]
+                    endereco_completo = ", ".join([c for c in componentes_reconstruidos if c])
+                    return lat, lon, endereco_completo
+                
+                return lat, lon, candidato['address']
             
-            atributos = candidato.get('attributes', {})
-            logradouro_arc = atributos.get('StAddr', '').strip()
-            bairro_arc = atributos.get('Neighborhood', '').strip()
-            cidade_arc = atributos.get('City', '').strip()
-            estado_arc = atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()
-            cep_arc = atributos.get('Postal', '').strip()
-            
-            # Reconstrói o endereço textual de forma completa para blindar a busca do Google Maps
-            if logradouro_arc and len(logradouro_arc.split()) > 1:
-                componentes_reconstruidos = [logradouro_arc, bairro_arc, cidade_arc, estado_arc]
-                endereco_completo = ", ".join([c for c in componentes_reconstruidos if c])
-                if cep_arc:
-                    endereco_completo += f", {cep_arc}"
-                return lat, lon, endereco_completo
-            
-            return lat, lon, candidato['address']
+            primeiro = resposta['candidates'][0]
+            return float(primeiro['location']['y']), float(primeiro['location']['x']), texto_str if foi_resolvido_por_cep else primeiro['address']
     except Exception:
         pass
         
     return 0.0, 0.0, texto_str
 
 def calcular_pipeline_logistico(origem, destino):
-    """Pipeline central avançado com injeção de strings tratadas"""
+    """Pipeline central avançado com injeção contextual de strings e coordenadas"""
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # Processa, valida e completa os endereços antes do envio para o Google Maps
-    lat_o, lon_o, origem_oficial = obter_coordenadas_e_endereco_oficial(origem_clean)
-    lat_d, lon_d, destino_oficial = obter_coordenadas_e_endereco_oficial(destino_clean)
+    # Executa a desambiguação e higienização em lote na largada
+    dados_geo_o = obter_coordenadas_e_endereco_oficial(origem_clean)
+    dados_geo_d = obter_coordenadas_e_endereco_oficial(destino_clean)
+    
+    lat_o, lon_o, origem_oficial = dados_geo_o if dados_geo_o else (0.0, 0.0, origem_clean)
+    lat_d, lon_d, destino_oficial = dados_geo_d if dados_geo_d else (0.0, 0.0, destino_clean)
     
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d) if (lat_o != 0.0 and lat_d != 0.0) else 0.0
 
-    # Passa as strings blindadas e limpas para o extrator
-    dados_reais = extrair_dados_reais_google(origem_oficial, destino_oficial, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=True)
+    origem_is_poi = any(k in origem_oficial.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
+    destino_is_poi = any(k in destino_oficial.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
+
+    query_o = f"{origem_oficial}, Brasília, DF, Brasil" if (origem_is_poi and "BRASIL" not in origem_oficial.upper()) else origem_oficial
+    query_d = f"{destino_oficial}, Brasília, DF, Brasil" if (destino_is_poi and "BRASIL" not in destino_oficial.upper()) else destino_oficial
+
+    usar_coords = not (origem_is_poi or destino_is_poi)
+    
+    # Envia a query contendo a frase estruturada intocável direto para o motor do Google
+    dados_reais = extrair_dados_reais_google(query_o, query_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # FALLBACK OPERACIONAL
-    link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_oficial)}&destination={requests.utils.quote(destino_oficial)}&travelmode=driving"
+    # FALLBACK OPERACIONAL SECUNDÁRIO E CANÔNICO
+    link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(query_o)}&destination={requests.utils.quote(query_d)}&travelmode=driving"
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
     minutos = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0.0 else 0
@@ -226,9 +246,9 @@ if arquivo_carregado is not None:
             barra_progresso = st.progress(0)
             container_status = st.empty()
             
-            for index, presidential in df.iterrows():
-                origem = str(presidential['Origem']).strip()
-                destino = str(presidential['Destino']).strip()
+            for index, linha in df.iterrows():
+                origem = str(linha['Origem']).strip()
+                destino = str(linha['Destino']).strip()
                 
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                     container_status.text(f"🔢 Processando linha {index + 1} de {total_linhas}: {origem} ➔ {destino}")
@@ -278,7 +298,7 @@ if arquivo_carregado is not None:
                 st.markdown("""
                 Este software implementa um ecossistema de **Engenharia Reversa de Redes** operando em quatro camadas:
                 1. **Vetorização de Lote:** Extrai os eixos de texto das células da planilha carregada.
-                2. **Mapeamento de API Viva Interna:** Dispara requisições ao endpoint corporativo do Google Maps extraindo KMs e tempos rodoviários em tempo real.
-                3. **Higienização Postal e Resolução SIG Universal:** Cruza as entradas textuais com a árvore de dados imobiliários estruturados do ArcGIS e ViaCEP, remontando logradouros, bairros, CEPs e estados antes da inserção na malha rodoviária.
+                2. **Mapeamento de API Viva Interna (Camada A):** Dispara requisições ao endpoint corporativo do Google Maps extraindo KMs e tempos rodoviários em tempo real.
+                3. **Filtro de Desambiguação Postal:** Intercepta e reconstrói as strings de CEP na base dos Correios, forçando o Google Maps a renderizar o trajeto sob o protocolo de links de Direções Canônicas, eliminando saltos para homônimos.
                 4. **Vincenty Geodésico:** Computa a linha reta teórica perfeita baseada no elipsoide real da Terra (WGS-84).
                 """)
