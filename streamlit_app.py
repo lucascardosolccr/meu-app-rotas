@@ -15,7 +15,7 @@ st.set_page_config(
 
 def normalizar_texto_endereco(texto):
     """
-    CAMADA 1: NORMALIZAÇÃO - Remove ruídos textuais e expande abreviações rústicas
+    CAMADA 1: NORMALIZAÇÃO - Remove ruídos textuais e expande abreviações padronizadas.
     """
     if not texto or pd.isna(texto):
         return ""
@@ -77,7 +77,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             if any(re.search(padrao, texto_resposta.lower()) for padrao in padroes_balsa):
                 envolve_balsa = "Sim"
                 
-            return km_puro, tempo_txt, link_maps,外 := envolve_balsa if '外' in locals() else envolve_balsa
+            return km_puro, tempo_txt, link_maps, envolve_balsa
             
     except Exception:
         pass
@@ -85,7 +85,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
     return None
 
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
-    """Cálculo local da Linha Reta Geodésica (Vincenty, 1975)"""
+    """Cálculo Matemático Local da Linha Reta Geodésica (Vincenty, 1975)"""
     if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0:
         return 0.0
     try:
@@ -122,7 +122,7 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         return 0.0
 
 def extrair_metadados_via_cep(cep_alvo):
-    """Varre a API estruturada dos Correios para extrair cidade e estado de suporte"""
+    """Extrai informações estruturadas dos Correios para validação de contexto regional"""
     cep_limpo = re.sub(r'\D', '', str(cep_alvo))
     if len(cep_limpo) == 8:
         try:
@@ -135,14 +135,13 @@ def extrair_metadados_via_cep(cep_alvo):
 
 def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
     """
-    CAMADA GEOGRÁFICA INTEROPERÁVEL - Executa o Pipeline de Desambiguação Multi-Provedor.
-    Se uf_limite_obrigatorio for informado, inibe vazamentos inter-regionais.
+    CAMADA GEOGRÁFICA INTEROPERÁVEL - Geocodificação Dinâmica Multi-Provedor (Agnóstica).
     """
     texto_str = normalizar_texto_endereco(localidade)
     texto_upper = texto_str.upper()
     foi_resolvido_por_cep = False
     
-    # 1. INTERCEPTAÇÃO POSTAL SOBERANA (ViaCEP)
+    # 1. RESOLUÇÃO POSTAL BASE (ViaCEP)
     cep_limpo = re.sub(r'\D', '', texto_str)
     if len(cep_limpo) == 8 and (texto_str.isdigit() or "-" in texto_str or "CEP" in texto_upper):
         try:
@@ -153,9 +152,6 @@ def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
                 localidade_nome = res_cep.get('localidade', '').strip()
                 uf = res_cep.get('uf', '').strip()
                 
-                if uf.upper() == "DF" and "ZONA INDUSTRIAL" in bairro.upper():
-                    bairro = "SIG"
-                
                 componentes_cep = [logradouro, bairro, localidade_nome, uf]
                 texto_str = ", ".join([c for c in componentes_cep if c])
                 texto_str += f", {res_cep.get('cep', cep_limpo)}, Brasil"
@@ -164,15 +160,14 @@ def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
         except Exception:
             pass
 
-    # 2. CONSTRUÇÃO DA QUERY INTELIGENTE DE CONTEXTO REFORÇADO
+    # Constroi query expandida geograficamente de forma genérica
     query = texto_str
     if uf_limite_obrigatorio and uf_limite_obrigatorio not in texto_upper:
         query = f"{texto_str}, {uf_limite_obrigatorio}, Brasil"
     elif "BRASIL" not in texto_upper:
-        eh_poi_df = any(token in texto_upper for token in ["UNIVERSIDADE", "UNB", "CATÓLICA", "CATOLICA", "UNICEUB", "TAGUATINGA", "SAMAMBAIA"])
-        query = f"{texto_str}, Brasília, DF, Brasil" if eh_poi_df else f"{texto_str}, Brasil"
+        query = f"{texto_str}, Brasil"
 
-    # --- PROVEDOR PRIMÁRIO: ArcGIS Geocode Server ---
+    # --- PROVEDOR PRIMÁRIO: ArcGIS ---
     url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=5&sourceCountry=BRA&outFields=*"
     try:
         resposta = requests.get(url_arc, timeout=8).json()
@@ -181,6 +176,7 @@ def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
                 atributos = candidato.get('attributes', {})
                 estado_arc = (atributos.get('RegionAbbr', '').strip() or atributos.get('Region', '').strip()).upper()
                 
+                # Se houver restrição de contexto estrita e houver divergência, continua procurando
                 if uf_limite_obrigatorio and estado_arc and estado_arc != uf_limite_obrigatorio.upper():
                     continue
                 
@@ -196,25 +192,21 @@ def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
                 
                 if logradouro_arc and len(logradouro_arc.split()) > 1:
                     componentes_reconstruidos = [logradouro_arc, bairro_arc, cidade_arc, estado_arc]
-                    endereco_completo = ", ".join([c for c in componentes_reconstruidos if c])
-                    return lat, lon, endereco_completo, estado_arc
+                    return lat, lon, ", ".join([c for c in componentes_reconstruidos if c]), estado_arc
                 
                 return lat, lon, candidato['address'], estado_arc
     except Exception:
         pass
 
-    # --- PROVEDOR SECUNDÁRIO REDUNDANTE: OpenStreetMap Nominatim ---
+    # --- PROVEDOR SECUNDÁRIO: OpenStreetMap Nominatim ---
     url_osm = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query)}&limit=3&addressdetails=1"
-    headers_osm = {"User-Agent": "GerenciadorRotasInteligentes/5.0 (lucasccruz@gmail.com)"}
+    headers_osm = {"User-Agent": "GerenciadorRotasAgnostico/5.0 (logistica_global@corporativo.com)"}
     try:
         res_osm = requests.get(url_osm, headers=headers_osm, timeout=6).json()
         if res_osm:
             for opcao in res_osm:
                 details = opcao.get('address', {})
                 estado_osm = details.get('state', '').strip().upper()
-                
-                if uf_limite_obrigatorio and uf_limite_obrigatorio == "DF" and "DISTRITO FEDERAL" not in estado_osm:
-                    continue
                 
                 lat = float(opcao['lat'])
                 lon = float(opcao['lon'])
@@ -223,19 +215,20 @@ def obter_coordenadas_e_endereco_oficial(localidade, uf_limite_obrigatorio=""):
                 cide_o = details.get('city', details.get('town', ''))
                 
                 componentes_osm = [rua, bair_o, cide_o, details.get('state', '')]
-                endereco_osm = ", ".join([c for c in componentes_osm if c])
-                return lat, lon, endereco_osm, uf_limite_obrigatorio if uf_limite_obrigatorio else "OSM"
+                return lat, lon, ", ".join([c for c in componentes_osm if c]), estado_osm[:2]
     except Exception:
         pass
         
     return 0.0, 0.0, query, uf_limite_obrigatorio if uf_limite_obrigatorio else "ND"
 
 def calcular_pipeline_logistico(origem, destino):
-    """Pipeline Universal de Roteamento Sem Amarras Fixas com Fusão de Contexto de Linha"""
+    """
+    ENGINE UNIVERSAL E MATEMÁTICA - Captura contextos e aplica travas geométricas de consistência.
+    """
     origem_clean = str(origem).strip()
     destino_clean = str(destino).strip()
     
-    # ETAPA 1: Pré-Varredura de Metadados Postais da Linha para extrair a UF âncora
+    # 1. Captura dinâmica de contexto regional via checagem rápida de regex por siglas explicitadas
     uf_ancora = ""
     cep_o_match = re.search(r'\b\d{5}-?\d{3}\b', origem_clean)
     cep_d_match = re.search(r'\b\d{5}-?\d{3}\b', destino_clean)
@@ -248,49 +241,51 @@ def calcular_pipeline_logistico(origem, destino):
         if uf_d: uf_ancora = uf_d.upper()
         
     if not uf_ancora:
-        match_sigla = re.search(r'\b(DF|GO|SP|RJ|MG|BA|PR|SC|RS|CE|PE|AM)\b', origem_clean.upper() + " " + destino_clean.upper())
+        match_sigla = re.search(r'\b(DF|GO|SP|RJ|MG|BA|PR|SC|RS|CE|PE|AM|PA|MT|MS)\b', origem_clean.upper() + " " + destino_clean.upper())
         if match_sigla:
             uf_ancora = match_sigla.group(1)
-            
-    # DETECTOR DE TOPÔNIMOS EXCLUSIVOS: Se o destino carregar explicitamente o nome de Brasília ou UnB, força a âncora para o DF
-    if not uf_ancora:
-        if "BRASILIA" in destino_clean.upper() or "UNB" in destino_clean.upper() or "BRASÍLIA" in destino_clean.upper():
-            uf_ancora = "DF"
-        elif "BRASILIA" in origem_clean.upper() or "UNB" in origem_clean.upper() or "BRASÍLIA" in origem_clean.upper():
-            uf_ancora = "DF"
 
-    # ETAPA 2: Resolve a localização aplicando a trava da UF âncora
+    # 2. Executa a geocodificação inicial dos dois pontos
     lat_o, lon_o, origem_oficial, uf_final_o = obter_coordenadas_e_endereco_oficial(origem_clean, uf_ancora)
     lat_d, lon_d, destino_oficial, uf_final_d = obter_coordenadas_e_endereco_oficial(destino_clean, uf_ancora if uf_ancora else uf_final_o)
     
+    # 3. VALIDAÇÃO GEODÉSICA: Calcula a distância geométrica real da curvatura terrestre (Vincenty)
     dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
-
-    origem_is_poi = any(k in origem_oficial.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
-    destino_is_poi = any(k in destino_oficial.upper() for k in ["UNIVERSIDADE", "UNB", "CATOLICA", "CÁTOLICA", "UNICEUB"])
-
-    uf_aplicavel = uf_ancora if uf_ancora else (uf_final_o if uf_final_o and uf_final_o != "ND" else "DF")
     
-    query_o = f"{origem_oficial}, {uf_aplicavel}, Brasil" if (origem_is_poi and "BRASIL" not in origem_oficial.upper()) else origem_oficial
-    query_d = f"{destino_oficial}, {uf_aplicavel}, Brasil" if (destino_is_poi and "BRASIL" not in destino_oficial.upper()) else destino_oficial
-
-    usar_coords = not (origem_is_poi or destino_is_poi)
-    if usar_coords and dist_linha_reta > 120.0:
-        usar_coords = False 
+    # Montagem dinâmica das strings finais
+    query_o = origem_oficial
+    query_d = destino_oficial
     
+    # Regra de ouro de roteamento: por padrão tenta usar coordenadas de precisão geométrica
+    usar_coords = True
+    
+    # --- PROVA REAL GEOMÉTRICA (A Trava de Segurança Contra Desvios Interestaduais) ---
+    # Se a distância em linha reta calculada for maior que 150km, mas as strings originais NÃO possuem 
+    # explicitamente estados diferentes gravados, o sistema detecta uma anomalia de homônimos (Falso Positivo).
+    if dist_linha_reta > 150.0:
+        has_distinct_ufs = False
+        siglas_encontradas = re.findall(r'\b(DF|GO|SP|RJ|MG|BA|PR|SC|RS|CE|PE|AM|PA|MT|MS)\b', origem_clean.upper() + " " + destino_clean.upper())
+        if len(set(siglas_encontradas)) > 1:
+            has_distinct_ufs = True
+            
+        if not has_distinct_ufs:
+            # Força o desligamento de coordenadas truncadas e joga a resolução para a inteligência textual do Google
+            usar_coords = False
+
     dados_reais = extrair_dados_reais_google(query_o, query_d, lat_o, lon_o, lat_d, lon_d, usar_coordenadas=usar_coords)
     
     if dados_reais:
         km_google, tempo_google, link_google, balsa_google = dados_reais
         
-        # --- FILTRO DE CONTENÇÃO CONTRA ALUCINAÇÕES INTERESTADUAIS (Gatilho Geodésico) ---
-        if km_google > 120.0 and dist_linha_reta < 45.0:
+        # Auditoria pós-retorno: se o trajeto rodoviário extrapolou o limite urbano sem justificativa textual expressa
+        if km_google > 150.0 and dist_linha_reta < 60.0 and usar_coords:
             dados_reais_seguros = extrair_dados_reais_google(query_o, query_d, 0.0, 0.0, 0.0, 0.0, usar_coordenadas=False)
             if dados_reais_seguros:
                 return dados_reais_seguros[0], dados_reais_seguros[1], dados_reais_seguros[2], dados_reais_seguros[3], dist_linha_reta
                 
         return km_google, tempo_google, link_google, balsa_google, dist_linha_reta
 
-    # FALLBACK OPERACIONAL
+    # FALLBACK OPERACIONAL EM CASO DE TIMEOUT/QUEDA
     link_maps_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(query_o)}&destination={requests.utils.quote(query_d)}&travelmode=driving"
     km_terrestre = round(dist_linha_reta * 1.27, 2) if dist_linha_reta > 0.0 else 0.0
     v_comercial = 65.0 if km_terrestre >= 150 else 45.0
@@ -301,7 +296,7 @@ def calcular_pipeline_logistico(origem, destino):
 
 # --- INTERFACE VISUAL NO STREAMLIT ---
 st.title("🚗 Gerenciador de Rotas Inteligentes")
-st.subheader("Engine Logística Dinâmica Nacional — Operação Gratuita")
+st.subheader("Engine de Resolução Espacial Agnóstica — Operação Gratuita")
 st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
 
 arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"])
@@ -310,11 +305,11 @@ if arquivo_carregado is not None:
     df = pd.read_excel(arquivo_carregado)
     
     if 'Origem' not in df.columns or 'Destino' not in df.columns:
-        st.error("Erro de Validação: Planilha precisa conter as colunas 'Origem' e 'Destino'.")
+        st.error("Erro de Validação: Certifique-se de que a planilha possui as colunas obrigatórias 'Origem' e 'Destino'.")
     else:
-        st.success("Tabela carregada e validada com sucesso.")
+        st.success("Tabela de dados detectada com sucesso! Pronto para processar.")
         
-        if st.button("Iniciar Processamento Universal"):
+        if st.button("Iniciar Processamento em Lote"):
             for col in ['Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta']:
                 df[col] = None
 
@@ -337,7 +332,7 @@ if arquivo_carregado is not None:
                     df.at[index, 'Balsas'] = balsa_status
                     df.at[index, 'Linha Reta'] = linha_reta
                     
-                    time.sleep(1.0)
+                    time.sleep(0.8)
                 
                 barra_progresso.progress((index + 1) / total_linhas)
             
