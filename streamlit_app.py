@@ -34,7 +34,7 @@ cache_cep = Cache("./cache_cep")
 cache_google = Cache("./cache_google")
 cache_reverse = Cache("./cache_reverse")
 
-# Purga automática de chaves expiradas na inicialização para economizar disco
+# Purga automática de chaves expiradas na inicialização para otimização de disco
 for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse]:
     c.cull()
 
@@ -51,7 +51,7 @@ def realizar_manutencao_logs_google():
 
 realizar_manutencao_logs_google()
 
-# Conexão HTTP Persistente com Backoff Exponencial
+# Conexão HTTP Persistente com Adaptador de Resiliência Coorporativo
 session = requests.Session()
 retry_strategy = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
 adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -61,7 +61,7 @@ session.mount("http://", adapter)
 lock_nominatim = Lock()
 CACHE_IBGE_PATH = "municipios_ibge.pkl"
 
-# Alocação fixa e controlada do Pool de Threads Global do Aplicativo
+# Alocação fixa do Pool de Threads Global do Aplicativo
 if "executor_global" not in st.session_state:
     st.session_state["executor_global"] = ThreadPoolExecutor(max_workers=5)
 
@@ -70,7 +70,7 @@ if "executor_global" not in st.session_state:
 # ==============================================================================
 @st.cache_data
 def carregar_dados_ibge():
-    """Carrega Estados, Municípios e Distritos de forma imutável e visível para worker threads"""
+    """Carrega Estados, Municípios e Distritos de forma imutável e estável para as worker threads"""
     if os.path.exists(CACHE_IBGE_PATH):
         if time.time() - os.path.getmtime(CACHE_IBGE_PATH) > (30 * 86400):
             os.remove(CACHE_IBGE_PATH)
@@ -123,7 +123,7 @@ POI_KEYWORDS = [
 ]
 
 # ==============================================================================
-# 🧹 ENGINE DE RESOLUÇÃO UNIVERSAL E CLASSIFICAÇÃO (CAMADAS 1, 2, 11)
+# 🧹 ENGINE DE RESOLUÇÃO SEMÂNTICA
 # ==============================================================================
 class ClassificadorSemantico:
     def __init__(self):
@@ -150,7 +150,6 @@ class ClassificadorSemantico:
         return re.sub(r'\s+', ' ', t).strip()
 
     def classificar_entrada(self, texto_norm):
-        """Camada 2: Atribuição Taxonômica de Tipologia do Input"""
         if texto_norm in cache_classificacao: return cache_classificacao[texto_norm]
         
         tipo = "LOGRADOURO"
@@ -166,7 +165,6 @@ class ClassificadorSemantico:
         return tipo
 
     def aplicar_fuzzy_multidimensional(self, texto_norm):
-        """Camada 11: Machine Learning Assistido Ponderado via RapidFuzz"""
         if texto_norm in cache_fuzzy: return cache_fuzzy[texto_norm]
         tokens = texto_norm.split()
         for token in tokens:
@@ -343,7 +341,6 @@ def API_Overpass_POIs(texto_norm):
     return None
 
 def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
-    """Camada 9: Votação e Consenso Espacial Multivariável Baseado em Tipologia de Input"""
     if not candidatos: return None
     tolerancia_km = 0.5 if tipo_entrada in ["ENDERECO_COMPLETO", "POI", "CEP"] else 2.0 if tipo_entrada in ["BAIRRO", "RURAL"] else 10.0
     
@@ -393,7 +390,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 
     candidatos_validos = []
 
-    # Nível Hierárquico 1: CEP Short-Circuit
     if tipo_entrada == "CEP":
         cep_estrito = re.search(r'\b\d{5}-?\d{3}\b', texto_fuzzy).group(0).replace("-", "")
         logr, bair, loca, uf = cascata_postal_tripla(cep_estrito)
@@ -405,20 +401,18 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                 cache_geo.set(cache_key, {"lat": res_arc["lat"], "lon": res_arc["lon"], "endereco": addr_c, "confianca": "ALTISSIMA", "score_num": 100, "distrito": bair, "municipio": loca, "fonte": "ViaCEP/ArcGIS"}, expire=2592000)
                 return res_final
 
-    # Ancoragem Cadastral e Expansão Territorial
     uf_inferida, muni_inferido = semantica.inferir_ancora_geografica(texto_fuzzy)
     if uf_inferida and "BRASIL" not in texto_fuzzy:
         texto_expandido = f"{texto_fuzzy}, {muni_inferido} - {uf_inferida}, BRASIL" if muni_inferido else f"{texto_fuzzy}, {uf_inferida}, BRASIL"
     else:
         texto_expandido = f"{texto_fuzzy}, BRASIL" if "BRASIL" not in texto_fuzzy else texto_fuzzy
 
-    # Nível Hierárquico 2: POI Short-Circuit via Overpass
     if tipo_entrada == "POI":
         res_poi = API_Overpass_POIs(texto_fuzzy)
         if res_poi: candidatos_validos.append(res_poi)
 
-    # Nível Hierárquico 3: Concorrência de Geocodificadores Multi-Fonte Isolados
-    with ThreadPoolExecutor(max_workers=4) as pool_api:
+    # Execução local isolada do Pool Global para impedir Deadlocks em chamadas recursivas das threads
+    with ThreadPoolExecutor(max_workers=3) as pool_api:
         fs = [
             pool_api.submit(API_ArcGIS, texto_expandido),
             pool_api.submit(API_Nominatim, texto_expandido),
@@ -436,7 +430,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
         cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
         return res_final
         
-    return 0.0, 0.0, texto_expandido, "BAIXA", 0, "", "" , "N/A"
+    return 0.0, 0.0, texto_expandido, "BAIXA", 0, "", "", "N/A"
 
 # ==============================================================================
 # 🚀 MOTOR DE ROTEAMENTO CORPORATIVO (GOOGLE PREVIEW PRIORITÁRIO)
@@ -516,7 +510,6 @@ def calcular_pipeline_logistico(origem, destino):
 
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(end_oficial_o)}&destination={requests.utils.quote(end_oficial_d)}&travelmode=driving"
 
-    # Prioridade de Roteamento 1: Google Preview
     res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=usar_coords)
     if res_google:
         tempo_roteamento = round(time.time() - start_rot, 2)
@@ -524,7 +517,6 @@ def calcular_pipeline_logistico(origem, destino):
         retorno = (res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
 
-    # Fallback 1: OSRM Engine por Coordenadas Canônicas
     if usar_coords:
         res_osrm = rota_osrm(lat_o, lon_o, lat_d, lon_d)
         if res_osrm:
@@ -533,7 +525,6 @@ def calcular_pipeline_logistico(origem, destino):
             retorno = (res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total)
             cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
             
-        # Fallback 2: OpenRouteService
         res_ors = rota_openrouteservice_fallback(lat_o, lon_o, lat_d, lon_d)
         if res_ors:
             tempo_roteamento = round(time.time() - start_rot, 2)
@@ -541,7 +532,6 @@ def calcular_pipeline_logistico(origem, destino):
             retorno = (res_ors[0], res_ors[1], link_fallback, "Não", dist_linha_reta, res_ors[2], res_ors[3], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total)
             cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
 
-    # Fallback 3 de Fechamento de Malha: Geodésico Adaptativo
     km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
     v_comercial = 45.0 if km_terrestre < 50.0 else 65.0
     minutos_est = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0 else 0
@@ -559,7 +549,7 @@ def embrulhar_task_paralela(item):
     except Exception: return idx, None
 
 # ==============================================================================
-# 🚗 INTERFACE VISUAL NO STREAMLIT (MANIPULAÇÃO EM LOTE CORPORATIVA)
+# 🚗 INTERFACE VISUAL NO STREAMLIT (LOTE E GESTÃO SEGURA DE MEMÓRIA)
 # ==============================================================================
 st.title("🚗 Gerenciador de Rotas Inteligentes")
 st.subheader("Engine de Resolução Espacial Nacional — Operação Corporativa")
@@ -569,14 +559,19 @@ arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"])
 
 if arquivo_carregado is not None:
     df = pd.read_excel(arquivo_carregado)
+    
+    # Padronização e limpeza léxica de títulos de colunas para interceptar espaços e variações
+    df.columns = df.columns.str.strip().str.title()
+    
     if 'Origem' not in df.columns or 'Destino' not in df.columns:
-        st.error("Erro de Validação: A planilha deve possuir as colunas 'Origem' e 'Destino'.")
+        st.error("Erro de Validação: A planilha deve possuir as colunas obrigatórias 'Origem' e 'Destino'.")
     else:
-        if len(df) > 5000:
-            st.error("A planilha excede o limite de 5000 linhas. Fracione o arquivo.")
+        MAX_LINHAS = 5000
+        if len(df) > MAX_LINHAS:
+            st.error(f"⚠️ A planilha excede o limite de {MAX_LINHAS} linhas. Por favor, fracione o lote.")
             st.stop()
             
-        st.success(f"Tabela de dados detectada com sucesso! ({len(df)} registros mapeados). Pronto para processar.")
+        st.success(f"Tabela com {len(df)} registros detectada com sucesso! Pronto para processar.")
         
         if st.button("Iniciar Processamento em Lote"):
             novas_colunas = [
@@ -588,13 +583,17 @@ if arquivo_carregado is not None:
             for col in novas_colunas: df[col] = None
                 
             tarefas = []
-            for linha in df.itertuples(index=True):
-                origem, destino = str(getattr(linha, 'Origem', '')).strip(), str(getattr(linha, 'Destino', '')).strip()
+            for index, linha in df.iterrows():
+                origem = str(linha['Origem']).strip() if pd.notna(linha['Origem']) else ""
+                destino = str(linha['Destino']).strip() if pd.notna(linha['Destino']) else ""
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
-                    tarefas.append((linha.Index, origem, destino))
+                    tarefas.append((index, origem, destino))
             
-            # Executa o loop assíncrono consumindo o pool global de forma segura
-            resultados_mapeados = {}
+            if not tarefas:
+                st.warning("Nenhuma linha contendo endereços válidos foi detectada na planilha.")
+                st.stop()
+            
+            # Consumo seguro do pool de threads principal do Streamlit
             executor_lote = st.session_state["executor_global"]
             futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in tarefas}
             
@@ -627,11 +626,11 @@ if arquivo_carregado is not None:
                     df.at[idx, 'Status da Rota'] = "Erro de Processamento"
                     
                 concluidos += 1
-                container_status.text(f"🚀 Roteamento Assíncrono Seguro: {concluidos} de {len(tarefas)} processados...")
+                container_status.text(f"🚀 Roteamento Assíncrono Híbrido: {concluidos} de {len(tarefas)} processados...")
                 barra_progresso.progress(concluidos / len(tarefas))
                 
             container_status.empty(); barra_progresso.empty()
-            st.success("✨ Processamento em lote concluído com sucesso!")
+            st.success("✨ Processamento em lote concluído!")
             
             ordem_finais = ['Origem', 'Destino'] + novas_colunas
             df = df.reindex(columns=ordem_finais)
@@ -639,5 +638,16 @@ if arquivo_carregado is not None:
             output_buffer = io.BytesIO()
             with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: df.to_excel(writer, index=False)
             
-            st.write("---"); st.balloons()
-            st.download_button(label="📥 Baixar Planilha Logística Processada", data=output_buffer.getvalue(), file_name="planilha_rotas_calculada.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            # Ancoragem do binário processado no Session State para garantir persistência imutável
+            st.session_state['planilha_pronta'] = output_buffer.getvalue()
+
+    # O download_button opera fora do gatilho do botão original, lendo direto do estado da sessão
+    if 'planilha_pronta' in st.session_state:
+        st.write("---")
+        st.balloons()
+        st.download_button(
+            label="📥 Baixar Planilha Logística Processada", 
+            data=st.session_state['planilha_pronta'], 
+            file_name="planilha_rotas_calculada.xlsx", 
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
