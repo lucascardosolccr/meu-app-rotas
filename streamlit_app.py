@@ -32,8 +32,6 @@ cache_poi = Cache("./cache_poi")
 cache_cep = Cache("./cache_cep")
 cache_google = Cache("./cache_google")
 cache_reverse = Cache("./cache_reverse")
-
-# Novos Bancos de Dados Locais (Offline-First & Self-Healing)
 cache_base_local = Cache("./cache_base_local")
 cache_aprendizado = Cache("./cache_aprendizado")
 
@@ -137,6 +135,12 @@ POI_KEYWORDS = [
     "IGREJA", "FORUM", "TRIBUNAL", "DELEGACIA", "PREFEITURA", "CLINICA"
 ]
 
+BOUNDING_BOXES_UF = {
+    "DF": {"lat_min": -16.05, "lat_max": -15.50, "lon_min": -48.30, "lon_max": -47.30},
+    "SP": {"lat_min": -25.50, "lat_max": -19.50, "lon_min": -53.50, "lon_max": -44.00},
+    "GO": {"lat_min": -19.50, "lat_max": -12.40, "lon_min": -53.30, "lon_max": -45.90},
+}
+
 # ==============================================================================
 # 🧹 ENGINE DE RESOLUÇÃO UNIVERSAL E ENDEREÇAMENTO CANÔNICO
 # ==============================================================================
@@ -173,18 +177,26 @@ class MotorEnderecoCanônico:
             "LAGO NORTE": "PLANO PILOTO", "NUCLEO BANDEIRANTE": "NUCLEO BANDEIRANTE", "BRAZLANDIA": "BRAZLANDIA"
         }
 
+        self.mapa_siglas_df = {
+            "QNL": "TAGUATINGA", "QNG": "TAGUATINGA", "QNH": "TAGUATINGA", "QNA": "TAGUATINGA", "QNB": "TAGUATINGA", "QNC": "TAGUATINGA", "QND": "TAGUATINGA", "QNE": "TAGUATINGA", "QNF": "TAGUATINGA", "QNJ": "TAGUATINGA", "QNI": "TAGUATINGA", "QSE": "TAGUATINGA", "QSA": "TAGUATINGA",
+            "QNM": "CEILANDIA", "QNN": "CEILANDIA", "QNO": "CEILANDIA", "QNP": "CEILANDIA", "EQNM": "CEILANDIA", "EQNN": "CEILANDIA", "EQNP": "CEILANDIA", "EQNO": "CEILANDIA",
+            "QS": "SAMAMBAIA", "QN": "SAMAMBAIA", "QR": "SAMAMBAIA",
+            "SQN": "PLANO PILOTO", "SQS": "PLANO PILOTO", "SHIS": "LAGO SUL", "SHIN": "LAGO NORTE", "SME": "PLANO PILOTO", "SMU": "PLANO PILOTO",
+            "QE": "GUARA", "QI": "GUARA"
+        }
+
     def normalizar(self, texto):
         if not texto or pd.isna(texto): return ""
         t_raw = str(texto).strip()
         
-        # Self-Healing
+        # Self-Healing Layer
         chave_aprendizado = t_raw.upper()
         if chave_aprendizado in cache_aprendizado: t_raw = cache_aprendizado[chave_aprendizado]
 
         t = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', t_raw)
         t = unidecode(t).upper()
         
-        # Cache Semântico Hash
+        # Cache Semântico Hash (Protege CEPs paulistas)
         t = re.sub(r'\b0+(\d{1,4})\b', r'\1', t) 
         
         def padronizar_rodovia(match):
@@ -235,10 +247,19 @@ class MotorEnderecoCanônico:
         return texto_norm
 
     def resolver_contexto_administrativo(self, texto_norm):
+        # Nível de Siglas do DF (Topologia Própria)
+        tokens = texto_norm.split()
+        for token in tokens:
+            sigla_limpa = re.sub(r'[^A-Z]', '', token)
+            if sigla_limpa in self.mapa_siglas_df and len(sigla_limpa) >= 2:
+                return {"uf": "DF", "municipio": "BRASILIA", "distrito": self.mapa_siglas_df[sigla_limpa]}
+                
+        # Nível por Extenso Estático
         for chave, ra_oficial in self.mapa_contexto_df.items():
             if chave in texto_norm:
                 return {"uf": "DF", "municipio": "BRASILIA", "distrito": ra_oficial}
                 
+        # Varredura Nacional IBGE
         palavras = texto_norm.split()
         for i in range(len(palavras)):
             for j in range(i + 1, len(palavras) + 1):
@@ -368,8 +389,15 @@ def cascata_postal_tripla(cep_limpo):
     except Exception: pass
     return "", "", "", "", 0.0, 0.0
 
+def validar_consistencia_administrativa(candidato, uf_inf):
+    est_api = unidecode(candidato.get('estado', '')).upper().strip()
+    if uf_inf and est_api:
+        if uf_inf != est_api:
+            return False
+    return True
+
 # ==============================================================================
-# 🗺️ GEOCODIFICAÇÃO MULTIMOTOR COM META-DADOS TOP-K
+# 🗺️ MÓDULOS DE GEOCODIFICAÇÃO (CONTRATO LISTA TOP-K)
 # ==============================================================================
 def API_Google_Geocoding_Scraper(query):
     try:
@@ -486,16 +514,26 @@ def API_Overpass_POIs(texto_norm):
         except Exception: continue
     return None
 
+# ==============================================================================
+# 🧠 MOTOR DE CONSENSO MULTIDIMENSIONAL (HYBRID CLUSTERING & SCORES)
+# ==============================================================================
 def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru, uf_dominante=""):
     candidatos_validos = []
+    box = BOUNDING_BOXES_UF.get(uf_dominante) if uf_dominante else None
+    
+    # Filtro 1: Bounding Box Nacional e Estadual Estrita
     for c in candidatos:
         valido, lat_c, lon_c = validar_coordenada_brasil(c["lat"], c["lon"])
         if valido:
+            if box:
+                if not (box["lat_min"] <= lat_c <= box["lat_max"] and box["lon_min"] <= lon_c <= box["lon_max"]):
+                    continue
             c["lat"], c["lon"] = lat_c, lon_c 
             candidatos_validos.append(c)
             
     if not candidatos_validos: return None
     
+    # Filtro 2: Validação Semântica Cruzada Pertencimento IBGE
     validados_semantica = []
     for c in candidatos_validos:
         cidade_api = unidecode(c.get('cidade', '')).upper().strip()
@@ -511,13 +549,18 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru, uf_dominant
     candidatos_validos = validados_semantica
     if not candidatos_validos: return None
 
+    # Filtro 3: Clustering Híbrido Semântico-Espacial
     clusters = []
-    raio_cluster_km = 20.0 
+    raio_cluster_km = 5.0 
     for c in candidatos_validos:
         alocado = False
         for cluster in clusters:
+            semantica_match = (
+                (unidecode(c.get('cidade', '')).upper() == unidecode(cluster[0].get('cidade', '')).upper()) and
+                (fuzz.token_set_ratio(c.get('bairro', ''), cluster[0].get('bairro', '')) > 90)
+            )
             dist = calcular_distancia_vincenty(c["lat"], c["lon"], cluster[0]["lat"], cluster[0]["lon"])
-            if dist <= raio_cluster_km:
+            if semantica_match and dist <= raio_cluster_km:
                 cluster.append(c)
                 alocado = True
                 break
@@ -531,13 +574,21 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru, uf_dominant
 
     tolerancia_km = 0.5 if tipo_entrada in ["ENDERECO_COMPLETO", "POI", "CEP"] else 2.0 if tipo_entrada in ["BAIRRO", "RURAL"] else 10.0
     input_usuario = ParserGeograficoBR.extrair_componentes(texto_cru.upper())
-    uf_inf, mun_inf, dist_inf = semantica.inferir_ancora_geografica(texto_cru.upper())
     
+    ctx_inf = semantica.resolver_contexto_administrativo(texto_cru.upper())
+    uf_inf = ctx_inf.get("uf", "")
+    mun_inf = ctx_inf.get("municipio", "")
+    dist_inf = ctx_inf.get("distrito", "")
+
+    # Filtro 4: Validação Administrativa Forte (Hard Drop)
+    candidatos_consistentes = [c for c in candidatos_validos if validar_consistencia_administrativa(c, uf_inf)]
+    if candidatos_consistentes:
+        candidatos_validos = candidatos_consistentes
+        
     for c1 in candidatos_validos:
         score_centesimal = c1["score_base"]
         
         if uf_dominante and c1.get("estado") and uf_dominante in c1["estado"]: score_centesimal += 15
-        
         if mun_inf and c1.get("cidade") and mun_inf in c1["cidade"]: score_centesimal += 20
         if uf_inf and c1.get("estado") and uf_inf in c1["estado"]: score_centesimal += 15
         if dist_inf and c1.get("bairro") and dist_inf in c1["bairro"]: score_centesimal += 15
@@ -563,15 +614,26 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru, uf_dominant
         c1["score_final"] = score_centesimal + (consenso_espacial * 20)
         
     candidatos_validos.sort(key=lambda x: x["score_final"], reverse=True)
-    vencedor = candidatos_validos[0]
+    
+    # Filtro 5: Validação de Ciclo Fechado (Closed-Loop Validation)
+    vencedor = None
+    for cand in candidatos_validos:
+        m = executar_reverse_geocoding_multimotor(cand["lat"], cand["lon"])
+        end_reverse = ", ".join([c for c in [m.get("logradouro", ""), m.get("bairro", ""), m.get("cidade", ""), m.get("estado", "")] if c.strip()])
+        similaridade = fuzz.token_set_ratio(texto_cru.upper(), end_reverse.upper())
+        if similaridade >= 70:
+            vencedor = cand
+            break
+            
+    if not vencedor: return None
     score_consenso = min(int(vencedor["score_final"]), 100)
     
     if tipo_entrada in ["ENDERECO_COMPLETO", "CEP"] and score_consenso < 80:
         return None
     
-    if score_consenso < 70: m = executar_reverse_geocoding_multimotor(vencedor["lat"], vencedor["lon"])
-    else: m = {"logradouro": vencedor.get("logradouro", ""), "bairro": vencedor["bairro"], "cidade": vencedor["cidade"], "municipio": vencedor["cidade"], "distrito": "", "estado": vencedor["estado"], "cep": vencedor.get("cep", "")}
+    m = {"logradouro": vencedor.get("logradouro", ""), "bairro": vencedor["bairro"], "cidade": vencedor["cidade"], "municipio": vencedor["cidade"], "distrito": "", "estado": vencedor["estado"], "cep": vencedor.get("cep", "")}
         
+    # Cap de Completude Semântica
     score_completude = 50
     if tipo_entrada == "CEP": score_completude = 100
     elif tipo_entrada == "ENDERECO_COMPLETO":
@@ -590,6 +652,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru, uf_dominant
     if m.get("cep") and score_limitado < 100:
         score_limitado = min(score_limitado + 10, 100 if tipo_entrada == "CEP" else 95)
 
+    # Heurística de Downgrade por Centróide Municipal
     if tipo_entrada in ["ENDERECO_COMPLETO", "CEP"] and not vencedor.get("logradouro"):
         confianca = "MUNICIPAL"
     else:
@@ -600,22 +663,50 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru, uf_dominant
     return vencedor["lat"], vencedor["lon"], endereco_f, confianca, score_limitado, m["distrito"], m["municipio"], vencedor["fonte"]
 
 # ==============================================================================
-# 🎚️ ORQUESTRADOR HIERÁRQUICO (RESOLUÇÃO DO ENDEREÇO CANÔNICO NACIONAL)
+# 🎚️ ORQUESTRADOR EM CASCATA HIERÁRQUICA E OFFLINE-FIRST
 # ==============================================================================
 def obter_coordenadas_e_endereco_oficial(localidade):
     texto_cru = str(localidade).strip()
     if not texto_cru or texto_cru.lower() == 'nan': return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A"
     
-    endereco_canonico, tipo_entrada, cep_detectado, lat_cep, lon_cep = semantica.construir_endereco_canonico(texto_cru)
+    endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_cru)
+    ctx = semantica.resolver_contexto_administrativo(texto_cru.upper())
+    parsed_comp = ParserGeograficoBR.extrair_componentes(texto_cru.upper())
     
+    # RAM Cache Look-up
     cache_key = f"{tipo_entrada}_{endereco_canonico}"
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
         return c["lat"], c["lon"], c["endereco"], c["confianca"], c["score_num"], c["distrito"], c["municipio"], c["fonte"]
 
-    if endereco_canonico in cache_base_local:
-        b = cache_base_local[endereco_canonico]
-        return b["lat"], b["lon"], b["endereco"], b["confianca"], b["score_num"], b["distrito"], b["municipio"], "BASE_LOCAL_OFFLINE"
+    if ctx.get("uf"): contexto_regional_window.append(ctx["uf"])
+    uf_dominante = max(set(contexto_regional_window), key=contexto_regional_window.count) if contexto_regional_window else ""
+    
+    rua_suja = parsed_comp["resto"]
+    for loc in [ctx.get("municipio", ""), ctx.get("distrito", ""), ctx.get("uf", ""), "BRASIL", "DF"]:
+        if loc: rua_suja = re.sub(rf'\b{loc}\b', '', rua_suja).strip(" ,-")
+        
+    rua_limpa = re.sub(r'\s+', ' ', rua_suja).strip()
+    if parsed_comp["numero"]: rua_limpa = f"{rua_limpa} {parsed_comp['numero']}".strip()
+    
+    contexto_estruturado = {
+        "logradouro": rua_limpa if rua_limpa else texto_cru.upper(),
+        "bairro": ctx.get("distrito", ""),
+        "municipio": ctx.get("municipio", ""),
+        "uf": ctx.get("uf", ""),
+        "cep": parsed_comp.get("cep", "")
+    }
+
+    # Interceptação Base Nacional Offline (CNEFE/Correios/OSM Local)
+    if contexto_estruturado["logradouro"] and contexto_estruturado["municipio"] and contexto_estruturado["uf"]:
+        chave_cnefe = f"{contexto_estruturado['logradouro']}_{contexto_estruturado['municipio']}_{contexto_estruturado['uf']}"
+        if chave_cnefe in cache_base_local:
+            b = cache_base_local[chave_cnefe]
+            return b["lat"], b["lon"], b["endereco"], "ALTISSIMA", 100, b.get("distrito", ""), b.get("municipio", ""), "BASE_NACIONAL_OFFLINE"
+
+    # Cascata Nível 1: Verificação de Ancoragem Administrativa Obliterativa
+    if not ctx.get("municipio"):
+        return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A"
 
     candidatos_validos = []
 
@@ -642,27 +733,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                         res_final = (lat_corrigida_arc, lon_corrigida_arc, addr_c, "ALTISSIMA", 100, bair, loca, "ViaCEP/ArcGIS")
                         cache_geo.set(cache_key, {"lat": lat_corrigida_arc, "lon": lon_corrigida_arc, "endereco": addr_c, "confianca": "ALTISSIMA", "score_num": 100, "distrito": bair, "municipio": loca, "fonte": "ViaCEP/ArcGIS"}, expire=2592000)
                         return res_final
-
-    ctx = semantica.resolver_contexto_administrativo(texto_cru.upper())
-    parsed_comp = ParserGeograficoBR.extrair_componentes(texto_cru.upper())
-    
-    if ctx.get("uf"): contexto_regional_window.append(ctx["uf"])
-    uf_dominante = max(set(contexto_regional_window), key=contexto_regional_window.count) if contexto_regional_window else ""
-    
-    rua_suja = parsed_comp["resto"]
-    for loc in [ctx.get("municipio", ""), ctx.get("distrito", ""), ctx.get("uf", ""), "BRASIL", "DF"]:
-        if loc: rua_suja = re.sub(rf'\b{loc}\b', '', rua_suja).strip(" ,-")
-        
-    rua_limpa = re.sub(r'\s+', ' ', rua_suja).strip()
-    if parsed_comp["numero"]: rua_limpa = f"{rua_limpa} {parsed_comp['numero']}".strip()
-    
-    contexto_estruturado = {
-        "logradouro": rua_limpa if rua_limpa else texto_cru.upper(),
-        "bairro": ctx.get("distrito", ""),
-        "municipio": ctx.get("municipio", ""),
-        "uf": ctx.get("uf", ""),
-        "cep": parsed_comp.get("cep", "")
-    }
 
     res_google_geo = API_Google_Geocoding_Scraper(endereco_canonico)
     if res_google_geo: candidatos_validos.extend(res_google_geo)
@@ -692,7 +762,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A"
 
 # ==============================================================================
-# 🚀 MOTOR DE ROTEAMENTO CORPORATIVO (OSRM LÍDER -> GOOGLE CROSS-VALIDADO)
+# 🚀 MOTOR DE ROTEAMENTO (TRAVAS ESTREITAS DE DETOURS)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
     cache_key = f"{origem_raw}|{destino_raw}|{usar_coordenadas}"
@@ -712,7 +782,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
     
     try:
         resposta = session.get(url_api, headers=headers, timeout=8)
-        texto_resposta = resposta.text
+        texto_resposta = reply = resposta.text
         if len(texto_resposta) < 500 or "directions" not in texto_resposta.lower(): return None
         with open(f"logs_google/{hash(cache_key)}.txt", "w", encoding="utf-8") as f: f.write(texto_resposta)
             
@@ -802,7 +872,7 @@ def embrulhar_task_paralela(item):
     except Exception: return par_id, None
 
 # ==============================================================================
-# 🚗 INTERFACE VISUAL NO STREAMLIT (LOTE DEDUPLICADO O(U))
+# 🚗 INTERFACE STREAMLIT COM ENGINE DE DEDUPLICAÇÃO ASINTÓTICA O(U)
 # ==============================================================================
 st.title("🚗 Gerenciador de Rotas Inteligentes")
 st.subheader("Engine de Resolução Espacial Nacional — Operação Corporativa")
@@ -836,6 +906,7 @@ if arquivo_carregado is not None:
             pares_unicos = set()
             mapeamento_linhas = []
             
+            # Varredura Linear de Coleta e Clusterização de Strings
             for index, linha in df.iterrows():
                 origem = str(getattr(linha, 'Origem', '')).strip() if pd.notna(getattr(linha, 'Origem', '')) else ""
                 destino = str(getattr(linha, 'Destino', '')).strip() if pd.notna(getattr(linha, 'Destino', '')) else ""
@@ -850,6 +921,7 @@ if arquivo_carregado is not None:
                 
             st.info(f"Otimização O(U) Ativa: Detectadas {len(pares_unicos)} rotas únicas em {len(mapeamento_linhas)} linhas válidas.")
                 
+            # Disparos Assíncronos Apenas Sobre as Chaves Únicas do Set
             resultados_unicos = {}
             executor_lote = st.session_state["executor_global"]
             tarefas_unicas = [(par, par[0], par[1]) for par in pares_unicos]
@@ -869,6 +941,7 @@ if arquivo_carregado is not None:
                 
             container_status.text("✨ Distribuindo resultados na matriz principal...")
             
+            # Espelhamento Posicional e Mapeamento Reverso das Duplicações
             for idx, origem, destino in mapeamento_linhas:
                 par = (origem, destino)
                 res = resultados_unicos.get(par)
