@@ -12,4 +12,14 @@ diskcache
 geopy
 python-dotenv
 urllib3
-
+pyarrow
+cachetools
+tenacity
+loguru
+scikit-learn
+duckdb
+h3
+openrouteservice
+polyline
+sentence-transformers
+torch
