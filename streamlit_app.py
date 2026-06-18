@@ -1633,7 +1633,7 @@ with tab_analytics:
         
         # KPI 1: Geocoding Accuracy
         total_validos = len(df_kpi)
-        alta_conf = len(df_kpi[df_kpi['Confianca Geocoding Destino'].isin(['ALTISSIMA', 'ALTA'])])
+        alta_conf = len(df_kpi[df_kpi['Confianca Destino'].isin(['ALTISSIMA', 'ALTA'])])
         geo_accuracy = (alta_conf / total_validos) * 100 if total_validos > 0 else 0
 
         # KPI 5: Tempo P95 e P99
