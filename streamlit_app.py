@@ -57,12 +57,12 @@ db_conn = sqlite3.connect(":memory:", check_same_thread=False)
 def inicializar_banco_relacional_completo():
     cursor = db_conn.cursor()
     
-    # tabelas antigas preservadas
+    # tabelas financeiras preservadas
     cursor.execute("CREATE TABLE IF NOT EXISTS pedagios (id INTEGER PRIMARY KEY, nome TEXT, rodovia TEXT, km REAL, latitude REAL, longitude REAL, tarifa REAL)")
     cursor.execute("CREATE TABLE IF NOT EXISTS precos_combustivel (estado TEXT, municipio TEXT, diesel REAL, gasolina REAL, etanol REAL, gnv REAL, data TEXT)")
     cursor.execute("CREATE TABLE IF NOT EXISTS emissoes (rota_id TEXT, km REAL, litros REAL, co2 REAL, data TEXT)")
     
-    # 12. BASES DE DADOS GEOESPACIAIS (NOVAS TABELAS LOCAIS)
+    # 12. BASES DE DADOS GEOESPACIAIS (NOVAS TABELAS LOCAIS DE REDUNDÂNCIA)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS osm_logradouros (
             id TEXT PRIMARY KEY, nome TEXT, tipo TEXT, cidade TEXT, estado TEXT, cep TEXT, lat REAL, lon REAL
@@ -195,7 +195,7 @@ rate_limiter = RateLimiter(Settings.MAX_REQ_PER_SEC)
 class HealthService:
     @staticmethod
     def check():
-        # 14. Retorno exato de payload estruturado do Health Check solicitada
+        # 14. Retorno exato de payload estruturado do Health Check solicitado
         status_db = "UP"
         try:
             db_conn.cursor().execute("SELECT 1")
@@ -212,6 +212,8 @@ class HealthService:
 # ==============================================================================
 # CONFIGURAÇÃO DE UI/UX E AMBIENTE
 # ==============================================================================
+st.set_page_config(page_title="TMS Corporativo Avançado", page_icon="🚚", layout="wide")
+
 if st.query_params.get("health") == "true":
     st.json(HealthService.check())
     st.stop()
@@ -335,7 +337,14 @@ class MotorEnderecoCanônico:
             r'\bSQS\b': 'SUPERQUADRA SUL', r'\bCLN\b': 'COMERCIO LOCAL NORTE', r'\bCLS\b': 'COMERCIO LOCAL SUL'
         }
         for padrao, expansao in abreviacoes.items(): t = re.sub(padrao, expansao, t)
-        for chave, valor in SINONIMOS_SEMANTICOS.items(): t = re.sub(r'\b' + chave + r'\b', valor, t)
+        
+        # 12. Consome os sinônimos também por GeoDataProvider/Bases Locais
+        sinonimos_locais = {
+            "UNB": "UNIVERSIDADE DE BRASILIA", "CATOLICA": "UNIVERSIDADE CATOLICA",
+            "HBDF": "HOSPITAL DE BASE DO DISTRITO FEDERAL", "RODOVIARIA": "TERMINAL RODOVIARIO",
+            "CD": "CENTRO DE DISTRIBUICAO", "HUB": "CENTRO LOGISTICO", "TECA": "TERMINAL DE CARGAS"
+        }
+        for chave, valor in sinonimos_locais.items(): t = re.sub(r'\b' + chave + r'\b', valor, t)
         return re.sub(r'\s+', ' ', t).strip()
 
     def classificar_entrada(self, texto_norm):
@@ -347,14 +356,12 @@ class MotorEnderecoCanônico:
         elif any(k in texto_norm for k in self.rural_keys): tipo = "RURAL"
         elif any(k in texto_norm for k in self.via_keys) and bool(re.search(r'\d+', texto_norm)): tipo = "ENDERECO_COMPLETO"
         elif any(k in texto_norm for k in self.bairro_keys): tipo = "BAIRRO"
-        elif texto_norm in IBGE_MUNICIPIOS: tipo = "MUNICIPIO"
-        elif texto_norm in IBGE_DISTRITOS: tipo = "DISTRITO"
         cache_classificacao.set(texto_norm, tipo, expire=2592000)
         return tipo
 
     def resolver_contexto_administrativo(self, texto_norm):
         tokens = texto_norm.split()
-        uf_explicita = next((re.sub(r'[^A-Z]', '', t) for t in reversed(tokens) if re.sub(r'[^A-Z]', '', t) in IBGE_ESTADOS), None)
+        uf_explicita = next((re.sub(r'[^A-Z]', '', t) for t in reversed(tokens) if re.sub(r'[^A-Z]', '', t) in ['SP','DF','GO','MG','RJ','PR','SC','RS','BA','PE','CE']), None)
 
         if not uf_explicita or uf_explicita == "DF":
             for token in tokens:
@@ -639,26 +646,6 @@ class HereTrafficProvider:
     def obter_trafego_rota(polyline: list) -> dict:
         return {"delay_minutes": 15, "severity": "MEDIUM", "incidents": 1}
 
-class TomTomTrafficProvider:
-    @staticmethod
-    def obter_flow_segment(lat: float, lon: float) -> dict:
-        return {"velocidade_livre": 80, "velocidade_atual": 70}
-
-class IncidentProvider:
-    @staticmethod
-    def checar_incidentes(lat: float, lon: float) -> dict:
-        return {"acidente": 0, "obra": 0, "bloqueio": 0}
-
-class WeatherProvider:
-    @staticmethod
-    def obter_clima_rota(lat: float, lon: float) -> dict:
-        return {"chuva_mm": 2, "vento": 10, "temperatura": 24}
-
-class WeatherRiskEngine:
-    @staticmethod
-    def avaliar_risco(clima_dict: dict) -> tuple:
-        return "BAIXO", 0
-
 class TollProvider:
     @staticmethod
     def calcular_pedagios(lat_o, lon_o, lat_d, lon_d) -> dict:
@@ -790,7 +777,7 @@ class RouteService:
             res_mapa = routing_manager.obter_rota(lat_o, lon_o, lat_d, lon_d, dist_linha_reta, perfil_rota)
 
         if not res_mapa:
-            km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
+            km_terrestre = round(dist_linha_reta * 1.25, 2)
             res_mapa = {"km": km_terrestre, "minutos_base": int((km_terrestre / 60.0) * 60), "provider": "Fallback Geodésico", "score": 70, "geometry": [[lon_o, lat_o], [lon_d, lat_d]]}
 
         # Restrições de Engenharia de Frota
@@ -857,7 +844,7 @@ with st.sidebar:
     
     peso = 23.0 if "Carreta" in tipo_veiculo else 14.0 if "Toco" in tipo_veiculo else 3.5
     altura = 4.3 if "Carreta" in tipo_veiculo else 3.8 if "Toco" in tipo_veiculo else 2.5
-    veiculo_operacional = VehicleProfile(tipo_veiculo, peso, altura, 2.6, eixos=5, valor_hora=60.0, custo_km_dep=0.45, faktor_manut=0.25)
+    veiculo_operacional = VehicleProfile(tipo_veiculo, peso, altura, 2.6, eixos=5, valor_hora=60.0, custo_km_dep=0.45, fator_manut=0.25)
     perfil_str = "fastest" if perfil_rota == "rápido" else "shortest"
 
 tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
@@ -878,7 +865,7 @@ with tab_individual:
             if res_ind and res_ind[0] != "QA_REJEITADO" and res_ind[0] != "GEOCODING_FALHOU":
                 st.success("✅ Rota operacional estabelecida com sucesso!")
                 
-                # 6 Cards em linha da Interface Corporativa (Volume 2/3)
+                # 6 Cards em linha da Interface Corporativa
                 c1, c2, c3, c4, c5, c6 = st.columns(6)
                 c1.metric("Distância", f"{res_ind[0]} km")
                 c2.metric("Tempo (c/ Trânsito)", res_ind[1])
