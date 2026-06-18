@@ -731,7 +731,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     BAYES_MULTIPLIERS = {
         "CEP": {"mun": 1.5, "uf": 1.2, "cep": 4.0, "bairro": 1.0, "numero": 1.0, "rua_peso": 0.2},
         "ENDERECO_COMPLETO": {"mun": 1.8, "uf": 1.3, "cep": 1.5, "bairro": 1.2, "numero": 2.5, "rua_peso": 1.5},
-        "POI": {"mun": 1.5, "uf": 1.2, "cep": 1.0, "bairro": 1.5, "numero": 1.0, "rua_peso": 2.0},
         "CONDOMINIO": {"mun": 1.8, "uf": 1.3, "cep": 1.2, "bairro": 1.5, "numero": 1.0, "rua_peso": 1.8},
         "DEFAULT": {"mun": 1.5, "uf": 1.2, "cep": 1.2, "bairro": 1.2, "numero": 1.2, "rua_peso": 0.8}
     }
@@ -874,7 +873,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     texto_cru = str(localidade).strip()
     if not texto_cru or texto_cru.lower() == 'nan': return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A", ["String Vazia"]
     
-    if match_coords = re.match(r'^\s*(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$', texto_cru):
+    if match_coords := re.match(r'^\s*(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$', texto_cru):
         lat_in, lon_in = float(match_coords.group(1)), float(match_coords.group(2))
         valido, lat_in, lon_in = validar_coordenada_brasil(lat_in, lon_in)
         if valido:
@@ -961,6 +960,12 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                     res_ibge = (item["lat"], item["lon"], endereco_ibge, "ALTISSIMA", 100, "", mun_nome, "BASE_IBGE_LOCAL", ["Centroide IBGE Municipal Resolvido Offline."])
                     cache_geo.set(cache_key, {"lat": res_ibge[0], "lon": res_ibge[1], "endereco": res_ibge[2], "confianca": res_ibge[3], "score_num": res_ibge[4], "distrito": res_ibge[5], "municipio": res_ibge[6], "fonte": res_ibge[7]}, expire=2592000)
                     return res_ibge
+
+    def disparar_apis_paralelas(tarefas):
+        resultados = []
+        for f in as_completed([st.session_state["executor_apis"].submit(func, *args, **kwargs) for func, args, kwargs in tarefas]):
+            if res := f.result(): resultados.extend(res)
+        return resultados
 
     if tipo_entrada == "POI" or tipo_entrada == "CONDOMINIO":
         candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Overpass_POIs, (semantica.normalizar(texto_cru),), {}), (API_TomTom, (endereco_canonico,), {})]))
@@ -1167,10 +1172,10 @@ with tab_individual:
             with st.spinner("Acionando motores de geocodificação e consenso..."):
                 res_ind = calcular_pipeline_logistico(orig_ind, dest_ind, perfil_rota="shortest")
                 
-            if res_ind and res_ind[0] != "QA_REJEITADO":
+            if res_ind and res_ind[0] != "QA_REJEITADO" and res_ind[0] != "GEOCODING_FALHOU":
                 st.success("✅ Rota estabelecida com sucesso!")
                 m_dist, m_time, m_score = st.columns(3)
-                m_dist.metric("Distância Viária", f"{res_ind[0]} km")
+                m_dist.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0])
                 m_time.metric("Tempo Estimado", res_ind[1])
                 score_g = round((0.35 * res_ind[8]) + (0.35 * res_ind[14]) + (0.30 * res_ind[6]), 2)
                 m_score.metric("Score Global de Qualidade", f"{score_g} / 100")
@@ -1284,6 +1289,8 @@ with tab_processamento:
                 barra_progresso = st.progress(0)
                 container_status = st.empty()
                 
+                st.session_state['logs_auditoria'] = []
+                
                 for f in as_completed(futuros):
                     par_id, res = f.result()
                     resultados_unicos[par_id] = res
@@ -1293,7 +1300,6 @@ with tab_processamento:
                     barra_progresso.progress(concluidos / len(pares_unicos))
                     
                 container_status.text("✨ Distribuindo resultados e gerando logs de auditoria...")
-                st.session_state['logs_auditoria'] = []
                 
                 for idx, origem, destino in mapeamento_linhas:
                     par = (origem, destino)
@@ -1393,7 +1399,7 @@ with tab_analytics:
         for api in ["GOOGLE_MAPS", "ARCGIS", "TOMTOM", "NOMINATIM", "PHOTON", "OVERPASS"]:
             dados = cache_api_health.get(api, {"hits": 0, "calls": 0, "falhas": 0, "tempo_total": 0.0})
             t_med = f"{round((dados['tempo_total'] / max(1, dados['calls'])) * 1000)} ms" if dados['calls'] > 0 else "N/A"
-            tx_err = f"{round((dados['falhas'] / max(1, dados['calls'])) * 100, 1)}%" if dados['calls'] > 0 else "0.0%"
+            tx_err = f"{round((dados['falhas'] / max(1, dados['calls'] + dados['falhas'])) * 100, 1)}%" if dados['calls'] > 0 else "0.0%"
             health_data.append({"Provedor": api, "Status": "Online" if dados["falhas"] == 0 else "Instável", "Latência Média": t_med, "Taxa de Erro": tx_err, "Chamadas": dados["calls"]})
         st.dataframe(pd.DataFrame(health_data), use_container_width=True)
     else:
