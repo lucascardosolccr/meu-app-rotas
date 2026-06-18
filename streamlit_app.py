@@ -98,7 +98,6 @@ SINONIMOS_SEMANTICOS = {
     "FILIAL": "BASE OPERACIONAL", "TECA": "TERMINAL DE CARGAS"
 }
 
-@st.custom_data
 def registrar_telemetria(fonte, sucesso, tempo_gasto):
     m = cache_api_health.get(fonte, {"hits": 0, "calls": 0, "falhas": 0, "tempo_total": 0.0})
     m["calls"] += 1
