@@ -33,6 +33,4 @@ polyline>=2.0.2
 sentence-transformers>=5.0.0
 torch>=2.7.0
 
-Resolução do erro
 
-prometheus_client
