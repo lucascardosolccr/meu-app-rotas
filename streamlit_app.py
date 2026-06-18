@@ -20,14 +20,14 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ==============================================================================
-# 📂 [CAMADA: UI/CONFIG] CONFIGURAÇÃO DE UI/UX E AMBIENTE
+# CONFIGURAÇÃO DE UI/UX E AMBIENTE
 # ==============================================================================
 st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="wide")
 
 TOMTOM_API_KEY = "" # Insira sua credencial TomTom Logistics aqui
 
 # ==============================================================================
-# 📂 [CAMADA: CACHE/PERSISTENCE] PERSISTÊNCIA EM DISCO E HIGIENIZAÇÃO (GARBAGE COLLECTION)
+# 🧠 PERSISTÊNCIA EM DISCO E HIGIENIZAÇÃO DE AMBIENTE (GARBAGE COLLECTION)
 # ==============================================================================
 cache_classificacao = Cache("./cache_classificacao")
 cache_fuzzy = Cache("./cache_fuzzy")
@@ -68,7 +68,7 @@ session.mount("http://", adapter)
 CACHE_IBGE_PATH = "municipios_ibge.pkl"
 
 # ==============================================================================
-# 📂 [CAMADA: SERVICES/INFRA] INFRAESTRUTURA DE CONCORRÊNCIA E FILAS (FIM DO EFEITO COMBOIO)
+# 🎛️ INFRAESTRUTURA DE CONCORRÊNCIA E FILAS (FIM DO EFEITO COMBOIO)
 # ==============================================================================
 WORKERS_DISPONIVEIS = 8
 
@@ -82,7 +82,7 @@ if "executor_apis" not in st.session_state:
     st.session_state["executor_apis"] = ThreadPoolExecutor(max_workers=16)
 
 # ==============================================================================
-# 📂 [CAMADA: MODELS/DATA] DADOS GLOBAIS THREAD-SAFE, HUB B2B E EXPANSÃO SEMÂNTICA
+# 🎛️ DADOS GLOBAIS THREAD-SAFE, HUB B2B E EXPANSÃO SEMÂNTICA
 # ==============================================================================
 BASE_POIS_LOGISTICOS = {
     "CD MAGAZINE LUIZA CAXIAS": {"lat": -22.7853, "lon": -43.3121, "endereco": "Centro de Distribuição Magazine Luiza, Duque de Caxias, RJ, BRASIL", "municipio": "DUQUE DE CAXIAS", "uf": "RJ"},
@@ -184,7 +184,7 @@ BOUNDING_BOXES_UF = {
 }
 
 # ==============================================================================
-# 📂 [CAMADA: GEOCODING/PARSER] ENGINE DE RESOLUÇÃO UNIVERSAL E ENDEREÇAMENTO CANÔNICO
+# 🧹 ENGINE DE RESOLUÇÃO UNIVERSAL E ENDEREÇAMENTO CANÔNICO
 # ==============================================================================
 class ParserGeograficoBR:
     @staticmethod
@@ -374,7 +374,7 @@ class MotorEnderecoCanônico:
 semantica = MotorEnderecoCanônico()
 
 # ==============================================================================
-# 📂 [CAMADA: GEOCODING/VALIDATORS] VALIDADOR PRÉ-GEOCODING E LÓGICA GEODÉSICA
+# 🧮 VALIDADOR PRÉ-GEOCODING E LÓGICA GEODÉSICA
 # ==============================================================================
 def auditoria_pre_geocoding(texto_cru, contexto, tipo_entrada):
     if len(texto_cru) < 4: return "INSUFICIENTE"
@@ -496,7 +496,7 @@ def validar_consistencia_municipal(candidato, mun_inf):
     return False
 
 # ==============================================================================
-# 📂 [CAMADA: GEOCODING/ONLINE] MÓDULOS DE GEOCODIFICAÇÃO COM TELEMETRIA
+# 🗺️ MÓDULOS DE GEOCODIFICAÇÃO COM TELEMETRIA (CONTRATO LISTA TOP-K)
 # ==============================================================================
 def API_Google_Geocoding_Scraper(query):
     start_t = time.time()
@@ -652,7 +652,7 @@ def API_Overpass_POIs(texto_norm):
     return None
 
 # ==============================================================================
-# 📂 [CAMADA: GEOCODING/CONSENSUS] MOTOR DE CONSENSO PROBABILÍSTICO (DBSCAN + XAI)
+# 🧠 MOTOR DE CONSENSO PROBABILÍSTICO BAYESIANO E CLUSTERING DBSCAN ESFÉRICO
 # ==============================================================================
 def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     candidatos_validos = []
@@ -694,20 +694,19 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     else: raio_cluster_km = 10.0
         
     coords_matriz = np.array([[c["lat"], c["lon"]] for c in candidatos_validos])
-    valid_labels_dbscan = []
     if len(coords_matriz) >= 2:
         coords_rad = np.radians(coords_matriz)
         eps_angular = raio_cluster_km / 6371.0
         db_model = DBSCAN(eps=eps_angular, min_samples=2, metric='haversine').fit(coords_rad)
         labels = db_model.labels_
-        valid_labels_dbscan = [l for l in labels if l != -1]
-        if valid_labels_dbscan:
-            contagem_clusters = collections.Counter(valid_labels_dbscan).most_common(2)
+        valid_labels = [l for l in labels if l != -1]
+        if valid_labels:
+            contagem_clusters = collections.Counter(valid_labels).most_common(2)
             if len(contagem_clusters) > 1 and contagem_clusters[0][1] == contagem_clusters[1][1]:
                 c1_amb = candidatos_validos[labels.tolist().index(contagem_clusters[0][0])]
                 c2_amb = candidatos_validos[labels.tolist().index(contagem_clusters[1][0])]
                 motivo_amb = f"AMBÍGUO: Empate de consenso entre {c1_amb.get('cidade','')}/{c1_amb.get('estado','')} e {c2_amb.get('cidade','')}/{c2_amb.get('estado','')}"
-                return 0.0, 0.0, texto_cru, "AMBIGUA", 0, "", "", "N/A", {"1_entrada_original": texto_cru, "erro_aborto": motivo_amb}
+                return 0.0, 0.0, texto_cru, "AMBIGUA", 0, "", "", "N/A", [motivo_amb]
                 
             maior_cluster_label = contagem_clusters[0][0]
             candidatos_validos = [candidatos_validos[idx] for idx, label in enumerate(labels) if label == maior_cluster_label]
@@ -837,15 +836,26 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     score_limitado = min(score_consenso, score_completude)
     if m.get("cep") and score_limitado < 100: score_limitado = min(score_limitado + 10, 100 if tipo_entrada == "CEP" else 95)
 
+    explicacoes_humanas = []
     xd = vencedor["xai_data"]
+    if len(xd["apis"]) >= 2:
+        explicacoes_humanas.append(f"Consenso espacial estabelecido via Ensemble Multi-API ({' + '.join(xd['apis'])}).")
+    else:
+        explicacoes_humanas.append(f"Inferência baseada unicamente na resposta isolada da fonte {vencedor['fonte']}.")
+        
+    if xd["mun"]: explicacoes_humanas.append("Município validado na malha de referência oficial IBGE.")
+    if xd["uf"]: explicacoes_humanas.append("Correspondência administrativa de Estado confirmada.")
+    if xd["cep"]: explicacoes_humanas.append("Código Postal cruzado e confirmado por cascades.")
+    if xd["num"]: explicacoes_humanas.append("Assinatura de número predial reconhecida na porta do cliente.")
+    if xd["fuzz"] >= 80.0: explicacoes_humanas.append(f"Similaridade léxica de logradouro em {xd['fuzz']}% de aprovação.")
+
     match_logr = fuzz.token_set_ratio(texto_cru.upper(), m.get("logradouro", "").upper())
     match_bairro = fuzz.token_set_ratio(dist_inf, m.get("bairro", "").upper()) if dist_inf else 100
     match_cep = 100 if input_usuario.get("cep") and m.get("cep") and input_usuario["cep"] in m.get("cep", "").replace("-", "") else 0 if input_usuario.get("cep") else 100
     
-    alerta_fantasma = False
     if (match_logr * 0.5) + (match_bairro * 0.3) + (match_cep * 0.2) < 65.0:
         confianca = "REVISAO_MANUAL"
-        alerta_fantasma = True
+        explicacoes_humanas.append("⚠️ Alerta Anti-Fantasma: Integridade semântica final inadequada. Possível interpolação arbitrária.")
         score_limitado = min(score_limitado, 49)
     else:
         if tipo_entrada in ["ENDERECO_COMPLETO", "CEP"] and not vencedor.get("logradouro"): confianca = "MUNICIPAL"
@@ -853,38 +863,14 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
 
     rua_f = m["logradouro"] if m["logradouro"] else texto_cru.upper()
     endereco_f = ", ".join([c for c in [rua_f, m["bairro"], m["cidade"], m["estado"]] if c.strip()]) + ", BRASIL"
-    
-    dossie_xai = {
-        "1_entrada_original": texto_cru,
-        "2_endereco_canonico": endereco_f,
-        "3_tipo_detectado": tipo_entrada,
-        "4_apis_consultadas": list(set([c.get("fonte", "N/A") for c in candidatos_para_avaliacao])),
-        "5_respostas_individuais": [{"fonte": c.get("fonte"), "lat": c.get("lat"), "lon": c.get("lon"), "score": round(c.get("score_final", c.get("score_base", 0)), 2)} for c in candidatos_para_avaliacao[:5]],
-        "6_distancia_candidatos": "Calculada dinamicamente via Haversine (Radianos) na triagem do DBSCAN.",
-        "7_resultado_dbscan": f"Cluster espacial majoritário detectado ({len(valid_labels_dbscan)} concordantes densos)." if len(xd["apis"]) >= 2 else "Inferência isolada. Outliers rejeitados como ruído (-1).",
-        "8_criterio_escolha": "Fusão Probabilística Bayesiana de Vizinhança (Ensemble Independent).",
-        "9_evidencias_usadas": {"cep_cruzado": xd["cep"], "uf_cruzada": xd["uf"], "municipio_cruzado": xd["mun"], "similaridade_fuzzy": f"{xd['fuzz']}%"},
-        "10_score_final": f"{round(score_limitado, 2)} / 100",
-        "11_motivos_descarte": "Violação de Bounding Box, rejeição em matriz IBGE ou ruído espacial do DBSCAN.",
-        "12_reverse_geocoding": ", ".join([c for c in [m.get("logradouro", ""), m.get("bairro", ""), m.get("cidade", ""), m.get("estado", "")] if c.strip()]),
-        "13_fonte_escolhida": vencedor.get('fonte', 'N/A'),
-        "14_grau_confianca": confianca + (" (ALERTA FANTASMA ATIVADO)" if alerta_fantasma else ""),
-        "explicacoes_didaticas": {
-            "Fuzzy Matching": "O algoritmo compara o endereço digitado com a resposta das APIs tolerando erros e abreviações (ex: 'Rua Flores' e 'R. das Flores'). Uma alta porcentagem eleva a confiança de negócio.",
-            "DBSCAN": "Inteligência Artificial que desenha círculos no mapa aglomerando coordenadas próximas e expurgando as muito distantes, garantindo que aberrações geográficas sejam ignoradas.",
-            "Vincenty": "Fórmula trigonométrica rigorosa que calcula a distância acompanhando a curvatura real da Terra, essencial para evitar falsos positivos de distância no Brasil.",
-            "Ensemble Bayesiano": "Matemática de risco. Quando múltiplas APIs competidoras apontam para o exato mesmo lugar, o sistema cruza essas probabilidades gerando certeza estatística."
-        }
-    }
-
-    return vencedor["lat"], vencedor["lon"], endereco_f, confianca, score_limitado, m["distrito"], m["municipio"], vencedor["fonte"], dossie_xai
+    return vencedor["lat"], vencedor["lon"], endereco_f, confianca, score_limitado, m["distrito"], m["municipio"], vencedor["fonte"], explicacoes_humanas
 
 # ==============================================================================
-# 📂 [CAMADA: SERVICES/ORQUESTRADOR] ORQUESTRADOR EM CASCATA HIERÁRQUICA
+# 🎚️ ORQUESTRADOR EM CASCATA HIERÁRQUICA E OFFLINE-FIRST
 # ==============================================================================
 def obter_coordenadas_e_endereco_oficial(localidade):
     texto_cru = str(localidade).strip()
-    if not texto_cru or texto_cru.lower() == 'nan': return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A", {"1_entrada_original": texto_cru, "erro_aborto": "String Vazia"}
+    if not texto_cru or texto_cru.lower() == 'nan': return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A", ["String Vazia"]
     
     if match_coords := re.match(r'^\s*(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$', texto_cru):
         lat_in, lon_in = float(match_coords.group(1)), float(match_coords.group(2))
@@ -892,17 +878,17 @@ def obter_coordenadas_e_endereco_oficial(localidade):
         if valido:
             m = executar_reverse_geocoding_multimotor(lat_in, lon_in)
             end_f = ", ".join([c for c in [m.get("logradouro", ""), m.get("bairro", ""), m.get("cidade", ""), m.get("estado", "")] if c.strip()]) + ", BRASIL"
-            return lat_in, lon_in, end_f, "ABSOLUTA", 100, m.get("bairro", ""), m.get("cidade", ""), "COORDENADA_EXATA", {"1_entrada_original": texto_cru, "14_grau_confianca": "ABSOLUTA", "motivo": "Coordenada Numérica Exata"}
+            return lat_in, lon_in, end_f, "ABSOLUTA", 100, m.get("bairro", ""), m.get("cidade", ""), "COORDENADA_EXATA", ["Entrada direta via Coordenadas Numéricas."]
 
     for poi_key, poi_data in BASE_POIS_LOGISTICOS.items():
         if poi_key in texto_cru.upper():
-            return poi_data["lat"], poi_data["lon"], poi_data["endereco"], "ABSOLUTA", 100, "", poi_data["municipio"], "BASE_POIS_NACIONAIS", {"1_entrada_original": texto_cru, "14_grau_confianca": "ABSOLUTA", "motivo": "Hub Logístico B2B (Ground Truth)"}
+            return poi_data["lat"], poi_data["lon"], poi_data["endereco"], "ABSOLUTA", 100, "", poi_data["municipio"], "BASE_POIS_NACIONAIS", ["Resolvido via Base Nacional de POIs Logísticos Ground Truth."]
 
     chave_aprendizado_coord = texto_cru.upper()
     if chave_aprendizado_coord in cache_aprendizado:
         dado_salvo = cache_aprendizado[chave_aprendizado_coord]
         if isinstance(dado_salvo, dict) and "lat" in dado_salvo and "lon" in dado_salvo:
-            return dado_salvo["lat"], dado_salvo["lon"], dado_salvo.get("endereco", texto_cru.upper()), "ALTISSIMA", 100, dado_salvo.get("distrito", ""), dado_salvo.get("municipio", ""), "APRENDIZADO_LOCAL", {"1_entrada_original": texto_cru, "motivo": "Cache de Aprendizado Contínuo"}
+            return dado_salvo["lat"], dado_salvo["lon"], dado_salvo.get("endereco", texto_cru.upper()), "ALTISSIMA", 100, dado_salvo.get("distrito", ""), dado_salvo.get("municipio", ""), "APRENDIZADO_LOCAL", ["Ponto quente extraído do cache local enriquecido."]
 
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_cru)
     ctx = semantica.resolver_contexto_administrativo(texto_cru.upper())
@@ -911,7 +897,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     cache_key = hashlib.md5(f"{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
-        return c["lat"], c["lon"], c["endereco"], c["confianca"], c["score_num"], c["distrito"], c["municipio"], c["fonte"], {"1_entrada_original": texto_cru, "motivo": "Cache Geográfico O(1) L2"}
+        return c["lat"], c["lon"], c["endereco"], c["confianca"], c["score_num"], c["distrito"], c["municipio"], c["fonte"], ["Cache L2 Hit."]
 
     rua_suja = parsed_comp["resto"]
     for loc in [ctx.get("municipio", ""), ctx.get("distrito", ""), ctx.get("uf", ""), "BRASIL", "DF"]:
@@ -929,13 +915,13 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     }
 
     if auditoria_pre_geocoding(texto_cru, contexto_estruturado, tipo_entrada) == "INSUFICIENTE":
-        return 0.0, 0.0, texto_cru, "INSUFICIENTE", 0, "", "", "PRE_FLIGHT", {"1_entrada_original": texto_cru, "erro_aborto": "Falha no Pre-Flight (Endereço Insuficiente)"}
+        return 0.0, 0.0, texto_cru, "INSUFICIENTE", 0, "", "", "PRE_FLIGHT", ["Abortado pelo validador pré-geocoding: informações insuficientes."]
 
     if match_offline := obedience_base_local(contexto_estruturado):
-        return match_offline["lat"], match_offline["lon"], match_offline["endereco"], "ALTISSIMA", 100, match_offline.get("distrito", ""), match_offline.get("municipio", ""), "BASE_NACIONAL_OFFLINE", {"1_entrada_original": texto_cru, "motivo": "Resolução Estrita Base Local"}
+        return match_offline["lat"], match_offline["lon"], match_offline["endereco"], "ALTISSIMA", 100, match_offline.get("distrito", ""), match_offline.get("municipio", ""), "BASE_NACIONAL_OFFLINE", ["Ponto resolvido via CNEFE/Bases Locais Estáticas."]
 
     if not ctx.get("municipio") and tipo_entrada not in ["POI", "CEP"]:
-        return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", {"1_entrada_original": texto_cru, "erro_aborto": "Contexto Municipal não decodificado"}
+        return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Inviável determinar contexto municipal estruturado."]
 
     candidatos_validos = []
 
@@ -951,8 +937,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                 
                 val_c, lat_corrigida_c, lon_corrigida_c = validar_coordenada_brasil(lat_c, lon_c)
                 if lat_c != 0.0 and lon_c != 0.0 and val_c:
-                    xai_cep = {"1_entrada_original": texto_cru, "14_grau_confianca": "ALTISSIMA", "motivo": "Resolução Direta por Cascata Postal BrasilAPI"}
-                    res_final = (lat_corrigida_c, lon_corrigida_c, addr_c, "ALTISSIMA", 100, bair, loca, "BrasilAPI/OSM Postal", xai_cep)
+                    res_final = (lat_corrigida_c, lon_corrigida_c, addr_c, "ALTISSIMA", 100, bair, loca, "BrasilAPI/OSM Postal", ["Cascata Postal Direta."])
                     cache_geo.set(cache_key, {"lat": lat_corrigida_c, "lon": lon_corrigida_c, "endereco": addr_c, "confianca": "ALTISSIMA", "score_num": 100, "distrito": bair, "municipio": loca, "fonte": "BrasilAPI/OSM Postal"}, expire=2592000)
                     return res_final
                 
@@ -961,8 +946,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                     if isinstance(res_arc, list): res_arc = res_arc[0]
                     val_arc, lat_corrigida_arc, lon_corrigida_arc = validar_coordenada_brasil(res_arc["lat"], res_arc["lon"])
                     if val_arc:
-                        xai_cep_arc = {"1_entrada_original": texto_cru, "14_grau_confianca": "ALTISSIMA", "motivo": "Cascata Postal + Confirmação Geodésica ArcGIS"}
-                        res_final = (lat_corrigida_arc, lon_corrigida_arc, addr_c, "ALTISSIMA", 100, bair, loca, "ViaCEP/ArcGIS", xai_cep_arc)
+                        res_final = (lat_corrigida_arc, lon_corrigida_arc, addr_c, "ALTISSIMA", 100, bair, loca, "ViaCEP/ArcGIS", ["Cascata Postal Complementada por ArcGIS."])
                         cache_geo.set(cache_key, {"lat": lat_corrigida_arc, "lon": lon_corrigida_arc, "endereco": addr_c, "confianca": "ALTISSIMA", "score_num": 100, "distrito": bair, "municipio": loca, "fonte": "ViaCEP/ArcGIS"}, expire=2592000)
                         return res_final
 
@@ -972,8 +956,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             for item in IBGE_MUNICIPIOS[mun_nome]:
                 if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0 and item.get("lon", 0.0) != 0.0:
                     endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
-                    xai_mun = {"1_entrada_original": texto_cru, "14_grau_confianca": "ALTISSIMA", "motivo": "Centróide Municipal Estrito IBGE Base."}
-                    res_ibge = (item["lat"], item["lon"], endereco_ibge, "ALTISSIMA", 100, "", mun_nome, "BASE_IBGE_LOCAL", xai_mun)
+                    res_ibge = (item["lat"], item["lon"], endereco_ibge, "ALTISSIMA", 100, "", mun_nome, "BASE_IBGE_LOCAL", ["Centroide IBGE Municipal Resolvido Offline."])
                     cache_geo.set(cache_key, {"lat": res_ibge[0], "lon": res_ibge[1], "endereco": res_ibge[2], "confianca": res_ibge[3], "score_num": res_ibge[4], "distrito": res_ibge[5], "municipio": res_ibge[6], "fonte": res_ibge[7]}, expire=2592000)
                     return res_ibge
 
@@ -1004,12 +987,14 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 
     if res_final:
         cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
+        if res_final[4] >= 95 and res_final[3] == "ALTISSIMA":
+            cache_aprendizado_auto.set(chave_auto, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "distrito": res_final[5], "municipio": res_final[6], "metadata": {"evidencias_xai": res_final[8] if len(res_final) > 8 else []}}, expire=7776000)
         return res_final
         
-    return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", {"1_entrada_original": texto_cru, "erro_aborto": "Falha Absoluta Geocoding B2B"}
+    return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Falha Geográfica Absoluta por falta de candidatos."]
 
 # ==============================================================================
-# 📂 [CAMADA: ROUTING] MOTOR DE ROTEAMENTO E ARBITRAGEM DE DISTÂNCIA
+# 🚀 MOTOR DE ROTEAMENTO (ARBITRAGEM DE PROVEDORES E PERFIS DE DISTÂNCIA)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
     cache_key = f"{origem_raw}|{destino_raw}|{usar_coordenadas}"
@@ -1135,7 +1120,7 @@ def embrulhar_task_paralela(item):
     except Exception: return par_id, None
 
 # ==============================================================================
-# 📂 [CAMADA: UI/FRONTEND] INTERFACE STREAMLIT COM ENGINE DE SIDEBAR E ABAS
+# INTERFACE STREAMLIT COM ENGINE DE SIDEBAR MANUAL E ABAS DE AUDITORIA
 # ==============================================================================
 st.markdown("""
 <div style="background-color:#1E1E1E; padding:20px; border-radius:10px; margin-bottom: 25px; border-left: 5px solid #00FF7F;">
@@ -1172,7 +1157,7 @@ with st.sidebar:
         st.markdown("Fórmula Ponderada: 35% Origem + 35% Destino + 30% Qualidade da Rota Viária.")
 
 tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
-    "📍 Geocodificação Rápida", "⚙️ Processamento em Lote", "📊 Analytics & Saúde", "🕵️ Aba de Auditoria (XAI)"
+    "📍 Geocodificação Rápida", "⚙️ Processamento em Lote", "📊 Analytics & Saúde", "🕵️ Aba de Auditoria"
 ])
 
 with tab_individual:
@@ -1194,59 +1179,47 @@ with tab_individual:
                 score_g = round((0.35 * res_ind[8]) + (0.35 * res_ind[14]) + (0.30 * res_ind[6]), 2)
                 m_score.metric("Score Global de Qualidade", f"{score_g} / 100")
                 
-                lat_orig, lon_orig = res_ind[19], res_ind[20]
-                lat_dest, lon_dest = res_ind[21], res_ind[22]
+                lat_c, lon_c = (res_ind[19] + res_ind[21]) / 2, (res_ind[20] + res_ind[22]) / 2
                 
-                if not all([lat_orig, lon_orig, lat_dest, lon_dest]) or lat_orig == 0.0 or lat_dest == 0.0:
-                    st.warning("⚠️ O mapa não pôde ser renderizado com precisão pois uma das coordenadas é nula (0.0). Exibindo centro do país.")
-                    lat_c, lon_c, zoom_lvl = -15.793889, -47.882778, 4
-                    layers_to_render = []
-                else:
-                    lat_c, lon_c, zoom_lvl = (lat_orig + lat_dest) / 2, (lon_orig + lon_dest) / 2, 4
-                    
-                    arc_layer = pdk.Layer(
-                        "ArcLayer",
-                        data=[{"origem": [lon_orig, lat_orig], "destino": [lon_dest, lat_dest]}],
-                        get_source_position="origem",
-                        get_target_position="destino",
-                        get_source_color=[0, 255, 128, 160],
-                        get_target_color=[255, 0, 0, 160],
-                        width_scale=0.04,
-                        width_min_pixels=3,
-                        width_max_pixels=15,
-                    )
-                    
-                    scatter_layer = pdk.Layer(
-                        "ScatterplotLayer",
-                        data=[{"pos": [lon_orig, lat_orig], "color": [0, 255, 128]}, {"pos": [lon_dest, lat_dest], "color": [255, 0, 0]}],
-                        get_position="pos",
-                        get_fill_color="color",
-                        get_radius=800,
-                    )
-                    
-                    coverage_layer = pdk.Layer(
-                        "ScatterplotLayer",
-                        data=[
-                            {"pos": [lon_dest, lat_dest], "radius": 50000, "color": [255, 165, 0, 80]},
-                            {"pos": [lon_dest, lat_dest], "radius": 100000, "color": [0, 191, 255, 60]},
-                            {"pos": [lon_dest, lat_dest], "radius": 200000, "color": [138, 43, 226, 40]}
-                        ],
-                        get_position="pos",
-                        get_radius="radius",
-                        stroked=True,
-                        filled=True,
-                        get_fill_color="color",
-                        get_line_color=[255, 255, 255, 150],
-                        line_width_min_pixels=1
-                    )
-                    layers_to_render = [coverage_layer, arc_layer, scatter_layer]
+                arc_layer = pdk.Layer(
+                    "ArcLayer",
+                    data=[{"origem": [res_ind[20], res_ind[19]], "destino": [res_ind[22], res_ind[21]]}],
+                    get_source_position="origem",
+                    get_target_position="destino",
+                    get_source_color=[0, 255, 128, 160],
+                    get_target_color=[255, 0, 0, 160],
+                    width_scale=0.04,
+                    width_min_pixels=3,
+                    width_max_pixels=15,
+                )
                 
-                st.pydeck_chart(pdk.Deck(layers=layers_to_render, initial_view_state=pdk.ViewState(latitude=lat_c, longitude=lon_c, zoom=zoom_lvl, pitch=45), map_style="mapbox://styles/mapbox/dark-v10"))
+                scatter_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    data=[{"pos": [res_ind[20], res_ind[19]], "color": [0, 255, 128]}, {"pos": [res_ind[22], res_ind[21]], "color": [255, 0, 0]}],
+                    get_position="pos",
+                    get_fill_color="color",
+                    get_radius=800,
+                )
+                
+                coverage_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    data=[
+                        {"pos": [res_ind[22], res_ind[21]], "radius": 50000, "color": [255, 165, 0, 80]},
+                        {"pos": [res_ind[22], res_ind[21]], "radius": 100000, "color": [0, 191, 255, 60]},
+                        {"pos": [res_ind[22], res_ind[21]], "radius": 200000, "color": [138, 43, 226, 40]}
+                    ],
+                    get_position="pos",
+                    get_radius="radius",
+                    stroked=True,
+                    filled=True,
+                    get_fill_color="color",
+                    get_line_color=[255, 255, 255, 150],
+                    line_width_min_pixels=1
+                )
+                
+                st.pydeck_chart(pdk.Deck(layers=[coverage_layer, arc_layer, scatter_layer], initial_view_state=pdk.ViewState(latitude=lat_c, longitude=lon_c, zoom=4, pitch=45), map_style="mapbox://styles/mapbox/dark-v10"))
                 st.info(f"**Origem fixada por:** {res_ind[11]} | **Destino fixada por:** {res_ind[17]} | **Motor da Rota:** {res_ind[5]}")
                 st.markdown(f"[🔗 Abrir Rota no Google Maps]({res_ind[2]})")
-                
-                if len(res_ind) >= 28:
-                    st.session_state['logs_auditoria'] = [res_ind[26], res_ind[27]]
             else:
                 st.error("Falha na validação de consistência geodésica.")
         else:
@@ -1351,9 +1324,15 @@ with tab_processamento:
                         df.at[idx, 'Score Final Global'] = score_global
                         df.at[idx, 'Status da Rota'] = "Excelente" if score_global >= 90 else "Boa" if score_global >= 80 else "Aceitável" if score_global >= 70 else "Revisar"
                         
-                        if len(res) >= 28:
-                            st.session_state['logs_auditoria'].append(res[26])
-                            st.session_state['logs_auditoria'].append(res[27])
+                        st.session_state['logs_auditoria'].append({
+                            "Endereco Informado": origem, "Endereco Canonico": res[12],
+                            "Google Lat/Lon": f"{res[19]}, {res[20]}" if "GOOGLE" in str(res[11]) else "Mapeado no Consenso",
+                            "ArcGIS Lat/Lon": f"{res[19]}, {res[20]}" if "ARCGIS" in str(res[11]) else "Mapeado no Consenso",
+                            "Nominatim Lat/Lon": f"{res[19]}, {res[20]}" if "NOMINATIM" in str(res[11]) else "Mapeado no Consenso",
+                            "Photon Lat/Lon": f"{res[19]}, {res[20]}" if "PHOTON" in str(res[11]) else "Mapeado no Consenso",
+                            "TomTom Lat/Lon": f"{res[19]}, {res[20]}" if "TOMTOM" in str(res[11]) else "Mapeado no Consenso",
+                            "Vencedor": res[11], "Score": res[8], "XAI Explicabilidade": " | ".join(res[26]) if len(res) > 26 else "N/A"
+                        })
                     else:
                         df.at[idx, 'Status da Rota'] = "Erro de Processamento"
 
@@ -1434,13 +1413,9 @@ with tab_analytics:
         st.caption("Nenhum registro de lote persistido na base histórica até o momento.")
 
 with tab_auditoria:
-    st.markdown("### 🕵️ Dossiê de Auditoria Viária e Espacial (XAI)")
+    st.markdown("### 🕵️ Dossiê de Auditoria Viária e Espacial")
     if 'logs_auditoria' in st.session_state and st.session_state['logs_auditoria']:
         st.write("Abaixo consta a árvore de decisões explicáveis tomada pelo motor de consenso ponderado:")
-        for idx, report in enumerate(st.session_state['logs_auditoria']):
-            if report and isinstance(report, dict):
-                titulo = report.get('1_entrada_original', report.get('erro_aborto', f'Log Estrutural {idx+1}'))
-                with st.expander(f"🔎 Relatório Técnico XAI: {titulo}"):
-                    st.json(report)
+        st.dataframe(pd.DataFrame(st.session_state['logs_auditoria']), use_container_width=True)
     else:
         st.info("Nenhum registro de auditoria gerado. Inicie o processamento na primeira aba para popular este painel.")
