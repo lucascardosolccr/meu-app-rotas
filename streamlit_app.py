@@ -195,7 +195,6 @@ rate_limiter = RateLimiter(Settings.MAX_REQ_PER_SEC)
 class HealthService:
     @staticmethod
     def check():
-        # 14. Retorno exato de payload estruturado do Health Check solicitado
         status_db = "UP"
         try:
             db_conn.cursor().execute("SELECT 1")
@@ -212,8 +211,6 @@ class HealthService:
 # ==============================================================================
 # CONFIGURAÇÃO DE UI/UX E AMBIENTE
 # ==============================================================================
-st.set_page_config(page_title="TMS Corporativo Avançado", page_icon="🚚", layout="wide")
-
 if st.query_params.get("health") == "true":
     st.json(HealthService.check())
     st.stop()
@@ -257,7 +254,87 @@ if "executor_apis" not in st.session_state:
     st.session_state["executor_apis"] = ThreadPoolExecutor(max_workers=16)
 
 # ==============================================================================
-# 🎛️ COGNITIVE SEMANTIC PARSER & EXPANSÃO TEXTUAL
+# 🎛️ DADOS GLOBAIS THREAD-SAFE, HUB B2B E EXPANSÃO SEMÂNTICA
+# ==============================================================================
+BASE_POIS_LOGISTICOS = {
+    "CD MAGAZINE LUIZA CAXIAS": {"lat": -22.7853, "lon": -43.3121, "endereco": "Centro de Distribuição Magazine Luiza, Duque de Caxias, RJ, BRASIL", "municipio": "DUQUE DE CAXIAS", "uf": "RJ"},
+    "CD MERCADO LIVRE CAJAMAR": {"lat": -23.3541, "lon": -46.8852, "endereco": "Centro de Distribuição Mercado Livre, Cajamar, SP, BRASIL", "municipio": "CAJAMAR", "uf": "SP"},
+    "CD AMAZON CAJAMAR": {"lat": -23.3600, "lon": -46.8900, "endereco": "Centro de Distribuição Amazon, Cajamar, SP, BRASIL", "municipio": "CAJAMAR", "uf": "SP"}
+}
+
+SINONIMOS_SEMANTICOS = {
+    "UNB": "UNIVERSIDADE DE BRASILIA", "CATOLICA": "UNIVERSIDADE CATOLICA",
+    "HBDF": "HOSPITAL DE BASE DO DISTRITO FEDERAL", "RODOVIARIA": "TERMINAL RODOVIARIO",
+    "CD": "CENTRO DE DISTRIBUICAO", "HUB": "CENTRO LOGISTICO", "TECA": "TERMINAL DE CARGAS"
+}
+
+BOUNDING_BOXES_UF = {
+    "DF": {"lat_min": -16.05, "lat_max": -15.50, "lon_min": -48.30, "lon_max": -47.30},
+    "SP": {"lat_min": -25.50, "lat_max": -19.50, "lon_min": -53.50, "lon_max": -44.00},
+    "GO": {"lat_min": -19.50, "lat_max": -12.40, "lon_min": -53.30, "lon_max": -45.90},
+}
+
+@st.cache_data
+def carregar_dados_ibge():
+    if os.path.exists(CACHE_IBGE_PATH):
+        if time.time() - os.path.getmtime(CACHE_IBGE_PATH) > (30 * 86400):
+            os.remove(CACHE_IBGE_PATH)
+        else:
+            try:
+                with open(CACHE_IBGE_PATH, "rb") as f:
+                    d = pickle.load(f)
+                    return d.get("municipios", {}), d.get("estados", {}), d.get("distritos", {}), list(d.get("municipios", {}).keys()) + list(d.get("distritos", {}).keys())
+            except Exception as e: 
+                ErrorManager.registrar("Carregar_IBGE_Cache", e)
+
+    base_mun, base_est, base_dist = {}, {}, {}
+    try:
+        r_est = session.get("https://servicodados.ibge.gov.br/api/v1/localidades/estados", timeout=8)
+        if r_est.status_code == 200:
+            for est in r_est.json():
+                base_est[est["sigla"]] = unidecode(est["nome"]).upper()
+                
+        r_mun = session.get("https://servicodados.ibge.gov.br/api/v1/localidades/municipios", timeout=12)
+        if r_mun.status_code == 200:
+            for mun in r_mun.json():
+                nome_norm = unidecode(mun["nome"]).upper().strip()
+                uf_sigla = mun["microrregiao"]["mesorregiao"]["UF"]["sigla"].upper()
+                if nome_norm not in base_mun: base_mun[nome_norm] = []
+                
+                base_mun[nome_norm].append({
+                    "uf": uf_sigla, 
+                    "municipio": nome_norm,
+                    "lat": mun.get("lat", 0.0), 
+                    "lon": mun.get("lon", 0.0)
+                })
+                
+        r_dist = session.get("https://servicodados.ibge.gov.br/api/v1/localidades/distritos", timeout=12)
+        if r_dist.status_code == 200:
+            for dist in r_dist.json():
+                nome_dist = unidecode(dist["nome"]).upper().strip()
+                nome_muni = unidecode(dist["municipio"]["nome"]).upper().strip()
+                uf_dist = dist["municipio"]["microrregiao"]["mesorregiao"]["UF"]["sigla"].upper()
+                
+                if nome_dist not in base_dist: base_dist[nome_dist] = []
+                base_dist[nome_dist].append({
+                    "uf": uf_dist, 
+                    "municipio": nome_muni,
+                    "lat": dist.get("lat", 0.0), 
+                    "lon": dist.get("lon", 0.0)
+                })
+
+            with open(CACHE_IBGE_PATH, "wb") as f:
+                pickle.dump({"municipios": base_mun, "estados": base_est, "distritos": base_dist}, f)
+    except Exception as e:
+        ErrorManager.registrar("IBGE_API_Collect", e)
+    
+    lista_completa = list(base_mun.keys()) + list(base_dist.keys())
+    return base_mun, base_est, base_dist, lista_completa
+
+IBGE_MUNICIPIOS, IBGE_ESTADOS, IBGE_DISTRITOS, LISTA_TOPONIMOS = carregar_dados_ibge()
+
+# ==============================================================================
+# 🧹 ENGINE DE RESOLUÇÃO UNIVERSAL E ENDEREÇAMENTO CANÔNICO
 # ==============================================================================
 class ParserGeograficoBR:
     @staticmethod
@@ -278,6 +355,8 @@ class ParserGeograficoBR:
 
 class MotorEnderecoCanônico:
     def __init__(self):
+        self.contexto_fuzzy = list(set([f"{k} {v['uf']}" for k, vl in IBGE_MUNICIPIOS.items() for v in vl] + 
+                                       [f"{k} {v['uf']}" for k, vl in IBGE_DISTRITOS.items() for v in vl]))
         self.rural_keys = ["FAZENDA", "SITIO", "ASSENTAMENTO", "CHACARA", "GLEBA", "NUCLEO RURAL"]
         self.bairro_keys = ["BAIRRO", "VILA", "JARDIM", "PARQUE", "RESIDENCIAL", "SETOR", "ASA SUL", "ASA NORTE", "LAGO SUL", "LAGO NORTE"]
         self.condo_keys = [r"\bCONDOMINIO\b", r"\bCOND\.", r"\bRESIDENCIAL\b", r"\bRES\.", r"\bLOTEAMENTO\b"]
@@ -285,8 +364,9 @@ class MotorEnderecoCanônico:
         self.via_keys = [
             "RUA", "AVENIDA", "TRAVESSA", "ALAMEDA", "RODOVIA", "ESTRADA", "QUADRA", 
             "SQN", "SQS", "SHIS", "SHIN", "SCRN", "SCS", "SRTVN", "CLS", "CLN",
-            "QNL", "QNM", "QNN", "QNG", "QNJ", "QNK", "QI", "QE", "QC", "QR", "QS", "QSC"
+            "QNL", "QNM", "QNN", "QNG", "QNJ", "QNK", "QI", "QE", "QC", "QR", "QS", "QSC", "BR", "SP", "MG"
         ]
+        self.poi_keys = ["AEROPORTO", "HOSPITAL", "UNIVERSIDADE", "SHOPPING", "RODOVIARIA", "CD", "TERMINAL", "BASE"]
         
         self.mapa_contexto_df = {
             "TAGUATINGA": "TAGUATINGA", "GAMA": "GAMA", "PONTE ALTA": "GAMA", "PONTE ALTA NORTE": "GAMA",
@@ -338,7 +418,6 @@ class MotorEnderecoCanônico:
         }
         for padrao, expansao in abreviacoes.items(): t = re.sub(padrao, expansao, t)
         
-        # 12. Consome os sinônimos também por GeoDataProvider/Bases Locais
         sinonimos_locais = {
             "UNB": "UNIVERSIDADE DE BRASILIA", "CATOLICA": "UNIVERSIDADE CATOLICA",
             "HBDF": "HOSPITAL DE BASE DO DISTRITO FEDERAL", "RODOVIARIA": "TERMINAL RODOVIARIO",
@@ -352,12 +431,27 @@ class MotorEnderecoCanônico:
         tipo = "LOGRADOURO"
         if re.search(r'\b\d{5}-?\d{3}\b', texto_norm): tipo = "CEP"
         elif any(re.search(p, texto_norm) for p in self.condo_keys): tipo = "CONDOMINIO"
-        elif any(k in texto_norm for k in POI_KEYWORDS): tipo = "POI"
+        elif any(k in texto_norm for k in self.poi_keys): tipo = "POI"
         elif any(k in texto_norm for k in self.rural_keys): tipo = "RURAL"
         elif any(k in texto_norm for k in self.via_keys) and bool(re.search(r'\d+', texto_norm)): tipo = "ENDERECO_COMPLETO"
         elif any(k in texto_norm for k in self.bairro_keys): tipo = "BAIRRO"
         cache_classificacao.set(texto_norm, tipo, expire=2592000)
         return tipo
+
+    def aplicar_fuzzy_multidimensional(self, texto_norm):
+        if texto_norm in cache_fuzzy: return cache_fuzzy[texto_norm]
+        tokens = texto_norm.split()
+        for token in tokens:
+            if len(token) >= 5 and token not in IBGE_MUNICIPIOS and token not in IBGE_DISTRITOS:
+                top_matches = process.extract(token, self.contexto_fuzzy, scorer=fuzz.WRatio, limit=5)
+                if top_matches and top_matches[0][1] >= 85:
+                    melhor_match = max(top_matches, key=lambda m: fuzz.token_set_ratio(texto_norm, m[0]))
+                    if melhor_match[1] >= 85 and fuzz.token_set_ratio(texto_norm, melhor_match[0]) >= 90:
+                        cidade_corrigida = melhor_match[0].rsplit(' ', 1)[0]
+                        texto_norm = texto_norm.replace(token, cidade_corrigida)
+                        break
+        cache_fuzzy.set(texto_norm, texto_norm, expire=2592000)
+        return texto_norm
 
     def resolver_contexto_administrativo(self, texto_norm):
         tokens = texto_norm.split()
@@ -371,7 +465,6 @@ class MotorEnderecoCanônico:
             for chave, ra_oficial in self.mapa_contexto_df.items():
                 if chave in texto_norm: return {"uf": "DF", "municipio": "BRASILIA", "distrito": ra_oficial}
                 
-        # 12. Substituição pontual por busca em base local estruturada se disponível
         for i in range(len(tokens)):
             for j in range(i + 1, len(tokens) + 1):
                 chunk = " ".join(tokens[i:j])
@@ -418,7 +511,6 @@ class GeoDataProvider:
 class SpatialRepository:
     @staticmethod
     def find_nearest(lat: float, lon: float, raio_km: float = 10.0) -> list:
-        # Consulta de Proximidade Espacial O(log n) simulando ST_DWithin / R-Tree
         try:
             cursor = db_conn.cursor()
             cursor.execute("SELECT id, endereco, lat, lon FROM geocodes")
@@ -482,13 +574,11 @@ def cascata_postal_tripla(cep_limpo):
     if not circuit_breaker.allow(provider): return "", "", "", "", 0.0, 0.0
     rate_limiter.wait(provider)
     
-    # 12. Local-First: Consulta primária na base local dos Correios antes da Web
     try:
         cursor = db_conn.cursor()
         cursor.execute("SELECT logradouro, bairro, cidade, uf, lat, lon FROM correios_ceps WHERE cep = ? LIMIT 1", (cep_limpo,))
         row = cursor.fetchone()
-        if row:
-            return row[0], row[1], row[2], row[3], row[4], row[5]
+        if row: return row[0], row[1], row[2], row[3], row[4], row[5]
     except Exception as e:
         ErrorManager.registrar("correios_ceps_local_lookup", e)
 
@@ -505,6 +595,16 @@ def cascata_postal_tripla(cep_limpo):
             cache_cep.set(cep_limpo, d, expire=2592000); return d
     except Exception as e:
         ErrorManager.registrar("BrasilAPI_CEP", e)
+        circuit_breaker.record_failure(provider)
+    try:
+        def _nom_cep():
+            time.sleep(1.1)
+            url = f"https://nominatim.openstreetmap.org/search?format=json&postalcode={cep_limpo}&countrycodes=br&limit=1"
+            return session.get(url, headers={"User-Agent": "RotasEnterprise/8.0"}, timeout=Settings.NOMINATIM_TIMEOUT).json()
+        r_nom = st.session_state["fila_nominatim"].submit(_nom_cep).result()
+        if r_nom: lat, lon = float(r_nom[0]['lat']), float(r_nom[0]['lon'])
+    except Exception as e:
+        ErrorManager.registrar("Nominatim_CEP", e)
         circuit_breaker.record_failure(provider)
     try:
         r = session.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=Settings.ARCGIS_TIMEOUT).json()
@@ -570,7 +670,6 @@ class GeocodingService:
         texto_norm = semantica.normalizar(query)
         if not texto_norm: return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A", ["Vazio"]
         
-        # 12. Local-First: Consulta prioritária na base local OpenStreetMap
         try:
             cursor = db_conn.cursor()
             cursor.execute("SELECT lat, lon, nome, cidade FROM osm_logradouros WHERE nome = ? LIMIT 1", (texto_norm,))
@@ -615,7 +714,6 @@ class GeocodingService:
         
         end_oficial = f"{texto_norm} [{vencedor['fonte']}]"
         
-        # 13. Salvamento no Repositório Espacial Local
         SpatialRepository.save_geocode(cache_key, end_oficial, vencedor["lat"], vencedor["lon"], vencedor["fonte"], score_calc)
         
         cache_geo.set(cache_key, {"lat": vencedor["lat"], "lon": vencedor["lon"], "endereco": end_oficial, "confianca": confianca, "score": score_calc, "municipio": ctx["municipio"], "fonte": vencedor["fonte"]}, expire=2592000)
@@ -759,7 +857,6 @@ routing_manager = RoutingProviderManager()
 class RouteService:
     @staticmethod
     def calcular_rota(origem: str, destino: str, veiculo: VehicleProfile, perfil_rota="shortest"):
-        # 14. INÍCIO DO TELEMETRY PIPELINE (OPEN-METEO / OPENTELEMETRY SPANS)
         span_global = TracingService.iniciar_span("Routing Pipeline")
         origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
         
@@ -780,19 +877,15 @@ class RouteService:
             km_terrestre = round(dist_linha_reta * 1.25, 2)
             res_mapa = {"km": km_terrestre, "minutos_base": int((km_terrestre / 60.0) * 60), "provider": "Fallback Geodésico", "score": 70, "geometry": [[lon_o, lat_o], [lon_d, lat_d]]}
 
-        # Restrições de Engenharia de Frota
         RestrictionEngine.validar_restricoes(res_mapa, veiculo)
         
-        # Injeção de Variáveis de Atrasos Temporais
         trafego = HereTrafficProvider.obter_trafego_rota(res_mapa["geometry"])
         minutos_finais = res_mapa["minutos_base"] + trafego["delay_minutes"]
         tempo_formatado = f"{minutos_finais} min" if minutos_finais < 60 else f"{minutos_finais // 60} h {minutos_finais % 60} min"
 
-        # Finanças, Logística e ESG (CarbonEngine)
         pedagio = TollProvider.calcular_pedagios(lat_o, lon_o, lat_d, lon_d)
         logistica = LogisticsCostEngine.calcular_viabilidade(res_mapa["km"], minutos_finais, veiculo, 'SP', pedagio["valor"], chave_rota_cache)
 
-        # 13. Salvamento no SpatialRepository
         SpatialRepository.save_route(origem_clean, destino_clean, res_mapa["km"], minutos_finais, res_mapa["provider"])
 
         retorno = (
