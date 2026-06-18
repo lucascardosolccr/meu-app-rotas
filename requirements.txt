@@ -1,3 +1,6 @@
+structlog
+prometheus-client
+
 streamlit>=1.46.0
 
 pandas>=2.3.0
