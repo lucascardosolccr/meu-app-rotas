@@ -57,11 +57,18 @@ structlog.configure(
 )
 logger = structlog.get_logger()
 
-# Métricas Prometheus
-geocode_requests = Counter('geocode_requests_total', 'Geocoding requests', ['provider'])
-route_requests = Counter('route_requests_total', 'Routing requests', ['provider'])
-api_failures = Counter('api_failures_total', 'API failures', ['provider'])
-api_latency = Histogram('provider_latency_seconds', 'API Latency', ['provider'])
+# Métricas Prometheus (Tratamento para reload do Streamlit)
+if 'prometheus_metrics_initialized' not in st.session_state:
+    st.session_state['geocode_requests'] = Counter('geocode_requests_total', 'Geocoding requests', ['provider'])
+    st.session_state['route_requests'] = Counter('route_requests_total', 'Routing requests', ['provider'])
+    st.session_state['api_failures'] = Counter('api_failures_total', 'API failures', ['provider'])
+    st.session_state['api_latency'] = Histogram('provider_latency_seconds', 'API Latency', ['provider'])
+    st.session_state['prometheus_metrics_initialized'] = True
+
+geocode_requests = st.session_state['geocode_requests']
+route_requests = st.session_state['route_requests']
+api_failures = st.session_state['api_failures']
+api_latency = st.session_state['api_latency']
 
 # ==============================================================================
 # SEGURANÇA E RESILIÊNCIA (RATE LIMITER E CIRCUIT BREAKER)
