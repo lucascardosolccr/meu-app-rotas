@@ -20,9 +20,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Novos imports de Observabilidade e Logging
-import structlog
-from prometheus_client import Counter, Histogram
+# ==============================================================================
+# TRATAMENTO DE DEPENDÊNCIAS (CORREÇÃO CIRÚRGICA V1.2)
+# ==============================================================================
+try:
+    import structlog
+    from prometheus_client import Counter, Histogram
+except ImportError as e:
+    st.error(f"🚨 **Erro de Dependência (ModuleNotFoundError):** O pacote `{e.name}` não está instalado no ambiente.")
+    st.warning("🛠️ **Como corrigir:** Crie ou edite o arquivo `requirements.txt` na raiz do seu projeto (Streamlit Cloud) e adicione:\n\n`structlog`\n`prometheus-client`")
+    st.stop()
 
 # ==============================================================================
 # CONFIGURAÇÕES CENTRALIZADAS
@@ -1067,135 +1074,132 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
 # ==============================================================================
 # 🎚️ ORQUESTRADOR EM CASCATA HIERÁRQUICA E OFFLINE-FIRST
 # ==============================================================================
-def obter_coordenadas_e_endereco_oficial(localidade):
-    texto_cru = str(localidade).strip()
-    if not texto_cru or texto_cru.lower() == 'nan': return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A", ["String Vazia"]
-    
-    if match_coords := re.match(r'^\s*(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$', texto_cru):
-        lat_in, lon_in = float(match_coords.group(1)), float(match_coords.group(2))
-        valido, lat_in, lon_in = validar_coordenada_brasil(lat_in, lon_in)
-        if valido:
-            m = executar_reverse_geocoding_multimotor(lat_in, lon_in)
-            end_f = ", ".join([c for c in [m.get("logradouro", ""), m.get("bairro", ""), m.get("cidade", ""), m.get("estado", "")] if c.strip()]) + ", BRASIL"
-            return lat_in, lon_in, end_f, "ABSOLUTA", 100, m.get("bairro", ""), m.get("cidade", ""), "COORDENADA_EXATA", ["Entrada direta via Coordenadas Numéricas."]
-
-    for poi_key, poi_data in BASE_POIS_LOGISTICOS.items():
-        if poi_key in texto_cru.upper():
-            return poi_data["lat"], poi_data["lon"], poi_data["endereco"], "ABSOLUTA", 100, "", poi_data["municipio"], "BASE_POIS_NACIONAIS", ["Resolvido via Base Nacional de POIs Logísticos Ground Truth."]
-
-    chave_aprendizado_coord = texto_cru.upper()
-    if chave_aprendizado_coord in cache_aprendizado:
-        dado_salvo = cache_aprendizado[chave_aprendizado_coord]
-        if isinstance(dado_salvo, dict) and "lat" in dado_salvo and "lon" in dado_salvo:
-            return dado_salvo["lat"], dado_salvo["lon"], dado_salvo.get("endereco", texto_cru.upper()), "ALTISSIMA", 100, dado_salvo.get("distrito", ""), dado_salvo.get("municipio", ""), "APRENDIZADO_LOCAL", ["Ponto quente extraído do cache local enriquecido."]
-
-    endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_cru)
-    ctx = semantica.resolver_contexto_administrativo(texto_cru.upper())
-    parsed_comp = ParserGeograficoBR.extrair_componentes(texto_cru.upper())
-    
-    cache_key = hashlib.md5(f"{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
-    if cache_key in cache_geo:
-        c = cache_geo[cache_key]
-        return c["lat"], c["lon"], c["endereco"], c["confianca"], c["score_num"], c["distrito"], c["municipio"], c["fonte"], ["Cache L2 Hit."]
-
-    rua_suja = parsed_comp["resto"]
-    for loc in [ctx.get("municipio", ""), ctx.get("distrito", ""), ctx.get("uf", ""), "BRASIL", "DF"]:
-        if loc: rua_suja = re.sub(rf'\b{loc}\b', '', rua_suja).strip(" ,-")
-        
-    rua_limpa = re.sub(r'\s+', ' ', rua_suja).strip()
-    if parsed_comp["numero"]: rua_limpa = f"{rua_limpa} {parsed_comp['numero']}".strip()
-    
-    contexto_estruturado = {
-        "logradouro": rua_limpa if rua_limpa else texto_cru.upper(),
-        "bairro": ctx.get("distrito", ""),
-        "municipio": ctx.get("municipio", ""),
-        "uf": ctx.get("uf", ""),
-        "cep": parsed_comp.get("cep", "")
-    }
-
-    if auditoria_pre_geocoding(texto_cru, contexto_estruturado, tipo_entrada) == "INSUFICIENTE":
-        return 0.0, 0.0, texto_cru, "INSUFICIENTE", 0, "", "", "PRE_FLIGHT", ["Abortado pelo validador pré-geocoding: informações insuficientes."]
-
-    if match_offline := obedience_base_local(contexto_estruturado):
-        return match_offline["lat"], match_offline["lon"], match_offline["endereco"], "ALTISSIMA", 100, match_offline.get("distrito", ""), match_offline.get("municipio", ""), "BASE_NACIONAL_OFFLINE", ["Ponto resolvido via CNEFE/Bases Locais Estáticas."]
-
-    if not ctx.get("municipio") and tipo_entrada not in ["POI", "CEP"]:
-        return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Inviável determinar contexto municipal estruturado."]
-
-    candidatos_validos = []
-
-    if tipo_entrada == "CEP":
-        cep_estrito = re.search(r'\b\d{5}-?\d{3}\b', texto_cru)
-        if cep_estrito:
-            cep_limpo = cep_estrito.group(0).replace("-", "")
-            logr, bair, loca, uf, lat_c, lon_c = cascata_postal_tripla(cep_limpo)
-            if loca:
-                nome_est_cep = IBGE_ESTADOS.get(uf, uf) if uf else ""
-                addr_c = f"{logr}, {bair}, {loca}, {nome_est_cep}, CEP {cep_estrito.group(0)}, BRASIL"
-                addr_c = re.sub(r',\s*,', ',', addr_c).strip(' ,')
-                
-                val_c, lat_corrigida_c, lon_corrigida_c = validar_coordenada_brasil(lat_c, lon_c)
-                if lat_c != 0.0 and lon_c != 0.0 and val_c:
-                    res_final = (lat_corrigida_c, lon_corrigida_c, addr_c, "ALTISSIMA", 100, bair, loca, "BrasilAPI/OSM Postal", ["Cascata Postal Direta."])
-                    cache_geo.set(cache_key, {"lat": lat_corrigida_c, "lon": lon_corrigida_c, "endereco": addr_c, "confianca": "ALTISSIMA", "score_num": 100, "distrito": bair, "municipio": loca, "fonte": "BrasilAPI/OSM Postal"}, expire=2592000)
-                    return res_final
-                
-                res_arc = API_ArcGIS(addr_c)
-                if res_arc:
-                    if isinstance(res_arc, list): res_arc = res_arc[0]
-                    val_arc, lat_corrigida_arc, lon_corrigida_arc = validar_coordenada_brasil(res_arc["lat"], res_arc["lon"])
-                    if val_arc:
-                        res_final = (lat_corrigida_arc, lon_corrigida_arc, addr_c, "ALTISSIMA", 100, bair, loca, "ViaCEP/ArcGIS", ["Cascata Postal Complementada por ArcGIS."])
-                        cache_geo.set(cache_key, {"lat": lat_corrigida_arc, "lon": lon_corrigida_arc, "endereco": addr_c, "confianca": "ALTISSIMA", "score_num": 100, "distrito": bair, "municipio": loca, "fonte": "ViaCEP/ArcGIS"}, expire=2592000)
-                        return res_final
-
-    if tipo_entrada == "MUNICIPIO" and ctx.get("municipio") and ctx.get("uf"):
-        mun_nome, uf_nome = ctx["municipio"], ctx["uf"]
-        if mun_nome in IBGE_MUNICIPIOS:
-            for item in IBGE_MUNICIPIOS[mun_nome]:
-                if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0 and item.get("lon", 0.0) != 0.0:
-                    endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
-                    res_ibge = (item["lat"], item["lon"], endereco_ibge, "ALTISSIMA", 100, "", mun_nome, "BASE_IBGE_LOCAL", ["Centroide IBGE Municipal Resolvido Offline."])
-                    cache_geo.set(cache_key, {"lat": res_ibge[0], "lon": res_ibge[1], "endereco": res_ibge[2], "confianca": res_ibge[3], "score_num": res_ibge[4], "distrito": res_ibge[5], "municipio": res_ibge[6], "fonte": res_ibge[7]}, expire=2592000)
-                    return res_ibge
-
-    def disparar_apis_paralelas(tarefas):
-        resultados = []
-        for f in as_completed([st.session_state["executor_apis"].submit(func, *args, **kwargs) for func, args, kwargs in tarefas]):
-            if res := f.result(): resultados.extend(res)
-        return resultados
-
-    if tipo_entrada == "POI" or tipo_entrada == "CONDOMINIO":
-        candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Overpass_POIs, (semantica.normalizar(texto_cru),), {}), (API_TomTom, (endereco_canonico,), {})]))
-    elif tipo_entrada in ["ENDERECO_COMPLETO", "LOGRADOURO"]:
-        candidatos_validos.extend(disparar_apis_paralelas([(API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_TomTom, (endereco_canonico,), {})]))
-        if res_nom := API_Nominatim(endereco_canonico, ctx=contexto_estruturado): candidatos_validos.extend(res_nom)
-    elif tipo_entrada in ["BAIRRO", "MUNICIPIO", "DISTRITO"]:
-        candidatos_validos.extend(disparar_apis_paralelas([(API_Photon, (endereco_canonico,), {})]))
-        if res_nom := API_Nominatim(endereco_canonico, ctx=contexto_estruturado): candidatos_validos.extend(res_nom)
-    else:
-        candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Photon, (endereco_canonico,), {}), (API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_TomTom, (endereco_canonico,), {})]))
-            
-    res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
-    
-    if not res_final and tipo_entrada not in ["BAIRRO", "MUNICIPIO"]:
-        res_nom = API_Nominatim(endereco_canonico, ctx=contexto_estruturado)
-        if res_nom:
-            candidatos_validos.extend(res_nom)
-            res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
-
-    if res_final:
-        cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
-        if res_final[4] >= 95 and res_final[3] == "ALTISSIMA":
-            cache_aprendizado_auto.set(chave_auto, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "distrito": res_final[5], "municipio": res_final[6], "metadata": {"evidencias_xai": res_final[8] if len(res_final) > 8 else []}}, expire=7776000)
-        return res_final
-        
-    return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Falha Geográfica Absoluta por falta de candidatos."]
-
 class GeocodingService:
     @staticmethod
     def geocodificar(localidade):
-        return obter_coordenadas_e_endereco_oficial(localidade)
+        texto_cru = str(localidade).strip()
+        if not texto_cru or texto_cru.lower() == 'nan': return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A", ["String Vazia"]
+        
+        if match_coords := re.match(r'^\s*(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$', texto_cru):
+            lat_in, lon_in = float(match_coords.group(1)), float(match_coords.group(2))
+            valido, lat_in, lon_in = validar_coordenada_brasil(lat_in, lon_in)
+            if valido:
+                m = executar_reverse_geocoding_multimotor(lat_in, lon_in)
+                end_f = ", ".join([c for c in [m.get("logradouro", ""), m.get("bairro", ""), m.get("cidade", ""), m.get("estado", "")] if c.strip()]) + ", BRASIL"
+                return lat_in, lon_in, end_f, "ABSOLUTA", 100, m.get("bairro", ""), m.get("cidade", ""), "COORDENADA_EXATA", ["Entrada direta via Coordenadas Numéricas."]
+
+        for poi_key, poi_data in BASE_POIS_LOGISTICOS.items():
+            if poi_key in texto_cru.upper():
+                return poi_data["lat"], poi_data["lon"], poi_data["endereco"], "ABSOLUTA", 100, "", poi_data["municipio"], "BASE_POIS_NACIONAIS", ["Resolvido via Base Nacional de POIs Logísticos Ground Truth."]
+
+        chave_aprendizado_coord = texto_cru.upper()
+        if chave_aprendizado_coord in cache_aprendizado:
+            dado_salvo = cache_aprendizado[chave_aprendizado_coord]
+            if isinstance(dado_salvo, dict) and "lat" in dado_salvo and "lon" in dado_salvo:
+                return dado_salvo["lat"], dado_salvo["lon"], dado_salvo.get("endereco", texto_cru.upper()), "ALTISSIMA", 100, dado_salvo.get("distrito", ""), dado_salvo.get("municipio", ""), "APRENDIZADO_LOCAL", ["Ponto quente extraído do cache local enriquecido."]
+
+        endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_cru)
+        ctx = semantica.resolver_contexto_administrativo(texto_cru.upper())
+        parsed_comp = ParserGeograficoBR.extrair_componentes(texto_cru.upper())
+        
+        cache_key = hashlib.md5(f"{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+        if cache_key in cache_geo:
+            c = cache_geo[cache_key]
+            return c["lat"], c["lon"], c["endereco"], c["confianca"], c["score_num"], c["distrito"], c["municipio"], c["fonte"], ["Cache L2 Hit."]
+
+        rua_suja = parsed_comp["resto"]
+        for loc in [ctx.get("municipio", ""), ctx.get("distrito", ""), ctx.get("uf", ""), "BRASIL", "DF"]:
+            if loc: rua_suja = re.sub(rf'\b{loc}\b', '', rua_suja).strip(" ,-")
+            
+        rua_limpa = re.sub(r'\s+', ' ', rua_suja).strip()
+        if parsed_comp["numero"]: rua_limpa = f"{rua_limpa} {parsed_comp['numero']}".strip()
+        
+        contexto_estruturado = {
+            "logradouro": rua_limpa if rua_limpa else texto_cru.upper(),
+            "bairro": ctx.get("distrito", ""),
+            "municipio": ctx.get("municipio", ""),
+            "uf": ctx.get("uf", ""),
+            "cep": parsed_comp.get("cep", "")
+        }
+
+        if auditoria_pre_geocoding(texto_cru, contexto_estruturado, tipo_entrada) == "INSUFICIENTE":
+            return 0.0, 0.0, texto_cru, "INSUFICIENTE", 0, "", "", "PRE_FLIGHT", ["Abortado pelo validador pré-geocoding: informações insuficientes."]
+
+        if match_offline := obedience_base_local(contexto_estruturado):
+            return match_offline["lat"], match_offline["lon"], match_offline["endereco"], "ALTISSIMA", 100, match_offline.get("distrito", ""), match_offline.get("municipio", ""), "BASE_NACIONAL_OFFLINE", ["Ponto resolvido via CNEFE/Bases Locais Estáticas."]
+
+        if not ctx.get("municipio") and tipo_entrada not in ["POI", "CEP"]:
+            return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Inviável determinar contexto municipal estruturado."]
+
+        candidatos_validos = []
+
+        if tipo_entrada == "CEP":
+            cep_estrito = re.search(r'\b\d{5}-?\d{3}\b', texto_cru)
+            if cep_estrito:
+                cep_limpo = cep_estrito.group(0).replace("-", "")
+                logr, bair, loca, uf, lat_c, lon_c = cascata_postal_tripla(cep_limpo)
+                if loca:
+                    nome_est_cep = IBGE_ESTADOS.get(uf, uf) if uf else ""
+                    addr_c = f"{logr}, {bair}, {loca}, {nome_est_cep}, CEP {cep_estrito.group(0)}, BRASIL"
+                    addr_c = re.sub(r',\s*,', ',', addr_c).strip(' ,')
+                    
+                    val_c, lat_corrigida_c, lon_corrigida_c = validar_coordenada_brasil(lat_c, lon_c)
+                    if lat_c != 0.0 and lon_c != 0.0 and val_c:
+                        res_final = (lat_corrigida_c, lon_corrigida_c, addr_c, "ALTISSIMA", 100, bair, loca, "BrasilAPI/OSM Postal", ["Cascata Postal Direta."])
+                        cache_geo.set(cache_key, {"lat": lat_corrigida_c, "lon": lon_corrigida_c, "endereco": addr_c, "confianca": "ALTISSIMA", "score_num": 100, "distrito": bair, "municipio": loca, "fonte": "BrasilAPI/OSM Postal"}, expire=2592000)
+                        return res_final
+                    
+                    res_arc = API_ArcGIS(addr_c)
+                    if res_arc:
+                        if isinstance(res_arc, list): res_arc = res_arc[0]
+                        val_arc, lat_corrigida_arc, lon_corrigida_arc = validar_coordenada_brasil(res_arc["lat"], res_arc["lon"])
+                        if val_arc:
+                            res_final = (lat_corrigida_arc, lon_corrigida_arc, addr_c, "ALTISSIMA", 100, bair, loca, "ViaCEP/ArcGIS", ["Cascata Postal Complementada por ArcGIS."])
+                            cache_geo.set(cache_key, {"lat": lat_corrigida_arc, "lon": lon_corrigida_arc, "endereco": addr_c, "confianca": "ALTISSIMA", "score_num": 100, "distrito": bair, "municipio": loca, "fonte": "ViaCEP/ArcGIS"}, expire=2592000)
+                            return res_final
+
+        if tipo_entrada == "MUNICIPIO" and ctx.get("municipio") and ctx.get("uf"):
+            mun_nome, uf_nome = ctx["municipio"], ctx["uf"]
+            if mun_nome in IBGE_MUNICIPIOS:
+                for item in IBGE_MUNICIPIOS[mun_nome]:
+                    if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0 and item.get("lon", 0.0) != 0.0:
+                        endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                        res_ibge = (item["lat"], item["lon"], endereco_ibge, "ALTISSIMA", 100, "", mun_nome, "BASE_IBGE_LOCAL", ["Centroide IBGE Municipal Resolvido Offline."])
+                        cache_geo.set(cache_key, {"lat": res_ibge[0], "lon": res_ibge[1], "endereco": res_ibge[2], "confianca": res_ibge[3], "score_num": res_ibge[4], "distrito": res_ibge[5], "municipio": res_ibge[6], "fonte": res_ibge[7]}, expire=2592000)
+                        return res_ibge
+
+        def disparar_apis_paralelas(tarefas):
+            resultados = []
+            for f in as_completed([st.session_state["executor_apis"].submit(func, *args, **kwargs) for func, args, kwargs in tarefas]):
+                if res := f.result(): resultados.extend(res)
+            return resultados
+
+        if tipo_entrada == "POI" or tipo_entrada == "CONDOMINIO":
+            candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Overpass_POIs, (semantica.normalizar(texto_cru),), {}), (API_TomTom, (endereco_canonico,), {})]))
+        elif tipo_entrada in ["ENDERECO_COMPLETO", "LOGRADOURO"]:
+            candidatos_validos.extend(disparar_apis_paralelas([(API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_TomTom, (endereco_canonico,), {})]))
+            if res_nom := API_Nominatim(endereco_canonico, ctx=contexto_estruturado): candidatos_validos.extend(res_nom)
+        elif tipo_entrada in ["BAIRRO", "MUNICIPIO", "DISTRITO"]:
+            candidatos_validos.extend(disparar_apis_paralelas([(API_Photon, (endereco_canonico,), {})]))
+            if res_nom := API_Nominatim(endereco_canonico, ctx=contexto_estruturado): candidatos_validos.extend(res_nom)
+        else:
+            candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Photon, (endereco_canonico,), {}), (API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_TomTom, (endereco_canonico,), {})]))
+                
+        res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
+        
+        if not res_final and tipo_entrada not in ["BAIRRO", "MUNICIPIO"]:
+            res_nom = API_Nominatim(endereco_canonico, ctx=contexto_estruturado)
+            if res_nom:
+                candidatos_validos.extend(res_nom)
+                res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
+
+        if res_final:
+            cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
+            if res_final[4] >= 95 and res_final[3] == "ALTISSIMA":
+                cache_aprendizado_auto.set(chave_auto, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "distrito": res_final[5], "municipio": res_final[6], "metadata": {"evidencias_xai": res_final[8] if len(res_final) > 8 else []}}, expire=7776000)
+            return res_final
+            
+        return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Falha Geográfica Absoluta por falta de candidatos."]
 
 # ==============================================================================
 # 🚀 MOTOR DE ROTEAMENTO (ARBITRAGEM DE PROVEDORES E PERFIS DE DISTÂNCIA)
@@ -1279,75 +1283,72 @@ def rota_osrm(lat_o, lon_o, lat_d, lon_d):
 def obter_fator_desvio_rodoviario(linha_reta):
     return 1.45 if linha_reta < 5.0 else 1.35 if linha_reta < 20.0 else 1.25 if linha_reta < 100.0 else 1.18
 
-def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
-    start_total = time.time()
-    origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
-    
-    chave_rota_cache = f"ROTA_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
-    if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
-    
-    start_geo = time.time()
-    lat_o, lon_o, end_oficial_o, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, xai_o = GeocodingService.geocodificar(origem_clean)
-    lat_d, lon_d, end_oficial_d, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, xai_d = GeocodingService.geocodificar(destino_clean)
-    tempo_geocoding = round(time.time() - start_geo, 2)
-    
-    start_rot = time.time()
-
-    if all([lat_o is not None, lon_o is not None, lat_d is not None, lon_d is not None]) and lat_o != 0.0 and lat_d != 0.0:
-        dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
-    else:
-        dist_linha_reta = 0.0
-
-    link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(end_oficial_o)}&destination={requests.utils.quote(end_oficial_d)}&travelmode=driving"
-
-    res_osrm = None
-    if lat_o != 0.0 and lat_d != 0.0:
-        usar_coords = True
-        if dist_linha_reta > 150.0:
-            siglas_originais = re.findall(r'\b(DF|GO|SP|RJ|MG|BA|PR|SC|RS|CE|PE|AM|PA|MT|MS)\b', origem_clean.upper() + " " + destino_clean.upper())
-            if len(set(siglas_originais)) <= 1: usar_coords = False
-    else:
-        usar_coords = False
-
-    if usar_coords:
-        res_osrm = rota_osrm(lat_o, lon_o, lat_d, lon_d)
-        if res_osrm and perfil_rota == "fastest":
-            tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-            retorno = (res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
-            cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
-
-    res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=usar_coords)
-
-    if perfil_rota == "shortest":
-        opcoes = []
-        if res_osrm: opcoes.append((res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3]))
-        if res_google: opcoes.append((res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4]))
-        
-        if opcoes:
-            melhor_opcao = min(opcoes, key=lambda x: x[0]) 
-            tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-            retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
-            cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
-
-    if res_google:
-        tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-        retorno = (res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
-        cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
-
-    km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
-    v_comercial = 45.0 if km_terrestre < 50.0 else 65.0
-    minutos_est = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0 else 0
-    tempo_geo_str = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
-    tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-    
-    retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
-    cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
-    return retorno
-
 class RouteService:
     @staticmethod
     def calcular_rota(origem, destino, perfil_rota="shortest"):
-        return calcular_pipeline_logistico(origem, destino, perfil_rota)
+        start_total = time.time()
+        origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
+        
+        chave_rota_cache = f"ROTA_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+        if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
+        
+        start_geo = time.time()
+        lat_o, lon_o, end_oficial_o, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, xai_o = GeocodingService.geocodificar(origem_clean)
+        lat_d, lon_d, end_oficial_d, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, xai_d = GeocodingService.geocodificar(destino_clean)
+        tempo_geocoding = round(time.time() - start_geo, 2)
+        
+        start_rot = time.time()
+
+        if all([lat_o is not None, lon_o is not None, lat_d is not None, lon_d is not None]) and lat_o != 0.0 and lat_d != 0.0:
+            dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
+        else:
+            dist_linha_reta = 0.0
+
+        link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(end_oficial_o)}&destination={requests.utils.quote(end_oficial_d)}&travelmode=driving"
+
+        res_osrm = None
+        if lat_o != 0.0 and lat_d != 0.0:
+            usar_coords = True
+            if dist_linha_reta > 150.0:
+                siglas_originais = re.findall(r'\b(DF|GO|SP|RJ|MG|BA|PR|SC|RS|CE|PE|AM|PA|MT|MS)\b', origem_clean.upper() + " " + destino_clean.upper())
+                if len(set(siglas_originais)) <= 1: usar_coords = False
+        else:
+            usar_coords = False
+
+        if usar_coords:
+            res_osrm = rota_osrm(lat_o, lon_o, lat_d, lon_d)
+            if res_osrm and perfil_rota == "fastest":
+                tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
+                retorno = (res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
+                cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
+
+        res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=usar_coords)
+
+        if perfil_rota == "shortest":
+            opcoes = []
+            if res_osrm: opcoes.append((res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3]))
+            if res_google: opcoes.append((res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4]))
+            
+            if opcoes:
+                melhor_opcao = min(opcoes, key=lambda x: x[0]) 
+                tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
+                retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
+                cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
+
+        if res_google:
+            tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
+            retorno = (res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
+            cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
+
+        km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
+        v_comercial = 45.0 if km_terrestre < 50.0 else 65.0
+        minutos_est = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0 else 0
+        tempo_geo_str = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
+        tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
+        
+        retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
+        cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
+        return retorno
 
 def embrulhar_task_paralela(item):
     par_id, orig, dest = item
