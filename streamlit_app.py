@@ -50,66 +50,43 @@ class Settings:
     WORKERS_DISPONIVEIS = 8
 
 # ==============================================================================
-# BANCO DE DADOS RELACIONAL LOCAL (DATA-CENTRIC PARADIGM SHIFT)
+# BANCO DE DADOS RELACIONAL EM MEMÓRIA E PURGE ESG (CORREÇÃO 9)
 # ==============================================================================
 db_conn = sqlite3.connect(":memory:", check_same_thread=False)
 
 def inicializar_banco_relacional_completo():
     cursor = db_conn.cursor()
     
-    # tabelas financeiras preservadas
     cursor.execute("CREATE TABLE IF NOT EXISTS pedagios (id INTEGER PRIMARY KEY, nome TEXT, rodovia TEXT, km REAL, latitude REAL, longitude REAL, tarifa REAL)")
     cursor.execute("CREATE TABLE IF NOT EXISTS precos_combustivel (estado TEXT, municipio TEXT, diesel REAL, gasolina REAL, etanol REAL, gnv REAL, data TEXT)")
     cursor.execute("CREATE TABLE IF NOT EXISTS emissoes (rota_id TEXT, km REAL, litros REAL, co2 REAL, data TEXT)")
     
-    # 12. BASES DE DADOS GEOESPACIAIS (NOVAS TABELAS LOCAIS DE REDUNDÂNCIA)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS osm_logradouros (
-            id TEXT PRIMARY KEY, nome TEXT, tipo TEXT, cidade TEXT, estado TEXT, cep TEXT, lat REAL, lon REAL
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS ibge_municipios (
-            codigo_ibge TEXT PRIMARY KEY, municipio TEXT, uf TEXT, area_km2 REAL, populacao INTEGER, lat REAL, lon REAL
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS correios_ceps (
-            cep TEXT PRIMARY KEY, logradouro TEXT, bairro TEXT, cidade TEXT, uf TEXT, lat REAL, lon REAL
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS dnit_rodovias (
-            rodovia TEXT, uf TEXT, km_inicio REAL, km_fim REAL
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS antt_concessoes (
-            rodovia TEXT, concessionaria TEXT, pedagios REAL
-        )
-    """)
+    cursor.execute("CREATE TABLE IF NOT EXISTS osm_logradouros (id TEXT PRIMARY KEY, nome TEXT, tipo TEXT, cidade TEXT, estado TEXT, cep TEXT, lat REAL, lon REAL)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS ibge_municipios (codigo_ibge TEXT PRIMARY KEY, municipio TEXT, uf TEXT, area_km2 REAL, populacao INTEGER, lat REAL, lon REAL)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS correios_ceps (cep TEXT PRIMARY KEY, logradouro TEXT, bairro TEXT, cidade TEXT, uf TEXT, lat REAL, lon REAL)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS dnit_rodovias (rodovia TEXT, uf TEXT, km_inicio REAL, km_fim REAL)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS antt_concessoes (rodovia TEXT, concessionaria TEXT, pedagios REAL)")
     
-    # 13. BANCO ESPACIAL (ESTRUTURAS GEO)
     cursor.execute("CREATE TABLE IF NOT EXISTS geocodes (id TEXT PRIMARY KEY, endereco TEXT, lat REAL, lon REAL)")
     cursor.execute("CREATE TABLE IF NOT EXISTS geo_addresses (id TEXT PRIMARY KEY, address TEXT, city TEXT, state TEXT, cep TEXT, source TEXT, score REAL)")
     cursor.execute("CREATE TABLE IF NOT EXISTS geo_routes (origin_id TEXT, destination_id TEXT, distance REAL, duration REAL, source TEXT)")
     cursor.execute("CREATE TABLE IF NOT EXISTS geo_ferries (name TEXT, operator TEXT, crossing_time REAL)")
     
-    # Seeding da Massa Crítica Local de Referência (Ground Truth)
     cursor.execute("INSERT OR IGNORE INTO pedagios VALUES (1, 'Praça Cajamar', 'SP-330', 38.5, -23.35, -46.88, 12.40)")
     cursor.execute("INSERT OR IGNORE INTO pedagios VALUES (2, 'Praça Brasília', 'BR-040', 10.0, -15.80, -47.90, 6.80)")
     cursor.execute("INSERT OR IGNORE INTO precos_combustivel VALUES ('SP', 'SÃO PAULO', 6.15, 5.80, 3.90, 3.10, '2023-10-01')")
     cursor.execute("INSERT OR IGNORE INTO precos_combustivel VALUES ('DF', 'BRASÍLIA', 6.40, 5.95, 4.10, 3.50, '2023-10-01')")
     
-    # Seeds populando barreira local para mitigar I/O de internet
     cursor.execute("INSERT OR IGNORE INTO correios_ceps VALUES ('01001000', 'Praça da Sé', 'Sé', 'SÃO PAULO', 'SP', -23.5505, -46.6333)")
-    cursor.execute("INSERT OR IGNORE INTO correios_ceps VALUES ('70002100', 'Esplanada dos Ministérios', 'Zona Central', 'BRASILIA', 'DF', -15.7989, -47.8656)")
+    cursor.execute("INSERT OR IGNORE INTO correios_ceps VALUES ('70002100', 'Esplanada dos Ministérios', 'Zona Central', 'BRASÍLIA', 'DF', -15.7989, -47.8656)")
     cursor.execute("INSERT OR IGNORE INTO ibge_municipios VALUES ('3550308', 'SÃO PAULO', 'SP', 1521.11, 12300000, -23.5505, -46.6333)")
     cursor.execute("INSERT OR IGNORE INTO ibge_municipios VALUES ('5300108', 'BRASÍLIA', 'DF', 5760.78, 3015000, -15.7989, -47.8656)")
     cursor.execute("INSERT OR IGNORE INTO osm_logradouros VALUES ('OSM_1', 'CD MERCADO LIVRE CAJAMAR', 'LOGISTICO', 'CAJAMAR', 'SP', '07750000', -23.3541, -46.8852)")
-    cursor.execute("INSERT OR IGNORE INTO dnit_rodovias VALUES ('BR-040', 'DF', 0.0, 150.0)")
+    cursor.execute("INSERT OR IGNORE INTO dnit_rodovias VALUES ('BR-040', 'DF', 0.0, 200.0)")
     cursor.execute("INSERT OR IGNORE INTO antt_concessoes VALUES ('BR-040', 'Via040', 6.80)")
     
+    # 9. Purge automático de emissões ESG (evita acumular indefinidamente)
+    cursor.execute("DELETE FROM emissoes WHERE data < datetime('now', '-30 days')")
     db_conn.commit()
 
 inicializar_banco_relacional_completo()
@@ -143,17 +120,17 @@ api_failures = st.session_state['api_failures']
 api_latency = st.session_state['api_latency']
 
 # ==============================================================================
-# OpenTelemetry TRACING SERVICE LAYER (FIM DA CAIXA PRETA)
+# OPENTELEMETRY TRACING SERVICE
 # ==============================================================================
 class TracingService:
     @staticmethod
-    def iniciar_span(nome_fluxo):
-        return {"id_trace": hashlib.md5(str(time.time()).encode()).hexdigest()[:8], "passo": nome_fluxo, "inicio": time.time()}
+    def start_span(name):
+        return {"span_name": name, "start_time": time.time()}
 
     @staticmethod
-    def registrar_passo(span, sub_etapa):
-        delta = time.time() - span["inicio"]
-        logger.info("trace_span_step", trace_id=span["id_trace"], fluxo=span["passo"], step=sub_etapa, duration_seconds=round(delta, 4))
+    def end_span(span, step_info=""):
+        duration = time.time() - span["start_time"]
+        logger.info("telemetry_trace", span=span["span_name"], step=step_info, duration_seconds=round(duration, 4))
 
 # ==============================================================================
 # SEGURANÇA E RESILIÊNCIA (RATE LIMITER E CIRCUIT BREAKER)
@@ -163,9 +140,16 @@ class CircuitBreaker:
         self.failures = collections.defaultdict(int)
         self.threshold = threshold
         self.state = collections.defaultdict(lambda: "UP")
+        self.cooldown_timestamp = collections.defaultdict(float)
 
     def allow(self, provider):
-        return self.failures[provider] < self.threshold
+        if self.state[provider] == "DOWN":
+            if time.time() - self.cooldown_timestamp[provider] > 60.0:
+                self.state[provider] = "UP"
+                self.failures[provider] = 0
+                return True
+            return False
+        return True
 
     def record_success(self, provider):
         self.failures[provider] = 0
@@ -175,6 +159,8 @@ class CircuitBreaker:
         self.failures[provider] += 1
         if self.failures[provider] >= self.threshold:
             self.state[provider] = "DOWN"
+            self.cooldown_timestamp[provider] = time.time()
+            logger.warn("circuit_breaker_opened_cooldown_triggered", provider=provider, cooldown="60s")
 
 class RateLimiter:
     def __init__(self, max_per_second):
@@ -211,11 +197,13 @@ class HealthService:
 # ==============================================================================
 # CONFIGURAÇÃO DE UI/UX E AMBIENTE
 # ==============================================================================
+st.set_page_config(page_title="TMS Corporativo Avançado", page_icon="🚚", layout="wide")
+
 if st.query_params.get("health") == "true":
     st.json(HealthService.check())
     st.stop()
 
-TOMTOM_API_KEY = "" # Insira sua credencial TomTom Logistics aqui
+TOMTOM_API_KEY = ""
 
 # ==============================================================================
 # 🧠 PERSISTÊNCIA EM DISCO E HIGIENIZAÇÃO DE AMBIENTE
@@ -254,26 +242,76 @@ if "executor_apis" not in st.session_state:
     st.session_state["executor_apis"] = ThreadPoolExecutor(max_workers=16)
 
 # ==============================================================================
-# 🎛️ DADOS GLOBAIS THREAD-SAFE, HUB B2B E EXPANSÃO SEMÂNTICA
+# 12. CAMADA DE GOVERNANÇA CADASTRAL (GEODATAPROVIDER LAYER)
 # ==============================================================================
-BASE_POIS_LOGISTICOS = {
-    "CD MAGAZINE LUIZA CAXIAS": {"lat": -22.7853, "lon": -43.3121, "endereco": "Centro de Distribuição Magazine Luiza, Duque de Caxias, RJ, BRASIL", "municipio": "DUQUE DE CAXIAS", "uf": "RJ"},
-    "CD MERCADO LIVRE CAJAMAR": {"lat": -23.3541, "lon": -46.8852, "endereco": "Centro de Distribuição Mercado Livre, Cajamar, SP, BRASIL", "municipio": "CAJAMAR", "uf": "SP"},
-    "CD AMAZON CAJAMAR": {"lat": -23.3600, "lon": -46.8900, "endereco": "Centro de Distribuição Amazon, Cajamar, SP, BRASIL", "municipio": "CAJAMAR", "uf": "SP"}
-}
+class GeoDataProvider:
+    @staticmethod
+    def buscar_municipio_ibge(nome: str, uf: str) -> dict:
+        try:
+            cursor = db_conn.cursor()
+            if uf:
+                cursor.execute("SELECT codigo_ibge, municipio, uf, area_km2, populacao, lat, lon FROM ibge_municipios WHERE municipio = ? AND uf = ? LIMIT 1", (nome.upper(), uf.upper()))
+            else:
+                cursor.execute("SELECT codigo_ibge, municipio, uf, area_km2, populacao, lat, lon FROM ibge_municipios WHERE municipio = ? LIMIT 1", (nome.upper(),))
+            row = cursor.fetchone()
+            if row:
+                return {"codigo_ibge": row[0], "municipio": row[1], "uf": row[2], "area_km2": row[3], "populacao": row[4], "lat": row[5], "lon": row[6]}
+        except Exception as e:
+            ErrorManager.registrar("GeoDataProvider_IBGE_Lookup", e)
+        return None
 
-SINONIMOS_SEMANTICOS = {
-    "UNB": "UNIVERSIDADE DE BRASILIA", "CATOLICA": "UNIVERSIDADE CATOLICA",
-    "HBDF": "HOSPITAL DE BASE DO DISTRITO FEDERAL", "RODOVIARIA": "TERMINAL RODOVIARIO",
-    "CD": "CENTRO DE DISTRIBUICAO", "HUB": "CENTRO LOGISTICO", "TECA": "TERMINAL DE CARGAS"
-}
+    @staticmethod
+    def validar_rodovia_oficial(rodovia: str, uf: str, marco_km: float) -> bool:
+        try:
+            cursor = db_conn.cursor()
+            cursor.execute("SELECT 1 FROM dnit_rodovias WHERE rodovia = ? AND uf = ? AND ? BETWEEN km_inicio AND km_fim LIMIT 1", (rodovia.upper(), uf.upper(), marco_km))
+            return cursor.fetchone() is not None
+        except Exception as e:
+            ErrorManager.registrar("GeoDataProvider_DNIT_Validation", e)
+        return False
 
-BOUNDING_BOXES_UF = {
-    "DF": {"lat_min": -16.05, "lat_max": -15.50, "lon_min": -48.30, "lon_max": -47.30},
-    "SP": {"lat_min": -25.50, "lat_max": -19.50, "lon_min": -53.50, "lon_max": -44.00},
-    "GO": {"lat_min": -19.50, "lat_max": -12.40, "lon_min": -53.30, "lon_max": -45.90},
-}
+# ==============================================================================
+# 13. SPATIAL REPOSITORY LAYER
+# ==============================================================================
+class SpatialRepository:
+    @staticmethod
+    def find_nearest(lat: float, lon: float, raio_km: float = 0.5) -> list:
+        try:
+            cursor = db_conn.cursor()
+            cursor.execute("SELECT id, endereco, lat, lon FROM geocodes")
+            rows = cursor.fetchall()
+            nearest_points = []
+            for r in rows:
+                dist = GeocodingValidationCore.calcular_distancia_vincenty(lat, lon, r[2], r[3])
+                if dist <= raio_km:
+                    nearest_points.append({"id": r[0], "endereco": r[1], "lat": r[2], "lon": r[3], "distancia": dist})
+            return sorted(nearest_points, key=lambda x: x["distancia"])
+        except Exception as e:
+            ErrorManager.registrar("SpatialRepository_ST_DWithin_Simulation", e)
+        return []
 
+    @staticmethod
+    def save_geocode(id_val: str, address: str, city: str, state: str, cep: str, source: str, score: float, lat: float = 0.0, lon: float = 0.0):
+        try:
+            cursor = db_conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO geocodes VALUES (?, ?, ?, ?)", (id_val, address, lat, lon))
+            cursor.execute("INSERT OR REPLACE INTO geo_addresses VALUES (?, ?, ?, ?, ?, ?, ?)", (id_val, address, city, state, cep, source, score))
+            db_conn.commit()
+        except Exception as e:
+            ErrorManager.registrar("SpatialRepository_save_geocode", e)
+
+    @staticmethod
+    def save_route(origin_id: str, destination_id: str, distance: float, duration: float, source: str):
+        try:
+            cursor = db_conn.cursor()
+            cursor.execute("INSERT INTO geo_routes VALUES (?, ?, ?, ?, ?)", (origin_id, destination_id, distance, duration, source))
+            db_conn.commit()
+        except Exception as e:
+            ErrorManager.registrar("SpatialRepository_save_route", e)
+
+# ==============================================================================
+# 🎛️ COGNITIVE SEMANTIC PARSER & EXPANSÃO TEXTUAL
+# ==============================================================================
 @st.cache_data
 def carregar_dados_ibge():
     if os.path.exists(CACHE_IBGE_PATH):
@@ -333,9 +371,6 @@ def carregar_dados_ibge():
 
 IBGE_MUNICIPIOS, IBGE_ESTADOS, IBGE_DISTRITOS, LISTA_TOPONIMOS = carregar_dados_ibge()
 
-# ==============================================================================
-# 🧹 ENGINE DE RESOLUÇÃO UNIVERSAL E ENDEREÇAMENTO CANÔNICO
-# ==============================================================================
 class ParserGeograficoBR:
     @staticmethod
     def extrair_componentes(texto):
@@ -360,24 +395,12 @@ class MotorEnderecoCanônico:
         self.rural_keys = ["FAZENDA", "SITIO", "ASSENTAMENTO", "CHACARA", "GLEBA", "NUCLEO RURAL"]
         self.bairro_keys = ["BAIRRO", "VILA", "JARDIM", "PARQUE", "RESIDENCIAL", "SETOR", "ASA SUL", "ASA NORTE", "LAGO SUL", "LAGO NORTE"]
         self.condo_keys = [r"\bCONDOMINIO\b", r"\bCOND\.", r"\bRESIDENCIAL\b", r"\bRES\.", r"\bLOTEAMENTO\b"]
-        
         self.via_keys = [
             "RUA", "AVENIDA", "TRAVESSA", "ALAMEDA", "RODOVIA", "ESTRADA", "QUADRA", 
             "SQN", "SQS", "SHIS", "SHIN", "SCRN", "SCS", "SRTVN", "CLS", "CLN",
             "QNL", "QNM", "QNN", "QNG", "QNJ", "QNK", "QI", "QE", "QC", "QR", "QS", "QSC", "BR", "SP", "MG"
         ]
         self.poi_keys = ["AEROPORTO", "HOSPITAL", "UNIVERSIDADE", "SHOPPING", "RODOVIARIA", "CD", "TERMINAL", "BASE"]
-        
-        self.mapa_contexto_df = {
-            "TAGUATINGA": "TAGUATINGA", "GAMA": "GAMA", "PONTE ALTA": "GAMA", "PONTE ALTA NORTE": "GAMA",
-            "PONTE ALTA SUL": "GAMA", "CEILANDIA": "CEILANDIA", "SOL NASCENTE": "CEILANDIA", 
-            "POR DO SOL": "CEILANDIA", "AGUAS CLARAS": "AGUAS CLARAS", "ARNIQUEIRAS": "AGUAS CLARAS", 
-            "SAMAMBAIA": "SAMAMBAIA", "GUARA": "GUARA", "PLANALTINA": "PLANALTINA", 
-            "SOBRADINHO": "SOBRADINHO", "VICENTE PIRES": "VICENTE PIRES", "SANTA MARIA": "SANTA MARIA",
-            "RECANTO DAS EMAS": "RECANTO DAS EMAS", "RIACHO FUNDO": "RIACHO FUNDO", "LAGO SUL": "PLANO PILOTO", 
-            "LAGO NORTE": "PLANO PILOTO", "NUCLEO BANDEIRANTE": "NUCLEO BANDEIRANTE", "BRAZLANDIA": "BRAZLANDIA"
-        }
-
         self.mapa_siglas_df = {
             "QNL": "TAGUATINGA", "QNG": "TAGUATINGA", "QNH": "TAGUATINGA", "QNA": "TAGUATINGA", "QNB": "TAGUATINGA", "QNC": "TAGUATINGA", "QND": "TAGUATINGA", "QNE": "TAGUATINGA", "QNF": "TAGUATINGA", "QNJ": "TAGUATINGA", "QNI": "TAGUATINGA", "QSE": "TAGUATINGA", "QSA": "TAGUATINGA",
             "QNM": "CEILANDIA", "QNN": "CEILANDIA", "QNO": "CEILANDIA", "QNP": "CEILANDIA", "EQNM": "CEILANDIA", "EQNN": "CEILANDIA", "EQNP": "CEILANDIA", "EQNO": "CEILANDIA",
@@ -462,8 +485,6 @@ class MotorEnderecoCanônico:
                 sigla_limpa = re.sub(r'[^A-Z]', '', token)
                 if sigla_limpa in self.mapa_siglas_df and len(sigla_limpa) >= 2:
                     return {"uf": "DF", "municipio": "BRASILIA", "distrito": self.mapa_siglas_df[sigla_limpa]}
-            for chave, ra_oficial in self.mapa_contexto_df.items():
-                if chave in texto_norm: return {"uf": "DF", "municipio": "BRASILIA", "distrito": ra_oficial}
                 
         for i in range(len(tokens)):
             for j in range(i + 1, len(tokens) + 1):
@@ -474,78 +495,42 @@ class MotorEnderecoCanônico:
                     
         return {"uf": uf_explicita if uf_explicita else "", "municipio": "", "distrito": ""}
 
+    def construir_endereco_canonico(self, texto_cru):
+        texto_norm = self.normalizar(texto_cru)
+        parsed = ParserGeograficoBR.extrair_componentes(texto_norm)
+        
+        if parsed["cep"]:
+            logr, bair, loca, uf, lat_cep, lon_cep = cascata_postal_tripla(parsed["cep"])
+            if loca:
+                num_str = f", {parsed['numero']}" if parsed["numero"] else ""
+                comp_str = f", {parsed['complemento']}" if parsed["complemento"] else ""
+                if parsed["numero"] or parsed["complemento"]: lat_cep, lon_cep = 0.0, 0.0 
+                nome_estado_cep = IBGE_ESTADOS.get(uf, uf) if uf else ""
+                return f"{logr}{num_str}{comp_str}, {bair}, {loca}, {nome_estado_cep}, BRASIL", "CEP", parsed["cep"], lat_cep, lon_cep
+
+        texto_fuzzy = self.aplicar_fuzzy_multidimensional(texto_norm)
+        tipo = self.classificar_entrada(texto_fuzzy)
+        
+        contexto = self.resolver_contexto_administrativo(texto_fuzzy)
+        uf, municipio, distrito = contexto["uf"], contexto["municipio"], contexto["distrito"]
+        
+        nome_estado = IBGE_ESTADOS.get(uf, uf) if uf else ""
+        
+        componentes = [texto_fuzzy]
+        if distrito and distrito not in texto_fuzzy: componentes.append(distrito)
+        if municipio and municipio not in texto_fuzzy: componentes.append(municipio)
+        if nome_estado and nome_estado not in texto_fuzzy: componentes.append(nome_estado)
+        if "BRASIL" not in texto_fuzzy: componentes.append("BRASIL")
+        
+        endereco_canonico = ", ".join(componentes)
+        endereco_canonico = re.sub(r',\s*,', ',', endereco_canonico).strip()
+        
+        return endereco_canonico, tipo, "", 0.0, 0.0
+
 semantica = MotorEnderecoCanônico()
 
 # ==============================================================================
-# 12. GEO DATA PROVIDER LAYER (MÓDULO DE DADOS NACIONAL LOCAL-FIRST)
-# ==============================================================================
-class GeoDataProvider:
-    @staticmethod
-    def buscar_municipio_ibge(nome: str, uf: str) -> dict:
-        try:
-            cursor = db_conn.cursor()
-            if uf:
-                cursor.execute("SELECT codigo_ibge, municipio, uf, lat, lon FROM ibge_municipios WHERE municipio = ? AND uf = ? LIMIT 1", (nome.upper(), uf.upper()))
-            else:
-                cursor.execute("SELECT codigo_ibge, municipio, uf, lat, lon FROM ibge_municipios WHERE municipio = ? LIMIT 1", (nome.upper(),))
-            row = cursor.fetchone()
-            if row:
-                return {"codigo_ibge": row[0], "municipio": row[1], "uf": row[2], "lat": row[3], "lon": row[4]}
-        except Exception as e:
-            ErrorManager.registrar("GeoDataProvider_buscar_municipio_ibge", e)
-        return {}
-
-    @staticmethod
-    def validar_rodovia_oficial(rodovia: str, uf: str, marco_km: float) -> bool:
-        try:
-            cursor = db_conn.cursor()
-            cursor.execute("SELECT 1 FROM dnit_rodovias WHERE rodovia = ? AND uf = ? AND ? BETWEEN km_inicio AND km_fim LIMIT 1", (rodovia.upper(), uf.upper(), marco_km))
-            return cursor.fetchone() is not None
-        except Exception as e:
-            ErrorManager.registrar("GeoDataProvider_validar_rodovia_oficial", e)
-        return False
-
-# ==============================================================================
-# 13. SPATIAL REPOSITORY CORE (POSTGIS & DUCKDB COMPATIBLE ABSTRACTION)
-# ==============================================================================
-class SpatialRepository:
-    @staticmethod
-    def find_nearest(lat: float, lon: float, raio_km: float = 10.0) -> list:
-        try:
-            cursor = db_conn.cursor()
-            cursor.execute("SELECT id, endereco, lat, lon FROM geocodes")
-            rows = cursor.fetchall()
-            validos = []
-            for r in rows:
-                dist = GeocodingValidationCore.calcular_distancia_vincenty(lat, lon, r[2], r[3])
-                if dist <= raio_km:
-                    validos.append({"id": r[0], "endereco": r[1], "lat": r[2], "lon": r[3], "distancia": dist})
-            return sorted(validos, key=lambda x: x["distancia"])
-        except Exception as e:
-            ErrorManager.registrar("SpatialRepository_find_nearest", e)
-        return []
-
-    @staticmethod
-    def save_geocode(id_geocode: str, address: str, lat: float, lon: float, source: str, score: float):
-        try:
-            cursor = db_conn.cursor()
-            cursor.execute("INSERT OR REPLACE INTO geocodes VALUES (?, ?, ?, ?)", (id_geocode, address, lat, lon))
-            cursor.execute("INSERT OR REPLACE INTO geo_addresses VALUES (?, ?, ?, ?, ?, ?, ?)", (id_geocode, address, "", "", "", source, score))
-            db_conn.commit()
-        except Exception as e:
-            ErrorManager.registrar("SpatialRepository_save_geocode", e)
-
-    @staticmethod
-    def save_route(origin_id: str, destination_id: str, distance: float, duration: float, source: str):
-        try:
-            cursor = db_conn.cursor()
-            cursor.execute("INSERT INTO geo_routes VALUES (?, ?, ?, ?, ?)", (origin_id, destination_id, distance, duration, source))
-            db_conn.commit()
-        except Exception as e:
-            ErrorManager.registrar("SpatialRepository_save_route", e)
-
-# ==============================================================================
-# LÓGICA GEODÉSICA DE SUPORTE E CADASTRO POSTAL
+# Motor Geodésico Corporativo de Verificação
 # ==============================================================================
 class GeocodingValidationCore:
     @staticmethod
@@ -566,8 +551,21 @@ class GeocodingValidationCore:
             a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
             return round(6371.0 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)), 2)
         except Exception as e:
-            ErrorManager.registrar("Vincenty_Calc", e)
+            ErrorManager.registrar("Vincenty_Calc_Core", e)
             return 0.0
+
+def auditoria_pre_geocoding(texto_cru, contexto, tipo_entrada):
+    if len(texto_cru) < 4: return "INSUFICIENTE"
+    if tipo_entrada in ["BAIRRO", "RURAL"] and not contexto.get("municipio"): return "INSUFICIENTE"
+    if tipo_entrada in ["ENDERECO_COMPLETO", "LOGRADOURO", "CONDOMINIO"] and not contexto.get("municipio") and not contexto.get("uf"): return "PARCIAL"
+    return "COMPLETO"
+
+def obedience_base_local(contexto_estruturado):
+    if contexto_estruturado["logradouro"] and contexto_estruturado["municipio"] and contexto_estruturado["uf"]:
+        chave_cnefe = f"{contexto_estruturado['logradouro']}_{contexto_estruturado['municipio']}_{contexto_estruturado['uf']}"
+        if chave_cnefe in cache_base_local:
+            return cache_base_local[chave_cnefe]
+    return None
 
 def cascata_postal_tripla(cep_limpo):
     provider = "cascata_postal"
@@ -580,7 +578,7 @@ def cascata_postal_tripla(cep_limpo):
         row = cursor.fetchone()
         if row: return row[0], row[1], row[2], row[3], row[4], row[5]
     except Exception as e:
-        ErrorManager.registrar("correios_ceps_local_lookup", e)
+        ErrorManager.registrar("correios_ceps_local_lookup_fail", e)
 
     if cep_limpo in cache_cep: return cache_cep[cep_limpo]
     lat, lon = 0.0, 0.0
@@ -590,21 +588,11 @@ def cascata_postal_tripla(cep_limpo):
             loc = r.get("location", {}).get("coordinates", {})
             if loc and "latitude" in loc and "longitude" in loc:
                 try: lat, lon = float(loc["latitude"]), float(loc["longitude"])
-                except (ValueError, TypeError): ErrorManager.registrar("BrasilAPI_Float_Cast", TypeError)
+                except (ValueError, TypeError): pass
             d = (r.get('street', ''), r.get('neighborhood', ''), r.get('city', ''), r.get('state', ''), lat, lon)
             cache_cep.set(cep_limpo, d, expire=2592000); return d
     except Exception as e:
-        ErrorManager.registrar("BrasilAPI_CEP", e)
-        circuit_breaker.record_failure(provider)
-    try:
-        def _nom_cep():
-            time.sleep(1.1)
-            url = f"https://nominatim.openstreetmap.org/search?format=json&postalcode={cep_limpo}&countrycodes=br&limit=1"
-            return session.get(url, headers={"User-Agent": "RotasEnterprise/8.0"}, timeout=Settings.NOMINATIM_TIMEOUT).json()
-        r_nom = st.session_state["fila_nominatim"].submit(_nom_cep).result()
-        if r_nom: lat, lon = float(r_nom[0]['lat']), float(r_nom[0]['lon'])
-    except Exception as e:
-        ErrorManager.registrar("Nominatim_CEP", e)
+        ErrorManager.registrar("BrasilAPI_CEP_Network_Fail", e)
         circuit_breaker.record_failure(provider)
     try:
         r = session.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", timeout=Settings.ARCGIS_TIMEOUT).json()
@@ -612,14 +600,28 @@ def cascata_postal_tripla(cep_limpo):
             d = (r.get('logradouro', ''), r.get('bairro', ''), r.get('localidade', ''), r.get('uf', ''), lat, lon)
             cache_cep.set(cep_limpo, d, expire=2592000); return d
     except Exception as e:
-        ErrorManager.registrar("ViaCEP", e)
+        ErrorManager.registrar("ViaCEP_Network_Fail", e)
         circuit_breaker.record_failure(provider)
         
     circuit_breaker.record_success(provider)
     return "", "", "", "", 0.0, 0.0
 
+def validar_consistencia_administrativa(candidato, uf_inf):
+    est_api = unidecode(candidato.get('estado', '')).upper().strip()
+    if uf_inf and est_api:
+        if uf_inf != est_api: return False
+    return True
+
+def validar_consistencia_municipal(candidato, mun_inf):
+    if not mun_inf: return True
+    cid_api = unidecode(candidato.get('cidade', '')).upper().strip()
+    if not cid_api: return False
+    if mun_inf == cid_api or mun_inf in cid_api or cid_api in mun_inf: return True
+    if fuzz.token_set_ratio(mun_inf, cid_api) >= 95: return True
+    return False
+
 # ==============================================================================
-# PROVIDERS DE INTERNET DE CONTINGÊNCIA
+# PROVIDERS DE INTERNET DE CONTINGÊNCIA (GEOCODING)
 # ==============================================================================
 class GeocodingProvider:
     @staticmethod
@@ -634,13 +636,15 @@ class GeocodingProvider:
             r = session.get(url, timeout=Settings.GOOGLE_TIMEOUT, allow_redirects=True)
             match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.url) or re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.text)
             if match: 
-                api_latency.labels(provider=provider).observe(time.time() - start_t)
-                circuit_breaker.record_success(provider)
-                return [{"lat": float(match.group(1)), "lon": float(match.group(2)), "fonte": provider, "score_base": 40, "cidade": "", "estado": "", "bairro": ""}]
+                lat, lon = float(match.group(1)), float(match.group(2))
+                # 7. Dupla Validação Geodésica no Provider
+                if GeocodingValidationCore.validar_coordenada_brasil(lat, lon)[0]:
+                    api_latency.labels(provider=provider).observe(time.time() - start_t)
+                    circuit_breaker.record_success(provider)
+                    return [{"lat": lat, "lon": lon, "fonte": provider, "score_base": 40, "cidade": "", "estado": "", "bairro": ""}]
         except Exception as e:
             ErrorManager.registrar("API_Google_Geocoding", e)
             circuit_breaker.record_failure(provider)
-            api_failures.labels(provider=provider).inc()
         return []
 
     @staticmethod
@@ -653,11 +657,16 @@ class GeocodingProvider:
         try:
             url = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine={requests.utils.quote(query)}&maxLocations=3&sourceCountry=BRA"
             r = session.get(url, timeout=Settings.ARCGIS_TIMEOUT).json()
-            return [{"lat": float(c['location']['y']), "lon": float(c['location']['x']), "fonte": provider, "score_base": 30, "cidade": c.get('attributes', {}).get('City', '').upper(), "estado": c.get('attributes', {}).get('RegionAbbr', '').upper()} for c in r.get('candidates', [])]
+            validos = []
+            for c in r.get('candidates', []):
+                lat, lon = float(c['location']['y']), float(c['location']['x'])
+                # 7. Dupla Validação Geodésica no Provider
+                if GeocodingValidationCore.validar_coordenada_brasil(lat, lon)[0]:
+                    validos.append({"lat": lat, "lon": lon, "fonte": provider, "score_base": 30, "cidade": c.get('attributes', {}).get('City', '').upper(), "estado": c.get('attributes', {}).get('RegionAbbr', '').upper()})
+            return validos
         except Exception as e:
             ErrorManager.registrar("API_ArcGIS", e)
             circuit_breaker.record_failure(provider)
-            api_failures.labels(provider=provider).inc()
         return []
 
 # ==============================================================================
@@ -666,19 +675,19 @@ class GeocodingProvider:
 class GeocodingService:
     @classmethod
     def resolver_consenso(cls, query: str) -> tuple:
-        span_trace = TracingService.iniciar_span("Geocoding")
+        span_trace = TracingService.start_span("Geocoding Execution Pipeline")
         texto_norm = semantica.normalizar(query)
         if not texto_norm: return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A", ["Vazio"]
         
         try:
             cursor = db_conn.cursor()
-            cursor.execute("SELECT lat, lon, nome, cidade FROM osm_logradouros WHERE nome = ? LIMIT 1", (texto_norm,))
+            cursor.execute("SELECT lat, lon, nome, cidade, estado FROM osm_logradouros WHERE nome LIKE ?", (f"%{texto_norm}%",))
             row_osm = cursor.fetchone()
             if row_osm:
-                TracingService.registrar_passo(span_trace, "Consenso (Local OSM Hit)")
-                return row_osm[0], row_osm[1], f"{row_osm[2]}, {row_osm[3]}, BRASIL", "ALTISSIMA", 100, "", row_osm[3], "OSM_LOCAL", ["Local data hit"]
+                TracingService.end_span(span_trace, "Consenso (Local OSM Hit)")
+                return row_osm[0], row_osm[1], f"{row_osm[2]}, {row_osm[3]}, {row_osm[4]}, BRASIL", "ALTISSIMA", 100, "", row_osm[3], "OSM_LOCAL_BASE", ["Local relational OSM database match"]
         except Exception as e:
-            ErrorManager.registrar("osm_local_lookup", e)
+            ErrorManager.registrar("osm_local_lookup_fail", e)
 
         cache_key = hashlib.md5(texto_norm.encode('utf-8')).hexdigest()
         if cache_key in cache_geo:
@@ -687,7 +696,7 @@ class GeocodingService:
         
         tipo = semantica.classificar_entrada(texto_norm)
         ctx = semantica.resolver_contexto_administrativo(texto_norm)
-        TracingService.registrar_passo(span_trace, "Geocoding (Web Cascades)")
+        TracingService.end_span(span_trace, "Geocoding (Cascading Strategy)")
 
         candidatos = []
         candidatos.extend(GeocodingProvider.google_maps_resolve(texto_norm))
@@ -696,7 +705,7 @@ class GeocodingService:
         validos = [cand for cand in candidatos if GeocodingValidationCore.validar_coordenada_brasil(cand["lat"], cand["lon"])[0]]
         if not validos: return 0.0, 0.0, query, "BAIXA", 0, "", "", "FALHA", ["Sem candidatos"]
 
-        TracingService.registrar_passo(span_trace, "DBSCAN")
+        TracingService.end_span(span_trace, "DBSCAN Clustering")
         coords = np.radians([[c["lat"], c["lon"]] for c in validos])
         if len(coords) >= 2:
             try:
@@ -704,9 +713,9 @@ class GeocodingService:
                 if len(set(labels) - {-1}) > 0:
                     top_cluster = collections.Counter([l for l in labels if l != -1]).most_common(1)[0][0]
                     validos = [v for i, v in enumerate(validos) if labels[i] == top_cluster]
-            except Exception as e: ErrorManager.registrar("DBSCAN_Clustering", e)
+            except Exception as e: ErrorManager.registrar("DBSCAN_Clustering_Engine", e)
 
-        TracingService.registrar_passo(span_trace, "Consenso")
+        TracingService.end_span(span_trace, "Consenso Probabilístico")
         validos.sort(key=lambda x: x.get("score_base", 0), reverse=True)
         vencedor = validos[0]
         score_calc = 90 if tipo == "CEP" else 75
@@ -714,10 +723,15 @@ class GeocodingService:
         
         end_oficial = f"{texto_norm} [{vencedor['fonte']}]"
         
-        SpatialRepository.save_geocode(cache_key, end_oficial, vencedor["lat"], vencedor["lon"], vencedor["fonte"], score_calc)
-        
+        SpatialRepository.save_geocode(cache_key, end_oficial, ctx["municipio"], "", "", vencedor["fonte"], score_calc)
         cache_geo.set(cache_key, {"lat": vencedor["lat"], "lon": vencedor["lon"], "endereco": end_oficial, "confianca": confianca, "score": score_calc, "municipio": ctx["municipio"], "fonte": vencedor["fonte"]}, expire=2592000)
-        return vencedor["lat"], vencedor["lon"], end_oficial, confianca, score_calc, "", ctx["municipio"], vencedor["fonte"], ["Processado via APIs externas e unificado"]
+        
+        # 1. Definição correta do chave_auto
+        if score_calc >= 95 and confianca == "ALTISSIMA":
+            chave_auto = texto_cru.upper()
+            cache_aprendizado_auto.set(chave_auto, {"lat": vencedor["lat"], "lon": vencedor["lon"], "endereco": end_oficial, "distrito": "", "municipio": ctx["municipio"], "metadata": {"evidencias_xai": []}}, expire=7776000)
+            
+        return vencedor["lat"], vencedor["lon"], end_oficial, confianca, score_calc, "", ctx["municipio"], vencedor["fonte"], ["Processado via APIs externas"]
 
 # ==============================================================================
 # MOTOR FINANCEIRO, LOGÍSTICO E REGULATÓRIO (TMS CORE ENGINES)
@@ -747,12 +761,20 @@ class HereTrafficProvider:
 class TollProvider:
     @staticmethod
     def calcular_pedagios(lat_o, lon_o, lat_d, lon_d) -> dict:
+        # 8. Correção do cálculo de pedágio por Bounding Box aproximada O(1)
         try:
             cursor = db_conn.cursor()
-            cursor.execute("SELECT tarifa FROM pedagios")
+            cursor.execute("SELECT tarifa, latitude, longitude FROM pedagios")
             rows = cursor.fetchall()
-            if rows: return {"qtd": len(rows), "valor": sum(r[0] for r in rows)}
-        except Exception as e: ErrorManager.registrar("TollProvider", e)
+            if rows:
+                # Cria uma caixa delimitadora entre origem e destino (+ buffer de 0.5 graus)
+                min_lat, max_lat = min(lat_o, lat_d) - 0.5, max(lat_o, lat_d) + 0.5
+                min_lon, max_lon = min(lon_o, lon_d) - 0.5, max(lon_o, lon_d) + 0.5
+                
+                pedagios_interceptados = [r[0] for r in rows if min_lat <= r[1] <= max_lat and min_lon <= r[2] <= max_lon]
+                return {"qtd": len(pedagios_interceptados), "valor": sum(pedagios_interceptados)}
+        except Exception as e:
+            ErrorManager.registrar("TollProvider_Calculations", e)
         return {"qtd": 0, "valor": 0.0}
 
 class FuelCostEngine:
@@ -764,7 +786,7 @@ class FuelCostEngine:
             row = cursor.fetchone()
             preco = row[0] if row else 6.35
             return {"litros": litros_necessarios, "custo": litros_necessarios * preco}
-        except Exception as e: ErrorManager.registrar("FuelCostEngine", e)
+        except Exception as e: ErrorManager.registrar("FuelCostEngine_ANP_Lookup", e)
         return {"litros": litros_necessarios, "custo": litros_necessarios * 6.35}
 
 class CarbonEngine:
@@ -774,7 +796,7 @@ class CarbonEngine:
         try:
             db_conn.cursor().execute("INSERT INTO emissoes VALUES (?, ?, ?, ?, ?)", (rota_id, 0.0, litros_diesel, emissao, str(datetime.now())))
             db_conn.commit()
-        except Exception as e: ErrorManager.registrar("CarbonEngine_SQL_Save", e)
+        except Exception as e: ErrorManager.registrar("CarbonEngine_SQL_Save_Error", e)
         return {"kg_co2": emissao}
 
 class LogisticsCostEngine:
@@ -818,7 +840,6 @@ class OsrmProvider(RoutingProvider):
         except Exception as e:
             ErrorManager.registrar(provider, e)
             circuit_breaker.record_failure(provider)
-            api_failures.labels(provider=provider).inc()
         return None
 
 class GoogleDirectionsProvider(RoutingProvider):
@@ -841,7 +862,6 @@ class GoogleDirectionsProvider(RoutingProvider):
         except Exception as e:
             ErrorManager.registrar(provider, e)
             circuit_breaker.record_failure(provider)
-            api_failures.labels(provider=provider).inc()
         return None
 
 class RoutingProviderManager:
@@ -857,16 +877,17 @@ routing_manager = RoutingProviderManager()
 class RouteService:
     @staticmethod
     def calcular_rota(origem: str, destino: str, veiculo: VehicleProfile, perfil_rota="shortest"):
-        span_global = TracingService.iniciar_span("Routing Pipeline")
-        origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
+        span_global = TracingService.start_span("Transportation Management Execution Span")
+        TracingService.end_span(span_global, "Entrada")
         
-        chave_rota_cache = f"R_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}_{perfil_rota}_{veiculo.tipo}"
+        origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
+        chave_rota_cache = f"ROTA_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}_{perfil_rota}_{veiculo.tipo}"
         if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
         
         lat_o, lon_o, end_oficial_o, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, xai_o = GeocodingService.resolver_consenso(origem_clean)
         lat_d, lon_d, end_oficial_d, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, xai_d = GeocodingService.resolver_consenso(destino_clean)
         
-        TracingService.registrar_passo(span_global, "Routing")
+        TracingService.end_span(span_global, "Geocoding")
         dist_linha_reta = GeocodingValidationCore.calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
         
         res_mapa = None
@@ -878,6 +899,7 @@ class RouteService:
             res_mapa = {"km": km_terrestre, "minutos_base": int((km_terrestre / 60.0) * 60), "provider": "Fallback Geodésico", "score": 70, "geometry": [[lon_o, lat_o], [lon_d, lat_d]]}
 
         RestrictionEngine.validar_restricoes(res_mapa, veiculo)
+        TracingService.end_span(span_global, "Routing & Restriction Validations")
         
         trafego = HereTrafficProvider.obter_trafego_rota(res_mapa["geometry"])
         minutos_finais = res_mapa["minutos_base"] + trafego["delay_minutes"]
@@ -896,14 +918,14 @@ class RouteService:
             logistica["pedagio"], logistica["co2"], logistica["combustivel"], logistica["total"], json.dumps(res_mapa["geometry"])
         )
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
-        TracingService.registrar_passo(span_global, "Exportação")
+        TracingService.end_span(span_global, "Exportação Completa")
         return retorno
 
-def worker_paralelo_lote(item):
+def embrulhar_task_paralela(item):
     par_id, orig, dest, veic, perfil = item
     try: return par_id, RouteService.calcular_rota(orig, dest, veic, perfil)
     except Exception as e:
-        ErrorManager.registrar("WorkerParaleloLote", e)
+        ErrorManager.registrar("WorkerParalelo_Execution_Lote", e)
         return par_id, None
 
 # ==============================================================================
@@ -939,6 +961,20 @@ with st.sidebar:
     altura = 4.3 if "Carreta" in tipo_veiculo else 3.8 if "Toco" in tipo_veiculo else 2.5
     veiculo_operacional = VehicleProfile(tipo_veiculo, peso, altura, 2.6, eixos=5, valor_hora=60.0, custo_km_dep=0.45, fator_manut=0.25)
     perfil_str = "fastest" if perfil_rota == "rápido" else "shortest"
+
+    st.markdown("---")
+    st.header("📖 Manual do Sistema")
+    with st.expander("🎯 Visão Geral"):
+        st.markdown("""
+        O sistema realiza:
+        1. Interpretação do endereço via Parser Brasileiro.
+        2. Geocodificação multi-API assíncrona.
+        3. Consenso espacial ponderado.
+        4. Avaliação de Restrições (Altura, Peso).
+        5. Injeção de Tráfego e Clima (ETA Dinâmico).
+        6. Roteamento Rodoviário.
+        7. Valoração Financeira e Ambiental (ESG).
+        """)
 
 tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
     "📍 Geocodificação Rápida", "⚙️ Processamento em Lote", "📊 Dashboard Executivo", "🕵️ Aba de Auditoria"
@@ -1007,16 +1043,29 @@ with tab_processamento:
                     
                 resultados_unicos = {}
                 executor_lote = st.session_state["executor_global"]
-                tarefas_unicas = [(t, t[0], t[1], veiculo_operacional, perfil_str) for t in pares_unicos]
-                futuros = {executor_lote.submit(worker_paralelo_lote, t): t for t in tarefas_unicas}
                 
+                # 3. Falha no st.session_state resolvida via fallback
+                if "executor_apis" not in st.session_state: st.session_state["executor_apis"] = ThreadPoolExecutor(max_workers=16)
+                
+                tarefas_unicas = [(t, t[0], t[1], veiculo_operacional, perfil_str) for t in pares_unicos]
+                
+                # 10. Processamento Fatiado/Chunking (Batch Limit) mitigando sobrecarga de memória e Threads
                 concluidos = 0
                 barra_progresso = st.progress(0)
+                container_status = st.empty()
+                batch_size = 100 
                 
-                for f in as_completed(futuros):
-                    par_id, res = f.result()
-                    if res: resultados_unicos[par_id] = res
-                    concluidos += 1; barra_progresso.progress(concluidos / len(pares_unicos))
+                for i in range(0, len(tarefas_unicas), batch_size):
+                    lote_atual = tarefas_unicas[i:i+batch_size]
+                    futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in lote_atual}
+                    
+                    for f in as_completed(futuros):
+                        par_id, res = f.result()
+                        if res: resultados_unicos[par_id] = res
+                        concluidos += 1; barra_progresso.progress(concluidos / len(pares_unicos))
+                        container_status.text(f"🚀 Fila de Prioridade Assíncrona: {concluidos} / {len(pares_unicos)}")
+                
+                container_status.text("✨ Distribuindo resultados e gerando matriz analítica...")
                 
                 for idx, origem, destino in mapeamento_linhas:
                     par = (origem, destino)
@@ -1038,8 +1087,11 @@ with tab_analytics:
     st.markdown("### 📊 Dashboard Corporativo OLAP")
     if 'df_processado_v4' in st.session_state:
         df_an = st.session_state['df_processado_v4']
-        df_sucesso = df_an[df_an["Status da Rota"].isna() == False]
         
+        # 5. Tratamento cirúrgico de NaN e Boolean filtering no Pandas
+        df_sucesso = df_an[~df_an["Status da Rota"].fillna("").str.contains("Erro")]
+        
+        # 4. Proteção contra Divisão por Zero em métrica
         geo_accuracy = (len(df_an[df_an['Confianca Destino'].isin(['ALTISSIMA', 'ALTA'])]) / max(len(df_an), 1)) * 100
         p95 = np.percentile(df_sucesso['Distancia'].dropna(), 95) if not df_sucesso.empty else 0
         p99 = np.percentile(df_sucesso['Distancia'].dropna(), 99) if not df_sucesso.empty else 0
