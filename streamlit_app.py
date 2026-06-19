@@ -10,7 +10,7 @@ st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="�
 
 ==============================================================================
 
-🧠 PERSISTÊNCIA EM DISCO E HIGIENIZAÇÃO DE AMBIENTE (GARBAGE COLLECTION)
+ PERSISTÊNCIA EM DISCO E HIGIENIZAÇÃO DE AMBIENTE (GARBAGE COLLECTION)
 
 ==============================================================================
 
