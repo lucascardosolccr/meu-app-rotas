@@ -240,8 +240,6 @@ class MotorEnderecoCanônico:
             if isinstance(dado_salvo, str): 
                 t_raw = dado_salvo
 
-        # ATUALIZAÇÃO V1.12: Remoção absoluta de vírgulas e pontos-e-vírgulas.
-        # Isso destrói o "Bug da Vírgula" que impedia o chunking de parear com a base do IBGE
         t_raw = t_raw.replace(',', ' ').replace(';', ' ')
 
         t = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', t_raw)
@@ -898,6 +896,11 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
 
     rua_f = m["logradouro"] if m["logradouro"] else texto_cru.upper()
     endereco_f = ", ".join([c for c in [rua_f, m["bairro"], m["cidade"], m["estado"]] if c.strip()]) + ", BRASIL"
+    
+    # ATUALIZAÇÃO 1.13: Blindagem Extra. Se for 0.0 (Oceano/Falha), invalida a tupla pro Fallback Assumir
+    if vencedor["lat"] == 0.0 or vencedor["lon"] == 0.0:
+        return None
+        
     return vencedor["lat"], vencedor["lon"], endereco_f, confianca, score_limitado, m["distrito"], m["municipio"], vencedor["fonte"], explicacoes_humanas
 
 # ==============================================================================
@@ -930,9 +933,12 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_cru.upper())
     
     cache_key = hashlib.md5(f"{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    
+    # ATUALIZAÇÃO 1.13: Blindagem contra lixo legado no Cache (como o 0.0, 0.0 de Ribeirão Cascalheira)
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
-        return c["lat"], c["lon"], c["endereco"], c["confianca"], c["score_num"], c["distrito"], c["municipio"], c["fonte"], ["Cache L2 Hit."]
+        if c.get("lat", 0.0) != 0.0 and c.get("lon", 0.0) != 0.0:
+            return c["lat"], c["lon"], c["endereco"], c["confianca"], c["score_num"], c["distrito"], c["municipio"], c["fonte"], ["Cache L2 Hit."]
 
     rua_suja = parsed_comp["resto"]
     for loc in [ctx.get("municipio", ""), ctx.get("distrito", ""), ctx.get("uf", ""), "BRASIL", "DF"]:
@@ -1077,8 +1083,6 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         if match_km and match_tempo:
             km_puro = float(match_km[0].replace('.', '').replace(',', '.'))
             
-            # ATUALIZAÇÃO 1.12: Remoção do limite restritivo de Linha Reta (* 4.0)
-            # Na Amazônia, o contorno viário pode facilmente superar 10x a distância aérea devido à bacia hidrográfica.
             if dist_linha_reta > 0:
                 if km_puro < dist_linha_reta * 0.7: return None  
 
@@ -1137,29 +1141,33 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
 
     if usar_coords:
         res_osrm = rota_osrm(lat_o, lon_o, lat_d, lon_d)
-        if res_osrm and perfil_rota == "fastest":
-            tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-            retorno = (res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
-            cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
 
     res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=False)
 
-    if perfil_rota == "shortest":
-        opcoes = []
-        if res_osrm: opcoes.append((res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3]))
-        if res_google: opcoes.append((res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4]))
+    opcoes = []
+    if res_osrm: opcoes.append((res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3]))
+    if res_google: opcoes.append((res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4]))
+    
+    # ==============================================================================
+    # ATUALIZAÇÃO 1.13: EXPLAINABLE AI DE ROTEAMENTO (XAI) E ARBITRAGEM TEMPORAL
+    # ==============================================================================
+    if opcoes:
+        opcoes_tempo = sorted(opcoes, key=lambda x: parse_tempo_minutos(x[1]))
+        opcoes_dist = sorted(opcoes, key=lambda x: x[0])
         
-        if opcoes:
-            # ATUALIZAÇÃO V1.12: Arbitragem por TEMPO (Fastest) e não por Distância.
-            # Garante que rotas de asfalto compridas vençam rotas de balsa excessivamente demoradas.
-            melhor_opcao = min(opcoes, key=lambda x: parse_tempo_minutos(x[1])) 
-            tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-            retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
-            cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
+        melhor_opcao = opcoes_tempo[0] # The Fastest
+        curta_opcao = opcoes_dist[0]   # The Shortest
+        
+        if len(opcoes) == 1:
+            motivo_roteamento = f"Trajeto único validado pelos provedores viários. Distância: {melhor_opcao[0]}km. Tempo Estipulado: {melhor_opcao[1]}. Balsas: {melhor_opcao[3]}."
+        elif melhor_opcao == curta_opcao:
+            motivo_roteamento = f"Trajeto ideal confirmado: Simultaneamente o caminho mais rápido e o mais curto disponível. Distância: {melhor_opcao[0]}km. Tempo Estipulado: {melhor_opcao[1]}. Balsas: {melhor_opcao[3]}."
+        else:
+            motivo_roteamento = f"Otimização Temporal Ativada: O sistema avaliou múltiplos cenários e decidiu rejeitar o trajeto mais curto ({curta_opcao[0]}km em {curta_opcao[1]} | Balsas: {curta_opcao[3]}) para priorizar a rota rodoviária mais rápida, garantindo maior fluidez logística ({melhor_opcao[0]}km em {melhor_opcao[1]} | Balsas: {melhor_opcao[3]})."
 
-    if res_google:
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-        retorno = (res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
+        # O Motivo Roteamento foi inserido na posição [28] da tupla de retorno
+        retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
 
     km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
@@ -1167,8 +1175,9 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     minutos_est = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0 else 0
     tempo_geo_str = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
     tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
+    motivo_fallback = "Rota viária indisponível. Trajeto matematicamente estimado por aproximação geodésica contornando a distância em Linha Reta."
     
-    retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
+    retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback)
     cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
     return retorno
 
@@ -1177,7 +1186,7 @@ def executar_pipeline_unificado(origem_cru, destino_cru):
     dest = str(destino_cru).strip() if pd.notna(destino_cru) else ""
     
     if orig.lower() in ['nan', 'none', 'null', ''] or dest.lower() in ['nan', 'none', 'null', '']:
-        return ("GEOCODING_FALHOU", "0 min", "", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "", "", "N/A", orig, "BAIXA", 0, "", "", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [])
+        return ("GEOCODING_FALHOU", "0 min", "", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "", "", "N/A", orig, "BAIXA", 0, "", "", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha pré-processamento.")
         
     return calcular_pipeline_logistico(orig, dest, perfil_rota="shortest")
 
@@ -1187,7 +1196,7 @@ def embrulhar_task_paralela(item):
         return par_id, executar_pipeline_unificado(orig, dest)
     except Exception as e: 
         msg_erro = f"FALHA INTERNA: {str(e)}"
-        fallback = (0.0, "0 min", "", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "", "", "N/A", str(orig), "BAIXA", 0, "", "", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro])
+        fallback = (0.0, "0 min", "", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "", "", "N/A", str(orig), "BAIXA", 0, "", "", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], "Erro Crítico.")
         return par_id, fallback
 
 # ==============================================================================
@@ -1329,20 +1338,25 @@ with tab_individual:
             if res_ind and res_ind[0] != "QA_REJEITADO" and res_ind[0] != "GEOCODING_FALHOU":
                 st.success("✅ Rota estabelecida com sucesso!")
                 
-                m_dist_via, m_dist_reta, m_time, m_score = st.columns(4)
+                # ADIÇÃO DAS NOVAS MÉTRICAS: Balsas (Sim/Não) inserido nas colunas ativas
+                m_dist_via, m_dist_reta, m_time, m_balsa, m_score = st.columns(5)
                 
                 m_dist_via.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0])
                 m_dist_reta.metric("Distância Linha Reta", f"{res_ind[4]} km" if isinstance(res_ind[4], float) else res_ind[4])
                 m_time.metric("Tempo Estimado", res_ind[1])
+                m_balsa.metric("Uso de Balsas", res_ind[3])
+                
                 score_g = round((0.35 * res_ind[8]) + (0.35 * res_ind[14]) + (0.30 * res_ind[6]), 2)
-                m_score.metric("Score Global de Qualidade", f"{score_g} / 100")
+                m_score.metric("Score Global", f"{score_g} / 100")
+                
+                # EXPLAINABLE AI VISUAL: Caixa de info explicando a decisão (Tempo vs Distância e Balsas)
+                st.info(f"🧠 **Estratégia de Roteamento:** {res_ind[28]}")
                 
                 lat_o, lon_o = res_ind[19], res_ind[20]
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
                     link_externo = res_ind[2]
-                    
                     match = re.search(r'maps\.google\.com/2([^&]+)&destination=([^&]+)', link_externo)
                     if match:
                         o_param = match.group(1)
@@ -1356,7 +1370,6 @@ with tab_individual:
                 else:
                     st.warning("Renderização de mapa suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
 
-                st.info(f"**Origem fixada por:** {res_ind[11]} | **Destino fixada por:** {res_ind[17]} | **Motor da Rota:** {res_ind[5]}")
                 st.markdown(f"[🔗 Abrir Rota Completa no Aplicativo do Google Maps]({res_ind[2]})")
             else:
                 st.error("Falha na validação de consistência geodésica unificada.")
@@ -1385,8 +1398,10 @@ with tab_processamento:
             
             if st.button("Iniciar Processamento em Lote"):
                 start_lote_clock = time.time()
+                
+                # ADIÇÃO DA COLUNA 'Motivo Roteamento' NO LOTE EXCEL
                 novas_colunas = [
-                    'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Linha Reta', 'Fonte da Rota', 'Score da Rota', 
+                    'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Motivo Roteamento', 'Linha Reta', 'Fonte da Rota', 'Score da Rota', 
                     'Confianca Origem', 'Score Num Origem', 'Distrito Origem', 'Municipio Origem', 'Fonte Geocoding Origem', 'Endereco Oficial Origem',
                     'Confianca Destino', 'Score Num Destino', 'Distrito Destino', 'Municipio Destino', 'Fonte Geocoding Destino', 'Endereco Oficial Destino',
                     'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Status da Rota'
@@ -1445,17 +1460,18 @@ with tab_processamento:
                     if res:
                         df.at[idx, 'Distancia'] = res[0]; df.at[idx, 'Tempo'] = res[1]
                         df.at[idx, 'Link da Rota'] = res[2]; df.at[idx, 'Balsas'] = res[3]
-                        df.at[idx, 'Linha Reta'] = res[4]; df.at[idx, 'Fonte da Rota'] = res[5]
-                        df.at[idx, 'Score da Rota'] = res[6]; df.at[idx, 'Confianca Origem'] = res[7]
-                        df.at[idx, 'Score Num Origem'] = res[8]; df.at[idx, 'Distrito Origem'] = res[9]
-                        df.at[idx, 'Municipio Origem'] = res[10]; df.at[idx, 'Fonte Geocoding Origem'] = res[11]
-                        df.at[idx, 'Endereco Oficial Origem'] = res[12]; df.at[idx, 'Confianca Destino'] = res[13]
-                        df.at[idx, 'Score Num Destino'] = res[14]; df.at[idx, 'Distrito Destino'] = res[15]
-                        df.at[idx, 'Municipio Destino'] = res[16]; df.at[idx, 'Fonte Geocoding Destino'] = res[17]
-                        df.at[idx, 'Endereco Oficial Destino'] = res[18]; df.at[idx, 'Lat Origem'] = res[19]
-                        df.at[idx, 'Lon Origem'] = res[20]; df.at[idx, 'Lat Destino'] = res[21]
-                        df.at[idx, 'Lon Destino'] = res[22]; df.at[idx, 'Tempo Geocoding (s)'] = res[23]
-                        df.at[idx, 'Tempo Roteamento (s)'] = res[24]; df.at[idx, 'Tempo Total (s)'] = res[25]
+                        df.at[idx, 'Motivo Roteamento'] = res[28]; df.at[idx, 'Linha Reta'] = res[4]
+                        df.at[idx, 'Fonte da Rota'] = res[5]; df.at[idx, 'Score da Rota'] = res[6]
+                        df.at[idx, 'Confianca Origem'] = res[7]; df.at[idx, 'Score Num Origem'] = res[8]
+                        df.at[idx, 'Distrito Origem'] = res[9]; df.at[idx, 'Municipio Origem'] = res[10]
+                        df.at[idx, 'Fonte Geocoding Origem'] = res[11]; df.at[idx, 'Endereco Oficial Origem'] = res[12]
+                        df.at[idx, 'Confianca Destino'] = res[13]; df.at[idx, 'Score Num Destino'] = res[14]
+                        df.at[idx, 'Distrito Destino'] = res[15]; df.at[idx, 'Municipio Destino'] = res[16]
+                        df.at[idx, 'Fonte Geocoding Destino'] = res[17]; df.at[idx, 'Endereco Oficial Destino'] = res[18]
+                        df.at[idx, 'Lat Origem'] = res[19]; df.at[idx, 'Lon Origem'] = res[20]
+                        df.at[idx, 'Lat Destino'] = res[21]; df.at[idx, 'Lon Destino'] = res[22]
+                        df.at[idx, 'Tempo Geocoding (s)'] = res[23]; df.at[idx, 'Tempo Roteamento (s)'] = res[24]
+                        df.at[idx, 'Tempo Total (s)'] = res[25]
                         
                         score_o, score_d, score_r = res[8], res[14], res[6]
                         score_global = round((0.35 * score_o) + (0.35 * score_d) + (0.30 * score_r), 2)
