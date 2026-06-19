@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import pydeck as pdk
@@ -1017,12 +1018,12 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             dist_cross = calcular_distancia_vincenty(lat_d, lon_d, google_dest_geo[0]["lat"], google_dest_geo[0]["lon"])
             if dist_cross > 20.0: return None 
 
+    # URL oficial higienizada para evitar quebras por obfuscation
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
-    url_api = f"https://www.google.com/maps/search/{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     
-    # URL de Fallback e Botão consertada para a sintaxe oficial limpa (Direções Google Maps)
-    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={lat_o},{lon_o}&destination={lat_d},{lon_d}&travelmode=driving"
+    url_api = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/data=!4m2!4m1!3e0"
+    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     try:
@@ -1082,7 +1083,9 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
         dist_linha_reta = 0.0
 
     # URL oficial higienizada para fallback universal
-    link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={lat_o},{lon_o}&destination={lat_d},{lon_d}&travelmode=driving"
+    orig_param_fb = f"{lat_o},{lon_o}" if (lat_o != 0.0 and lon_o != 0.0) else requests.utils.quote(origem_clean)
+    dest_param_fb = f"{lat_d},{lon_d}" if (lat_d != 0.0 and lon_d != 0.0) else requests.utils.quote(destino_clean)
+    link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
 
     res_osrm = None
     if lat_o != 0.0 and lat_d != 0.0:
@@ -1264,7 +1267,7 @@ with st.sidebar:
 
     with st.expander("12. Validador Rápido (Single-Shot)", expanded=False):
         st.markdown("""
-        **Fluxo Individual:** Injetado via UI direta. Utiliza o mesmíssimo pipeline `executar_pipeline_unificado`. A extração do mapa da rota viária (GeoJSON) é feita consultando a topologia exata das vias em background, renderizando a geometria das ruas sobre um mapa base 3D robusto da biblioteca PyDeck.
+        **Fluxo Individual:** Injetado via UI direta. Utiliza o mesmíssimo pipeline `executar_pipeline_unificado`. Conta com um renderizador geoespacial interativo do **Google Maps** embutido via `iframe` nativo, que constrói rotas precisas usando fallback de strings para endereços complexos (prevenindo anomalias de coordenadas no oceano).
         """)
 
 tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
@@ -1279,11 +1282,11 @@ with tab_individual:
     
     if st.button("🚀 Calcular Rota Individual", type="primary"):
         if orig_ind and dest_ind:
-            with st.spinner("Acionando motores de geocodificação e extraindo geometria da rota..."):
+            with st.spinner("Acionando motores de geocodificação e consenso unificado..."):
                 res_ind = executar_pipeline_unificado(orig_ind, dest_ind)
                 
             if res_ind and res_ind[0] != "QA_REJEITADO" and res_ind[0] != "GEOCODING_FALHOU":
-                st.success("✅ Rota e Geometria estabelecidas com sucesso!")
+                st.success("✅ Rota estabelecida com sucesso!")
                 m_dist, m_time, m_score = st.columns(3)
                 m_dist.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0])
                 m_time.metric("Tempo Estimado", res_ind[1])
@@ -1293,45 +1296,16 @@ with tab_individual:
                 lat_o, lon_o = res_ind[19], res_ind[20]
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
-                if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    # Nova Abordagem (GeoJSON PathLayer): Extrai a rota real das ruas em vez de usar iframe
-                    rota_coords = [[lon_o, lat_o], [lon_d, lat_d]]
-                    try:
-                        url_osrm_geo = f"https://router.project-osrm.org/route/v1/driving/{lon_o},{lat_o};{lon_d},{lat_d}?overview=full&geometries=geojson"
-                        r_geo = requests.get(url_osrm_geo, timeout=5).json()
-                        if r_geo.get("routes") and len(r_geo["routes"]) > 0:
-                            rota_coords = r_geo["routes"][0]["geometry"]["coordinates"]
-                    except Exception:
-                        pass
-                        
-                    rota_layer = pdk.Layer(
-                        "PathLayer",
-                        data=[{"path": rota_coords}],
-                        get_path="path",
-                        get_color=[0, 200, 255, 200], # Traçado Ciano Brilhante
-                        width_scale=20,
-                        width_min_pixels=4,
-                        get_width=5,
-                    )
-                    
-                    scatter_layer = pdk.Layer(
-                        "ScatterplotLayer",
-                        data=[{"pos": [lon_o, lat_o], "color": [0, 255, 128]}, {"pos": [lon_d, lat_d], "color": [255, 0, 0]}],
-                        get_position="pos",
-                        get_fill_color="color",
-                        get_radius=800,
-                        radius_min_pixels=5,
-                    )
-                    
-                    lat_c, lon_c = (lat_o + lat_d) / 2, (lon_o + lon_d) / 2
-                    
-                    st.pydeck_chart(pdk.Deck(
-                        layers=[rota_layer, scatter_layer], 
-                        initial_view_state=pdk.ViewState(latitude=lat_c, longitude=lon_c, zoom=5, pitch=40), 
-                        map_style="mapbox://styles/mapbox/dark-v10"
-                    ))
-                else:
-                    st.warning("Renderização de mapa suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
+                # ==============================================================================
+                # LÓGICA DE FALLBACK DIRETO: Impede o "Ponto Zero do Oceano (0.0, 0.0)"
+                # Se as coordenadas geocodificadas forem 0.0 mas a rota foi calculada,
+                # injeta as strings de entrada diretas no iframe para o Google Maps resolver.
+                # ==============================================================================
+                o_param = f"{lat_o},{lon_o}" if (lat_o != 0.0 and lon_o != 0.0) else requests.utils.quote(orig_ind)
+                d_param = f"{lat_d},{lon_d}" if (lat_d != 0.0 and lon_d != 0.0) else requests.utils.quote(dest_ind)
+
+                url_iframe = f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed"
+                components.iframe(url_iframe, height=470, scrolling=True)
 
                 st.info(f"**Origem fixada por:** {res_ind[11]} | **Destino fixada por:** {res_ind[17]} | **Motor da Rota:** {res_ind[5]}")
                 st.markdown(f"[🔗 Abrir Rota Completa no Aplicativo do Google Maps]({res_ind[2]})")
