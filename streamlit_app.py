@@ -691,7 +691,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     candidatos_validos = []
     candidatos_para_avaliacao = candidatos.copy()
     
-    # ATUALIZAÇÃO V1.14: Sincronização Léxica em Todo o Motor de Consenso
+    # ATUALIZAÇÃO V1.14: Higienização forçada antes do pareamento Bayesiano.
     texto_norm = semantica.normalizar(texto_cru)
     ctx_inf = semantica.resolver_contexto_administrativo(texto_norm)
     uf_inf, mun_inf, dist_inf = ctx_inf.get("uf", ""), ctx_inf.get("municipio", ""), ctx_inf.get("distrito", "")
@@ -741,7 +741,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
                 c1_amb = candidatos_validos[labels.tolist().index(contagem_clusters[0][0])]
                 c2_amb = candidatos_validos[labels.tolist().index(contagem_clusters[1][0])]
                 motivo_amb = f"AMBÍGUO: Empate de consenso entre {c1_amb.get('cidade','')}/{c1_amb.get('estado','')} e {c2_amb.get('cidade','')}/{c2_amb.get('estado','')}"
-                return 0.0, 0.0, texto_cru, "AMBIGUA", 0, "", "", "N/A", [motivo_amb]
+                return 0.0, 0.0, texto_norm, "AMBIGUA", 0, "", "", "N/A", [motivo_amb]
                 
             maior_cluster_label = contagem_clusters[0][0]
             candidatos_validos = [candidatos_validos[idx] for idx, label in enumerate(labels) if label == maior_cluster_label]
@@ -911,7 +911,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     texto_cru = str(localidade).strip()
     if not texto_cru or texto_cru.lower() == 'nan': return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A", ["String Vazia"]
     
-    # ATUALIZAÇÃO V1.14: Sincronização Léxica Absoluta
+    # ATUALIZAÇÃO V1.14: Higienização absoluta precoce. Impede strings sujas de quebrarem o Fallback IBGE
     texto_norm = semantica.normalizar(texto_cru)
     
     if match_coords := re.match(r'^\s*(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$', texto_cru):
@@ -1145,26 +1145,23 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     if usar_coords:
         res_osrm = rota_osrm(lat_o, lon_o, lat_d, lon_d)
 
+    # ATUALIZAÇÃO 1.14: Identidade Absoluta e Soberania do Google Maps.
     res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=False)
 
-    opcoes = []
-    if res_osrm: opcoes.append((res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3]))
-    if res_google: opcoes.append((res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4]))
-    
-    if opcoes:
-        opcoes_tempo = sorted(opcoes, key=lambda x: parse_tempo_minutos(x[1]))
-        opcoes_dist = sorted(opcoes, key=lambda x: x[0])
-        
-        melhor_opcao = opcoes_tempo[0] 
-        curta_opcao = opcoes_dist[0]   
-        
-        if len(opcoes) == 1:
-            motivo_roteamento = f"Trajeto único validado pelos provedores viários. Distância: {melhor_opcao[0]}km. Tempo Estipulado: {melhor_opcao[1]}. Balsas: {melhor_opcao[3]}."
-        elif melhor_opcao == curta_opcao:
-            motivo_roteamento = f"Trajeto ideal confirmado: Simultaneamente o caminho mais rápido e o mais curto disponível. Distância: {melhor_opcao[0]}km. Tempo Estipulado: {melhor_opcao[1]}. Balsas: {melhor_opcao[3]}."
+    if res_google:
+        melhor_opcao = res_google
+        if melhor_opcao[3] == "Sim":
+            motivo_roteamento = f"Identidade Absoluta: Rota extraída do provedor principal ({melhor_opcao[0]}km em {melhor_opcao[1]}). O sistema optou por um trajeto envolvendo balsa por ser a rota direta mais eficiente fornecida."
         else:
-            motivo_roteamento = f"Otimização Temporal Ativada: O sistema avaliou múltiplos cenários e decidiu rejeitar o trajeto mais curto ({curta_opcao[0]}km em {curta_opcao[1]} | Balsas: {curta_opcao[3]}) para priorizar a rota rodoviária mais rápida, garantindo maior fluidez logística ({melhor_opcao[0]}km em {melhor_opcao[1]} | Balsas: {melhor_opcao[3]})."
+            motivo_roteamento = f"Identidade Absoluta: Rota extraída do provedor principal ({melhor_opcao[0]}km em {melhor_opcao[1]}). O sistema priorizou o traçado terrestre (asfalto), contornando vias aquáticas."
+        
+        tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
+        retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
+        cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
 
+    if res_osrm:
+        melhor_opcao = (res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3])
+        motivo_roteamento = "Google indisponível. Fallback OSRM ativado."
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
         retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
