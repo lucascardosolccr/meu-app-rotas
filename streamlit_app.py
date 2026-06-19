@@ -11,6 +11,9 @@ import os
 import pickle
 import collections
 import hashlib
+import sqlite3     # Correção Cirúrgica: Importação restaurada
+import json        # Correção Cirúrgica: Importação restaurada
+import threading   # Correção Cirúrgica: Importação restaurada
 from unidecode import unidecode
 from rapidfuzz import process, fuzz
 from diskcache import Cache
@@ -20,146 +23,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ==============================================================================
-# TRATAMENTO DE DEPENDÊNCIAS
-# ==============================================================================
-try:
-    import structlog
-    from prometheus_client import Counter, Histogram
-except ImportError as e:
-    st.error(f"🚨 **Erro de Dependência (ModuleNotFoundError):** O pacote `{e.name}` não está instalado no ambiente.")
-    st.stop()
-
-# ==============================================================================
-# CONFIGURAÇÕES CENTRALIZADAS
-# ==============================================================================
-class Settings:
-    GOOGLE_TIMEOUT = 8
-    TOMTOM_TIMEOUT = 5
-    ARCGIS_TIMEOUT = 5
-    NOMINATIM_TIMEOUT = 5
-    OSRM_TIMEOUT = 5
-    PHOTON_TIMEOUT = 5
-    OVERPASS_TIMEOUT = 5
-    MAX_REQ_PER_SEC = 50
-    CIRCUIT_BREAKER_FAILURES = 10
-    WORKERS_DISPONIVEIS = 8
-
-# ==============================================================================
-# BANCO DE DADOS RELACIONAL EM MEMÓRIA (PEDÁGIOS, COMBUSTÍVEL E EMISSÕES)
-# ==============================================================================
-db_conn = sqlite3.connect(":memory:", check_same_thread=False)
-
-def inicializar_banco_relacional():
-    cursor = db_conn.cursor()
-    # Tabela de Pedágios (ANTT/DER)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS pedagios (
-            id INTEGER PRIMARY KEY, nome TEXT, rodovia TEXT, km REAL, latitude REAL, longitude REAL, tarifa REAL
-        )
-    """)
-    # Tabela de Combustível (ANP)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS precos_combustivel (
-            estado TEXT, municipio TEXT, diesel REAL, gasolina REAL, etanol REAL, gnv REAL, data TEXT
-        )
-    """)
-    # Tabela de Emissões ESG
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS emissoes (
-            rota_id TEXT, km REAL, litros REAL, co2 REAL, data TEXT
-        )
-    """)
-    
-    # Inserção de dados simulados (Mock Data Ground Truth)
-    cursor.execute("INSERT INTO pedagios VALUES (1, 'Praça Cajamar', 'SP-330', 38.5, -23.35, -46.88, 12.40)")
-    cursor.execute("INSERT INTO pedagios VALUES (2, 'Praça Brasília', 'BR-040', 10.0, -15.80, -47.90, 6.80)")
-    cursor.execute("INSERT INTO precos_combustivel VALUES ('SP', 'SÃO PAULO', 6.15, 5.80, 3.90, 3.10, '2023-10-01')")
-    cursor.execute("INSERT INTO precos_combustivel VALUES ('DF', 'BRASÍLIA', 6.40, 5.95, 4.10, 3.50, '2023-10-01')")
-    db_conn.commit()
-
-inicializar_banco_relacional()
-
-# ==============================================================================
-# OBSERVABILIDADE, LOGGING ESTRUTURADO E ERROR MANAGER
-# ==============================================================================
-structlog.configure(
-    processors=[
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.JSONRenderer()
-    ]
-)
-logger = structlog.get_logger()
-
-class ErrorManager:
-    @staticmethod
-    def registrar(modulo, erro):
-        logger.exception(f"{modulo}_falha", erro=str(erro), tipo=type(erro).__name__)
-
-@st.cache_resource
-def init_prometheus_metrics():
-    return {
-        'geocode_requests': Counter('geocode_requests_total', 'Geocoding requests', ['provider']),
-        'route_requests': Counter('route_requests_total', 'Routing requests', ['provider']),
-        'api_failures': Counter('api_failures_total', 'API failures', ['provider']),
-        'api_latency': Histogram('provider_latency_seconds', 'API Latency', ['provider'])
-    }
-
-_metrics = init_prometheus_metrics()
-geocode_requests = _metrics['geocode_requests']
-route_requests = _metrics['route_requests']
-api_failures = _metrics['api_failures']
-api_latency = _metrics['api_latency']
-
-# ==============================================================================
-# SEGURANÇA E RESILIÊNCIA (RATE LIMITER E CIRCUIT BREAKER)
-# ==============================================================================
-class CircuitBreaker:
-    def __init__(self, threshold=Settings.CIRCUIT_BREAKER_FAILURES):
-        self.failures = collections.defaultdict(int)
-        self.threshold = threshold
-        self.state = collections.defaultdict(lambda: "UP")
-
-    def allow(self, provider):
-        return self.failures[provider] < self.threshold
-
-    def record_success(self, provider):
-        self.failures[provider] = 0
-        self.state[provider] = "UP"
-
-    def record_failure(self, provider):
-        self.failures[provider] += 1
-        if self.failures[provider] >= self.threshold:
-            self.state[provider] = "DOWN"
-
-class RateLimiter:
-    def __init__(self, max_per_second):
-        self.interval = 1.0 / max_per_second
-        self.last_called = collections.defaultdict(float)
-        self.lock = threading.Lock()
-
-    def wait(self, provider):
-        with self.lock:
-            elapsed = time.time() - self.last_called[provider]
-            if elapsed < self.interval:
-                time.sleep(self.interval - elapsed)
-            self.last_called[provider] = time.time()
-
-circuit_breaker = CircuitBreaker()
-rate_limiter = RateLimiter(Settings.MAX_REQ_PER_SEC)
-
-class HealthService:
-    @staticmethod
-    def check():
-        return circuit_breaker.state
-
-# ==============================================================================
 # CONFIGURAÇÃO DE UI/UX E AMBIENTE
 # ==============================================================================
 st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="wide")
-
-if st.query_params.get("health") == "true":
-    st.json(HealthService.check())
-    st.stop()
 
 TOMTOM_API_KEY = "" # Insira sua credencial TomTom Logistics aqui
 
@@ -207,8 +73,10 @@ CACHE_IBGE_PATH = "municipios_ibge.pkl"
 # ==============================================================================
 # 🎛️ INFRAESTRUTURA DE CONCORRÊNCIA E FILAS (FIM DO EFEITO COMBOIO)
 # ==============================================================================
+WORKERS_DISPONIVEIS = 8
+
 if "executor_global" not in st.session_state:
-    st.session_state["executor_global"] = ThreadPoolExecutor(max_workers=Settings.WORKERS_DISPONIVEIS)
+    st.session_state["executor_global"] = ThreadPoolExecutor(max_workers=WORKERS_DISPONIVEIS)
 
 if "fila_nominatim" not in st.session_state:
     st.session_state["fila_nominatim"] = ThreadPoolExecutor(max_workers=1)
@@ -1101,7 +969,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 
     def disparar_apis_paralelas(tarefas):
         resultados = []
-        for f in as_completed([GLOBAL_EXECUTOR_APIS.submit(func, *args, **kwargs) for func, args, kwargs in tarefas]):
+        for f in as_completed([st.session_state["executor_apis"].submit(func, *args, **kwargs) for func, args, kwargs in tarefas]):
             if res := f.result(): resultados.extend(res)
         return resultados
 
@@ -1273,62 +1141,28 @@ with st.sidebar:
     st.header("📖 Manual do Sistema")
     with st.expander("🎯 Visão Geral"):
         st.markdown("""
-        **Objetivo do Sistema:** Automatizar, padronizar e auditar a roteirização logística em larga escala.  
-        **Arquitetura Lógica:** 1. Recepção de Entradas (Planilha/UI) > 2. Normalização (Parser BR) > 3. Geocoding Feeder (APIs em paralelo) > 4. Spatial Consensus (DBSCAN) > 5. Routing Engine > 6. Analytics Export.  
-        **Arquitetura Física:** Backend em Streamlit (Python) operando sobre base local SQLite e Múltiplos Provedores de API Externos usando Processamento Assíncrono (`ThreadPoolExecutor`).  
+        O sistema realiza:
+        1. Interpretação do endereço via Parser Brasileiro.
+        2. Geocodificação multi-API assíncrona.
+        3. Consenso espacial ponderado por densidade (DBSCAN).
+        4. Validação IBGE e bases offline locais.
+        5. Reverse Geocoding Closed-Loop.
+        6. Roteamento rodoviário.
+        7. Geração da planilha final enriquecida.
         """)
-    with st.expander("📍 Fluxo de Geocodificação"):
+    with st.expander("📍 Como a Geocodificação Funciona"):
         st.markdown("""
-        1. **Endereço Recebido:** Limpeza de acentuação, expansão de siglas logísticas (ex: "CD" vira "Centro de Distribuição").  
-        2. **Tratamento IBGE:** Varredura na string buscando nomes exatos de municípios e siglas de UF do Brasil.  
-        3. **CEP e Parser:** Expressões regulares (Regex) extraem e separam componentes da via (Av, Rua, Quadra) e o CEP, disparando uma **Cascata de Correios** (BrasilAPI > ViaCEP > OpenCEP) que localiza o polígono.  
+        APIs utilizadas de forma paralela:
+        - ArcGIS, Google Geocoding, TomTom
+        - Nominatim, Photon, Overpass (POIs)
+        - BrasilAPI & ViaCEP (Cascata Postal)
         """)
-    with st.expander("🌊 Cascata de Geocodificação"):
-        st.markdown("""
-        As APIs são disparadas via *Threads* para não bloquear a UI:
-        - **Google Maps:** Scraper do Preview gera a âncora principal.  
-        - **ArcGIS:** Engine corporativo forte em números prediais.  
-        - **Nominatim & Photon:** Bases OpenStreetMap ideais para vias secundárias.  
-        - **TomTom:** Provedor fallback.  
-        - **Overpass:** Focado estritamente na localização de POIs (Pontos de Interesse, Hospitais, Prédios).  
-        """)
-    with st.expander("🤝 Consenso Espacial"):
-        st.markdown("""
-        **O que é:** Resolução de coordenadas conflitantes entre provedores.  
-        O **DBSCAN** agrupa coordenadas num raio esférico de até 2km. Aquele que aglomerar mais provedores apontando para a mesma zona vence.  
-        Um **Teorema de Bayes** calcula o peso do provedor + correspondência do bairro/CEP (`fuzz.token_set_ratio`).
-        """)
-    with st.expander("🔄 Reverse Geocoding"):
-        st.markdown("""
-        **O que é:** Identificar o endereço descritivo a partir da Latitude/Longitude vencedora. Executado logo após o DBSCAN via Nominatim ou ArcGIS. Valida se a rua retornada matematicamente corresponde ao pedido inicial do usuário. Reduz o Score se der "falso positivo".
-        """)
-    with st.expander("📏 Distância Linha Reta"):
-        st.markdown("""
-        **Fórmula:** Utiliza o algoritmo geodésico de **Vincenty** e *Haversine* para calcular a menor distância curva sobre o globo terrestre. É exibida para comprovar matematicamente os desvios obrigatórios que os caminhões precisam fazer nas rodovias.
-        """)
-    with st.expander("🛣️ Cálculo de Rota"):
-        st.markdown("""
-        **OSRM:** Traça o trajeto vetorial oficial pelas regras do OpenStreetMap.  
-        **Google Maps (Scraping):** Extrai tempo e rota oficiais da interface visual para garantir alta fidedignidade com restrições momentâneas.  
-        **Geodésico Adaptativo (Fallback):** Pega a Linha Reta e multiplica por 1.45 (curtas) ou 1.18 (longas) caso falte internet.
-        """)
-    with st.expander("⛴️ Detecção de Balsas"):
-        st.markdown("""
-        Extraída dinamicamente caso as APIs web retornem nas instruções que o veículo precisará de travessia intermodal (`ferry` ou equivalente).
-        """)
-    with st.expander("🛡️ Sistema de Auditoria"):
-        st.markdown("""
-        O Score consolida dezenas de pesos. `100` = Coord exata ou CEP validado. Abaixo de `80` sinaliza que o modelo estatístico arbitrou uma dúvida. Interpretando: > 85 Excelente; 70-84 Aceitável; < 70 Revisão Manual de rota.
-        """)
-    with st.expander("💾 Caches e Machine Learning"):
-        st.markdown("""
-        **Caches L1/L2:** Evita requisições web repetidas (salva $).  
-        **Aprendizado:** Uma matriz que recebe Score > 95 guarda a origem perfeita no Cache Auto. Consultas futuras não acessam rede, respondem de forma imediata (O(1)).
-        """)
-    with st.expander("⚙️ Processamento em Lote vs Single-Shot"):
-        st.markdown("""
-        **Pipeline Único:** Ambos utilizam a mesma função `calcular_pipeline_logistico` para que os dados convirjam. O Processamento em Lote fatiar (chunking) a execução das Threads, disparando N endereços da Planilha contra as mesmas regras do Validador Individual simultaneamente.
-        """)
+    with st.expander("🛣️ Como a Rota é Calculada"):
+        st.markdown("Prioridade Viária: 1. OSRM | 2. Google Directions | 3. Geodésico Adaptativo.")
+    with st.expander("📏 Linha Reta vs Rota"):
+        st.markdown("A linha reta usa a fórmula de *Vincenty*. A rota real avalia restrições de malha e manobras terrestres.")
+    with st.expander("📊 Score Global"):
+        st.markdown("Fórmula Ponderada: 35% Origem + 35% Destino + 30% Qualidade da Rota Viária.")
 
 tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
     "📍 Geocodificação Rápida", "⚙️ Processamento em Lote", "📊 Analytics & Saúde", "🕵️ Aba de Auditoria"
@@ -1355,8 +1189,43 @@ with tab_individual:
                 
                 lat_c, lon_c = (res_ind[19] + res_ind[21]) / 2, (res_ind[20] + res_ind[22]) / 2
                 
-                RouteMapRenderer.render(json.dumps([[res_ind[20], res_ind[19]], [res_ind[22], res_ind[21]]]), res_ind[19], res_ind[20], res_ind[21], res_ind[22])
+                arc_layer = pdk.Layer(
+                    "ArcLayer",
+                    data=[{"origem": [res_ind[20], res_ind[19]], "destino": [res_ind[22], res_ind[21]]}],
+                    get_source_position="origem",
+                    get_target_position="destino",
+                    get_source_color=[0, 255, 128, 160],
+                    get_target_color=[255, 0, 0, 160],
+                    width_scale=0.04,
+                    width_min_pixels=3,
+                    width_max_pixels=15,
+                )
                 
+                scatter_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    data=[{"pos": [res_ind[20], res_ind[19]], "color": [0, 255, 128]}, {"pos": [res_ind[22], res_ind[21]], "color": [255, 0, 0]}],
+                    get_position="pos",
+                    get_fill_color="color",
+                    get_radius=800,
+                )
+                
+                coverage_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    data=[
+                        {"pos": [res_ind[22], res_ind[21]], "radius": 50000, "color": [255, 165, 0, 80]},
+                        {"pos": [res_ind[22], res_ind[21]], "radius": 100000, "color": [0, 191, 255, 60]},
+                        {"pos": [res_ind[22], res_ind[21]], "radius": 200000, "color": [138, 43, 226, 40]}
+                    ],
+                    get_position="pos",
+                    get_radius="radius",
+                    stroked=True,
+                    filled=True,
+                    get_fill_color="color",
+                    get_line_color=[255, 255, 255, 150],
+                    line_width_min_pixels=1
+                )
+                
+                st.pydeck_chart(pdk.Deck(layers=[coverage_layer, arc_layer, scatter_layer], initial_view_state=pdk.ViewState(latitude=lat_c, longitude=lon_c, zoom=4, pitch=45), map_style="mapbox://styles/mapbox/dark-v10"))
                 st.info(f"**Origem fixada por:** {res_ind[11]} | **Destino fixada por:** {res_ind[17]} | **Motor da Rota:** {res_ind[5]}")
                 st.markdown(f"[🔗 Abrir Rota no Google Maps]({res_ind[2]})")
             else:
@@ -1419,26 +1288,23 @@ with tab_processamento:
                 st.info(f"Otimização O(U) com Fila Inteligente Ativa: {len(pares_unicos)} rotas exclusivas na esteira de processamento.")
                     
                 resultados_unicos = {}
-                executor_lote = GLOBAL_EXECUTOR_GLOBAL
+                executor_lote = st.session_state["executor_global"]
                 tarefas_unicas = [(t[1], t[1][0], t[1][1]) for t in tarefas_priorizadas]
+                futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in tarefas_unicas}
                 
                 concluidos = 0
                 barra_progresso = st.progress(0)
                 container_status = st.empty()
+                
                 st.session_state['logs_auditoria'] = []
                 
-                batch_size = 50
-                for i in range(0, len(tarefas_unicas), batch_size):
-                    lote_atual = tarefas_unicas[i:i + batch_size]
-                    futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in lote_atual}
-                    
-                    for f in as_completed(futuros):
-                        par_id, res = f.result()
-                        resultados_unicos[par_id] = res
-                            
-                        concluidos += 1
-                        container_status.text(f"🚀 Fila de Prioridade Assíncrona: {concluidos} / {len(pares_unicos)}")
-                        barra_progresso.progress(concluidos / len(pares_unicos))
+                for f in as_completed(futuros):
+                    par_id, res = f.result()
+                    resultados_unicos[par_id] = res
+                        
+                    concluidos += 1
+                    container_status.text(f"🚀 Fila de Prioridade Assíncrona: {concluidos} / {len(pares_unicos)}")
+                    barra_progresso.progress(concluidos / len(pares_unicos))
                     
                 container_status.text("✨ Distribuindo resultados e gerando logs de auditoria...")
                 
@@ -1505,10 +1371,8 @@ with tab_processamento:
 with tab_analytics:
     st.markdown("### 📊 Painel de KPIs e Saúde do Sistema")
     if 'df_processado' in st.session_state:
-        df_kpi = st.session_state['df_processado'].copy()
-        
-        df_kpi['Score Final Global'] = pd.to_numeric(df_kpi['Score Final Global'], errors='coerce')
-        df_sucesso = df_kpi[~df_kpi["Status da Rota"].fillna("").str.contains("Erro")]
+        df_kpi = st.session_state['df_processado']
+        df_sucesso = df_kpi[df_kpi["Status da Rota"].str.contains("Erro") == False]
         
         col_k1, col_k2, col_k3 = st.columns(3)
         col_k1.metric("Total de Rotas em Lote", len(df_kpi))
@@ -1522,24 +1386,17 @@ with tab_analytics:
         
         st.markdown("---")
         st.markdown("#### 🚨 Mapa de Calor de Inconsistências (Score < 70)")
-        df_erros = df_kpi[df_kpi['Score Final Global'] < 70].dropna(subset=['Lat Destino', 'Lon Destino']).copy()
-        df_erros = df_erros[df_erros.apply(lambda row: RouteMapRenderer.validar_coordenadas(row['Lat Destino'], row['Lon Destino']), axis=1)]
-        
+        df_erros = df_kpi[df_kpi['Score Final Global'] < 70].dropna(subset=['Lat Destino', 'Lon Destino'])
         if not df_erros.empty:
-            df_erros['HeatmapWeight'] = 100 - df_erros['Score Final Global'].fillna(0)
-            try:
-                heatmap_layer = pdk.Layer(
-                    "HeatmapLayer",
-                    data=df_erros,
-                    get_position=['Lon Destino', 'Lat Destino'],
-                    aggregation='"SUM"',
-                    get_weight="HeatmapWeight",
-                    radiusPixels=50,
-                )
-                st.pydeck_chart(pdk.Deck(layers=[heatmap_layer], initial_view_state=pdk.ViewState(latitude=-15.78, longitude=-47.92, zoom=3), map_style="mapbox://styles/mapbox/dark-v10"))
-            except Exception as e:
-                ErrorManager.registrar("HeatmapRender", e)
-                st.warning("O mapa de calor encontrou dados imprecisos de coordenadas e foi ocultado de forma defensiva.")
+            heatmap_layer = pdk.Layer(
+                "HeatmapLayer",
+                data=df_erros,
+                get_position=['Lon Destino', 'Lat Destino'],
+                aggregation='"SUM"',
+                get_weight="100 - `Score Final Global`",
+                radiusPixels=50,
+            )
+            st.pydeck_chart(pdk.Deck(layers=[heatmap_layer], initial_view_state=pdk.ViewState(latitude=-15.78, longitude=-47.92, zoom=3), map_style="mapbox://styles/mapbox/dark-v10"))
         else:
             st.success("🎉 Nenhuma inconsistência crítica detectada nas execuções atuais.")
             
