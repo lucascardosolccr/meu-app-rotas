@@ -691,7 +691,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     candidatos_validos = []
     candidatos_para_avaliacao = candidatos.copy()
     
-    # ATUALIZAÇÃO V1.14: Higienização forçada antes do pareamento Bayesiano.
     texto_norm = semantica.normalizar(texto_cru)
     ctx_inf = semantica.resolver_contexto_administrativo(texto_norm)
     uf_inf, mun_inf, dist_inf = ctx_inf.get("uf", ""), ctx_inf.get("municipio", ""), ctx_inf.get("distrito", "")
@@ -911,7 +910,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     texto_cru = str(localidade).strip()
     if not texto_cru or texto_cru.lower() == 'nan': return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A", ["String Vazia"]
     
-    # ATUALIZAÇÃO V1.14: Higienização absoluta precoce. Impede strings sujas de quebrarem o Fallback IBGE
     texto_norm = semantica.normalizar(texto_cru)
     
     if match_coords := re.match(r'^\s*(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$', texto_cru):
@@ -1048,6 +1046,19 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                     
                 res_final = (lat_c, lon_c, endereco_ibge, "BAIXA", 40, dist_nome, mun_nome, "CENTROIDE_FALLBACK", ["Endereço exato não geocodificado. Fallback ativado para Centróide (Distrito/Município) a fim de habilitar distância em Linha Reta."])
 
+    # ATUALIZAÇÃO 1.15: A Cartada Final do IBGE.
+    # Se todas as APIs falharam em achar Porto de Moz (ex: bugs de nome antigo ou timeout da web),
+    # o sistema busca puramente na nossa base IBGE offline local para garantir que a Linha Reta não morra.
+    if not res_final and ctx.get("municipio") and ctx.get("uf"):
+        mun_nome = ctx["municipio"]
+        uf_nome = ctx["uf"]
+        if mun_nome in IBGE_MUNICIPIOS:
+            for item in IBGE_MUNICIPIOS[mun_nome]:
+                if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0:
+                    endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                    res_final = (item["lat"], item["lon"], endereco_ibge, "BAIXA", 40, "", mun_nome, "BASE_IBGE_OFFLINE", ["Blindagem Ativada: Coordenada puxada 100% offline do banco IBGE."])
+                    break
+
     if res_final:
         cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
         return res_final
@@ -1067,6 +1078,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             dist_cross = calcular_distancia_vincenty(lat_d, lon_d, google_dest_geo[0]["lat"], google_dest_geo[0]["lon"])
             if dist_cross > 20.0: return None 
 
+    # URL OFICIAL do Scraper com usar_coordenadas forçado para blindar rotas amazônicas longas
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
     url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
@@ -1145,23 +1157,28 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     if usar_coords:
         res_osrm = rota_osrm(lat_o, lon_o, lat_d, lon_d)
 
-    # ATUALIZAÇÃO 1.14: Identidade Absoluta e Soberania do Google Maps.
-    res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=False)
+    # Identidade Absoluta: Scraper deve usar Coordenadas para alinhar com o Iframe e evitar 
+    # que Strings de cidades remotas sejam lidas incorretamente pelo proxy.
+    res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True)
 
+    # ATUALIZAÇÃO 1.15: Hierarquia Viária Absoluta. O Google é prioridade 1 para refletir exatamente
+    # o que aparece no Frontend (1.897km em vez da Balsa irreal do OSRM de 653km).
     if res_google:
-        melhor_opcao = res_google
-        if melhor_opcao[3] == "Sim":
-            motivo_roteamento = f"Identidade Absoluta: Rota extraída do provedor principal ({melhor_opcao[0]}km em {melhor_opcao[1]}). O sistema optou por um trajeto envolvendo balsa por ser a rota direta mais eficiente fornecida."
+        melhor_opcao = (res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4])
+        
+        if res_google[3] == "Sim":
+            motivo_roteamento = f"Identidade Absoluta: Rota extraída do Google Maps ({res_google[0]}km em {res_google[1]}). O sistema optou por um trajeto envolvendo balsa por ser a rota conectada primária."
         else:
-            motivo_roteamento = f"Identidade Absoluta: Rota extraída do provedor principal ({melhor_opcao[0]}km em {melhor_opcao[1]}). O sistema priorizou o traçado terrestre (asfalto), contornando vias aquáticas."
+            motivo_roteamento = f"Identidade Absoluta: Rota extraída do Google Maps ({res_google[0]}km em {res_google[1]}). O sistema priorizou o traçado terrestre (asfalto), contornando vias aquáticas."
         
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
+        # O Motivo Roteamento foi inserido na posição correta, fundido numa tupla de 29 elementos para salvar o Excel
         retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
 
     if res_osrm:
-        melhor_opcao = (res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3])
-        motivo_roteamento = "Google indisponível. Fallback OSRM ativado."
+        melhor_opcao = (res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, "OSRM", 95)
+        motivo_roteamento = "Google indisponível. Fallback de roteamento via malha OSRM ativado."
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
         retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
@@ -1350,16 +1367,7 @@ with tab_individual:
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    link_externo = res_ind[2]
-                    match = re.search(r'maps\.google\.com/2([^&]+)&destination=([^&]+)', link_externo)
-                    if match:
-                        o_param = match.group(1)
-                        d_param = match.group(2)
-                    else:
-                        o_param = requests.utils.quote(res_ind[12]) if res_ind[12] else requests.utils.quote(orig_ind)
-                        d_param = requests.utils.quote(res_ind[18]) if res_ind[18] else requests.utils.quote(dest_ind)
-
-                    url_iframe = f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed"
+                    url_iframe = f"https://maps.google.com/maps?saddr={lat_o},{lon_o}&daddr={lat_d},{lon_d}&output=embed"
                     components.iframe(url_iframe, height=470, scrolling=True)
                 else:
                     st.warning("Renderização de mapa suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
@@ -1454,18 +1462,18 @@ with tab_processamento:
                     if res:
                         df.at[idx, 'Distancia'] = res[0]; df.at[idx, 'Tempo'] = res[1]
                         df.at[idx, 'Link da Rota'] = res[2]; df.at[idx, 'Balsas'] = res[3]
-                        df.at[idx, 'Motivo Roteamento'] = res[28]; df.at[idx, 'Linha Reta'] = res[4]
-                        df.at[idx, 'Fonte da Rota'] = res[5]; df.at[idx, 'Score da Rota'] = res[6]
-                        df.at[idx, 'Confianca Origem'] = res[7]; df.at[idx, 'Score Num Origem'] = res[8]
-                        df.at[idx, 'Distrito Origem'] = res[9]; df.at[idx, 'Municipio Origem'] = res[10]
-                        df.at[idx, 'Fonte Geocoding Origem'] = res[11]; df.at[idx, 'Endereco Oficial Origem'] = res[12]
-                        df.at[idx, 'Confianca Destino'] = res[13]; df.at[idx, 'Score Num Destino'] = res[14]
-                        df.at[idx, 'Distrito Destino'] = res[15]; df.at[idx, 'Municipio Destino'] = res[16]
-                        df.at[idx, 'Fonte Geocoding Destino'] = res[17]; df.at[idx, 'Endereco Oficial Destino'] = res[18]
-                        df.at[idx, 'Lat Origem'] = res[19]; df.at[idx, 'Lon Origem'] = res[20]
-                        df.at[idx, 'Lat Destino'] = res[21]; df.at[idx, 'Lon Destino'] = res[22]
-                        df.at[idx, 'Tempo Geocoding (s)'] = res[23]; df.at[idx, 'Tempo Roteamento (s)'] = res[24]
-                        df.at[idx, 'Tempo Total (s)'] = res[25]
+                        df.at[idx, 'Linha Reta'] = res[4]; df.at[idx, 'Fonte da Rota'] = res[5]
+                        df.at[idx, 'Score da Rota'] = res[6]; df.at[idx, 'Confianca Origem'] = res[7]
+                        df.at[idx, 'Score Num Origem'] = res[8]; df.at[idx, 'Distrito Origem'] = res[9]
+                        df.at[idx, 'Municipio Origem'] = res[10]; df.at[idx, 'Fonte Geocoding Origem'] = res[11]
+                        df.at[idx, 'Endereco Oficial Origem'] = res[12]; df.at[idx, 'Confianca Destino'] = res[13]
+                        df.at[idx, 'Score Num Destino'] = res[14]; df.at[idx, 'Distrito Destino'] = res[15]
+                        df.at[idx, 'Municipio Destino'] = res[16]; df.at[idx, 'Fonte Geocoding Destino'] = res[17]
+                        df.at[idx, 'Endereco Oficial Destino'] = res[18]; df.at[idx, 'Lat Origem'] = res[19]
+                        df.at[idx, 'Lon Origem'] = res[20]; df.at[idx, 'Lat Destino'] = res[21]
+                        df.at[idx, 'Lon Destino'] = res[22]; df.at[idx, 'Tempo Geocoding (s)'] = res[23]
+                        df.at[idx, 'Tempo Roteamento (s)'] = res[24]; df.at[idx, 'Tempo Total (s)'] = res[25]
+                        df.at[idx, 'Motivo Roteamento'] = res[28]
                         
                         score_o, score_d, score_r = res[8], res[14], res[6]
                         score_global = round((0.35 * score_o) + (0.35 * score_d) + (0.30 * score_r), 2)
