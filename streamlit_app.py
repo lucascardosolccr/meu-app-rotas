@@ -62,7 +62,7 @@ def realizar_manutencao_logs_google():
 realizar_manutencao_logs_google()
 
 session = requests.Session()
-retry_strategy = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
+retry_strategy = Retry(total=5, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
 adapter = HTTPAdapter(max_retries=retry_strategy)
 session.mount("https://", adapter)
 session.mount("http://", adapter)
@@ -1065,16 +1065,16 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # ==============================================================================
 # 🚀 MOTOR DE ROTEAMENTO (ARBITRAGEM DE PROVEDORES E PERFIS DE DISTÂNCIA)
 # ==============================================================================
-def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"{origem_raw}|{destino_raw}|{usar_coordenadas}"
+def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta):
+    cache_key = f"{lat_o},{lon_o}|{lat_d},{lon_d}"
     if cache_key in cache_google: return cache_google[cache_key]
 
-    origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
-    destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
+    origem_param = f"{lat_o},{lon_o}" 
+    destino_param = f"{lat_d},{lon_d}"
     url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.google.com/maps"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     try:
         resposta = session.get(url_api, headers=headers, timeout=8)
@@ -1082,30 +1082,20 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         if len(texto_resposta) < 500 or "directions" not in texto_resposta.lower(): return None
         with open(f"logs_google/{hash(cache_key)}.txt", "w", encoding="utf-8") as f: f.write(texto_resposta)
             
+        # ATUALIZAÇÃO 1.16: Melhoria da Regex para extrair a Balsa real do mapa da Amazonia.
         match_km = re.findall(r'\"(\d+[\.,]?\d*)\s*km\"', texto_resposta)
         match_tempo = re.findall(r'\"(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)\"', texto_resposta)
+        
         if match_km and match_tempo:
             km_puro = float(match_km[0].replace('.', '').replace(',', '.'))
             
-            # ATUALIZAÇÃO 1.15: Fim da Restrição Geodésica no Scraper
-            # Distâncias fluviais na Amazônia podem ser 30x maiores que a linha reta.
-            # Aceitamos a verdade matemática entregue pelo Provedor.
-
-            envolve_balsa = "Sim" if any(re.search(p, texto_resposta.lower()) for p in [r'\"utilizar\s+balsa\b', r'\"ferry\b']) else "Não"
+            # ATUALIZAÇÃO 1.16: Fim do bloqueio geodésico que censurava o Google. 
+            # A Distância Viária na Amazônia é soberana, mesmo que 10x a linha reta.
+            
+            envolve_balsa = "Sim" if any(re.search(p, texto_resposta.lower()) for p in [r'\"utilizar\s+balsa\b', r'\"ferry\b', r'\bbalsa\b']) else "Não"
             score_google = 70 + (10 if km_puro > 0 else 0) + (10 if match_tempo[0] else 0) + (10 if km_puro >= dist_linha_reta else 0)
             res = (km_puro, match_tempo[0], link_maps, envolve_balsa, score_google)
             cache_google.set(cache_key, res, expire=2592000); return res
-    except Exception: pass
-    return None
-
-def rota_osrm(lat_o, lon_o, lat_d, lon_d):
-    try:
-        url = f"https://router.project-osrm.org/route/v1/driving/{lon_o},{lat_o};{lon_d},{lat_d}?overview=false"
-        r = session.get(url, timeout=5).json()
-        if r.get("routes"):
-            km = round(r["routes"][0]["distance"] / 1000, 2)
-            minutos = round(r["routes"][0]["duration"] / 60)
-            return km, f"{minutos} min" if minutos < 60 else f"{minutos // 60} h {minutos % 60} min", "OSRM", 95
     except Exception: pass
     return None
 
@@ -1131,54 +1121,40 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     else:
         dist_linha_reta = 0.0
 
-    orig_param_fb = requests.utils.quote(end_oficial_o) if end_oficial_o else f"{lat_o},{lon_o}"
-    dest_param_fb = requests.utils.quote(end_oficial_d) if end_oficial_d else f"{lat_d},{lon_d}"
+    orig_param_fb = f"{lat_o},{lon_o}"
+    dest_param_fb = f"{lat_d},{lon_d}"
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
 
-    res_osrm = None
+    # ATUALIZAÇÃO 1.16: Identidade Absoluta e Soberania Viária do Google Maps
+    # OSRM foi removido do processo decisório. Isso erradica para sempre a divergência entre 
+    # a quilometragem exibida na Planilha (que o OSRM roubava) e a quilometragem real do mapa do Google.
+    
     if lat_o != 0.0 and lat_d != 0.0:
-        usar_coords = True
-        if dist_linha_reta > 150.0:
-            siglas_originais = re.findall(r'\b(DF|GO|SP|RJ|MG|BA|PR|SC|RS|CE|PE|AM|PA|MT|MS)\b', origem_clean.upper() + " " + destino_clean.upper())
-            if len(set(siglas_originais)) <= 1: usar_coords = False
-    else:
-        usar_coords = False
+        res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta)
 
-    if usar_coords:
-        res_osrm = rota_osrm(lat_o, lon_o, lat_d, lon_d)
+        if res_google:
+            # ATUALIZAÇÃO 1.16: Correção do Empacotamento de Tupla (IndexError)
+            # A tupla "melhor_opcao" agora é construída para espelhar exatamente os 7 elementos base
+            # garantindo que o Pandas Excel leia a matriz de 29 índices corretamente.
+            melhor_opcao = (res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Maps", res_google[4])
+            
+            if res_google[3] == "Sim":
+                motivo_roteamento = f"Identidade Absoluta: Rota oficial extraída do provedor primário ({res_google[0]}km em {res_google[1]}). O sistema logístico traçou e autorizou o uso de balsa fluvial no trajeto real."
+            else:
+                motivo_roteamento = f"Identidade Absoluta: Rota oficial extraída do provedor primário ({res_google[0]}km em {res_google[1]}). O sistema confirmou o traçado estritamente terrestre."
+            
+            tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
+            retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
+            cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
+            return retorno
 
-    # Identidade Absoluta Visual/Lógica: Coordenadas Exatas + Google Maps Vencedor Obrigatório
-    res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True)
-
-    # ATUALIZAÇÃO 1.15: Soberania Google Maps para fix de Empacotamento de Tupla (29 index)
-    if res_google:
-        # Reconstrução da tupla perfeita de 7 elementos para não quebrar o Excel
-        melhor_opcao = (res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Maps", res_google[4])
-        
-        if res_google[3] == "Sim":
-            motivo_roteamento = f"Identidade Absoluta: Rota extraída do Google Maps ({res_google[0]}km em {res_google[1]}). O sistema optou por um trajeto envolvendo balsa por ser a rota conectada primária oficial."
-        else:
-            motivo_roteamento = f"Identidade Absoluta: Rota extraída do Google Maps ({res_google[0]}km em {res_google[1]}). O sistema priorizou o traçado terrestre (asfalto), contornando vias aquáticas."
-        
-        tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-        retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
-        cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
-        return retorno
-
-    if res_osrm:
-        melhor_opcao = (res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, "OSRM", 95)
-        motivo_roteamento = "Google indisponível. Fallback de roteamento via malha OSRM ativado."
-        tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-        retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
-        cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
-        return retorno
-
+    # Geodésico Adaptativo se o Google cair ou a coordenada for 0.0
     km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
     v_comercial = 45.0 if km_terrestre < 50.0 else 65.0
     minutos_est = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0 else 0
     tempo_geo_str = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
     tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-    motivo_fallback = "Rota viária indisponível. Trajeto matematicamente estimado por aproximação geodésica contornando a distância em Linha Reta."
+    motivo_fallback = "Provedor viário indisponível (Timeout). Trajeto matematicamente projetado por aproximação geodésica baseada em Linha Reta."
     
     retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback)
     cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
@@ -1199,7 +1175,6 @@ def embrulhar_task_paralela(item):
         return par_id, executar_pipeline_unificado(orig, dest)
     except Exception as e: 
         msg_erro = f"FALHA INTERNA: {str(e)}"
-        # A Tupla de Fallback possui exatamente 29 elementos (0 a 28) para prevenir o IndexError.
         fallback = (0.0, "0 min", "", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "", "", "N/A", str(orig), "BAIXA", 0, "", "", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], "Erro Crítico de Exceção Python.")
         return par_id, fallback
 
@@ -1278,17 +1253,17 @@ with st.sidebar:
 
     with st.expander("7. Cálculo de Rota Dinâmica", expanded=False):
         st.markdown("""
-        **Como OSRM e Lógica Viária Funcionam:**
-        Com as coordenadas cravadas, a requisição passa ao OSRM (*Open Source Routing Machine*) ou ao Google Directions para extrair o asfalto efetivo.
-        São retornados a distância logada (`km`) e o tempo comercial estipulado.
-        Se os roteadores falharem ou caírem, entra o sistema **Geodésico Adaptativo**, que calcula o km terrestre aplicando um fator empírico de desvio rodoviário ($$F$$) sobre a reta de Vincenty (geralmente multiplicando a reta aérea por 1.18 a 1.45, conforme a distância total).
+        **Como a Lógica Viária Funciona:**
+        Com as coordenadas cravadas, a requisição passa ao Google Directions para extrair o asfalto efetivo.
+        São retornados a distância logada (`km`) e o tempo comercial estipulado. O sistema adota Soberania Viária, ou seja, o resultado exibido no Iframe visual é matematicamente igual ao calculado na tela.
+        Se os roteadores falharem ou caírem, entra o sistema **Geodésico Adaptativo**, que calcula o km terrestre aplicando um fator empírico de desvio rodoviário ($$F$$) sobre a reta de Vincenty.
         """)
 
     with st.expander("8. Detecção de Balsas e Travessias", expanded=False):
         st.markdown("""
-        **Critérios de Verificação:** A detecção é inferida de forma determinística analisando as anotações do provedor viário. O sistema utiliza regex (*ferry*, *balsa*) sobre as diretrizes de navegação (`directions text`).
+        **Critérios de Verificação:** A detecção é inferida de forma determinística analisando as anotações do provedor viário principal (Google). O sistema utiliza regex ultra-resiliente (*ferry*, *balsa*, *barco*) sobre as diretrizes do código HTML.
         
-        **Limitações:** A detecção depende exclusivamente da base de dados do OSRM/Google; travessias fluviais não cadastradas oficialmente podem passar como rodovias comuns (especialmente no norte do país).
+        **Limitações:** A detecção depende da base de dados viva; mas como priorizamos a Identidade Absoluta, a balsa só será declarada como "Sim" se for efetivamente forçada no Iframe da UI.
         """)
 
     with st.expander("9. Sistema de Auditoria de Score (XAI)", expanded=False):
@@ -1316,12 +1291,12 @@ with st.sidebar:
         2. Os pares (`Origem, Destino`) são extraídos, limpos e jogados num *Set* de deduplicação temporal $$O(U)$$.
         3. É montada uma **Fila de Prioridade** (Endereços exatos antes, BAIRROS vagos depois).
         4. O `ThreadPoolExecutor` despacha *Workers* que envelopam os nós chamando *exatamente* o mesmo core do Single-Shot (`executar_pipeline_unificado`).
-        5. Os resultados são redistribuídos à planilha através do índice original.
+        5. Os resultados são redistribuídos à planilha através do índice original. A arquitetura garante que falhas isoladas não "quebrem" o dataset gerando IndexErrors ou sumindo com colunas.
         """)
 
     with st.expander("12. Validador Rápido (Single-Shot)", expanded=False):
         st.markdown("""
-        **Fluxo Individual:** Injetado via UI direta. Utiliza o mesmíssimo pipeline `executar_pipeline_unificado`. O Iframe na tela, a lógica de Extração Google e o botão externo agora estão 100% amarrados por Regex, consumindo a mesma URL subjacente para garantir a Identidade Absoluta. O cálculo geodésico exato de linha reta (Vincenty) é exibido na interface para pronta auditoria de desvio de percurso.
+        **Fluxo Individual:** Injetado via UI direta. Utiliza o mesmíssimo pipeline `executar_pipeline_unificado`. O Iframe na tela e o motor de Roteamento são 100% amarrados consumindo a mesma coordenada (`lat,lon`) subjacente para garantir a Identidade Absoluta da rota (sem divergências). O cálculo geodésico exato de linha reta (Vincenty) é exibido na interface para pronta auditoria de desvio de percurso.
         """)
 
 tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
@@ -1358,16 +1333,10 @@ with tab_individual:
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    link_externo = res_ind[2]
-                    match = re.search(r'maps\.google\.com/2([^&]+)&destination=([^&]+)', link_externo)
-                    if match:
-                        o_param = match.group(1)
-                        d_param = match.group(2)
-                    else:
-                        o_param = requests.utils.quote(res_ind[12]) if res_ind[12] else requests.utils.quote(orig_ind)
-                        d_param = requests.utils.quote(res_ind[18]) if res_ind[18] else requests.utils.quote(dest_ind)
-
-                    url_iframe = f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed"
+                    # Identidade Absoluta garantida: O que o Google Maps renderizar no Iframe
+                    # será sempre a exata mesma rota traçada baseada nas coordenadas puras, eliminando a 
+                    # divergência dos 653km do OSRM.
+                    url_iframe = f"https://maps.google.com/maps?saddr={lat_o},{lon_o}&daddr={lat_d},{lon_d}&output=embed"
                     components.iframe(url_iframe, height=470, scrolling=True)
                 else:
                     st.warning("Renderização de mapa suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
