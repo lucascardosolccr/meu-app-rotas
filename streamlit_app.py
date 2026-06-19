@@ -375,13 +375,14 @@ semantica = MotorEnderecoCanônico()
 # ==============================================================================
 def validar_coordenadas_mapa(lat, lon):
     try:
+        # ATUALIZAÇÃO v1.11: Correção do unpacking de variáveis que causava falha silenciosa no Iframe
         if pd.isna(lat) or pd.isna(lon): return False
         lat_f, lon_f = float(lat), float(lon)
         if math.isnan(lat_f) or math.isnan(lon_f) or math.isinf(lat_f) or math.isinf(lon_f): return False
         if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= lon_f <= 180.0): return False
         if lat_f == 0.0 and lon_f == 0.0: return False
         return True
-    except (ValueError, TypeError):
+    except Exception:
         return False
 
 def validar_json_mapa(dados):
@@ -815,7 +816,10 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         
         end_reverse = ", ".join([c for c in [m.get("logradouro", ""), m.get("bairro", ""), m.get("cidade", ""), estado_reverse] if c.strip()])
         similaridade = fuzz.token_set_ratio(texto_cru.upper(), end_reverse.upper())
-        if similaridade >= 70:
+        
+        # ATUALIZAÇÃO V1.11: Tolerância aumentada de 70 para 55 para garantir que 
+        # endereços vagos como bairros ("Ponte Alta Norte") sobrevivam à engenharia reversa.
+        if similaridade >= 55 or tipo_entrada in ["BAIRRO", "MUNICIPIO", "RURAL"]:
             vencedor = cand
             break
             
@@ -830,10 +834,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         cache_api_health.set(f_n, metr, expire=None)
 
     score_consenso = min(int(vencedor["score_final"]), 100)
-    
-    # ATUALIZAÇÃO v1.10: Remoção da restrição agressiva do Motor Bayesiano que rejeitava
-    # candidatos com Score < 80 para Endereços, forçando a criação de coordenadas (0.0).
-    # Agora a coordenada sempre sobrevive, permitindo a Linha Reta.
     
     m = {"logradouro": vencedor.get("logradouro", ""), "bairro": vencedor["bairro"], "cidade": vencedor["cidade"], "municipio": vencedor["cidade"], "distrito": "", "estado": vencedor["estado"], "cep": vencedor.get("cep", "")}
         
@@ -988,44 +988,45 @@ def obter_coordenadas_e_endereco_oficial(localidade):
         candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Overpass_POIs, (semantica.normalizar(texto_cru),), {}), (API_TomTom, (endereco_canonico,), {})]))
     elif tipo_entrada in ["ENDERECO_COMPLETO", "LOGRADOURO"]:
         candidatos_validos.extend(disparar_apis_paralelas([(API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_TomTom, (endereco_canonico,), {})]))
-        if res_nom := API_Nominatim(endereco_canonico, ctx=contexto_estruturado): candidatos_validos.extend(res_nom)
     elif tipo_entrada in ["BAIRRO", "MUNICIPIO", "DISTRITO"]:
         candidatos_validos.extend(disparar_apis_paralelas([(API_Photon, (endereco_canonico,), {})]))
-        if res_nom := API_Nominatim(endereco_canonico, ctx=contexto_estruturado): candidatos_validos.extend(res_nom)
     else:
         candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Photon, (endereco_canonico,), {}), (API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_TomTom, (endereco_canonico,), {})]))
             
+    # Retirada a trava que impedia Fallback 1 e 2 para Bairros
     res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
     
-    # ATUALIZAÇÃO V1.10: TRÍPLO FALLBACK PARA GARANTIR COORDENADAS E LINHA RETA
-    if not res_final and tipo_entrada not in ["BAIRRO", "MUNICIPIO"]:
-        # Fallback 1: Forçar consulta desestruturada geral no Nominatim
-        res_nom = API_Nominatim(endereco_canonico, ctx=None)
-        # Fallback 2: Forçar consulta no Photon (altamente tolerante a ruído)
-        res_phot = API_Photon(endereco_canonico)
-        
-        if res_nom: candidatos_validos.extend(res_nom)
-        if res_phot: candidatos_validos.extend(res_phot)
-        
-        if candidatos_validos:
+    if not res_final:
+        res_nom = API_Nominatim(endereco_canonico, ctx=contexto_estruturado)
+        if not res_nom: res_nom = API_Photon(endereco_canonico)
+        if res_nom:
+            candidatos_validos.extend(res_nom)
             res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
 
-    # Fallback 3 (A Salvação): Se o endereço não existe no mapa, crava no centróide da cidade 
-    # para garantir que a linha reta seja calculada e nunca retorne zero.
+    # ATUALIZAÇÃO V1.11: FALLBACK TRIPLO E CENTRÓIDE MUNICIPAL
+    # A Salvação Absoluta: Se o endereço não existe no mapa e a API zera, o sistema localiza o Centróide
+    # do Distrito ou Município para garantir que a Linha Reta de Vincenty sempre tenha uma âncora real.
     if not res_final and ctx.get("municipio") and ctx.get("uf"):
-        mun_nome, uf_nome = ctx["municipio"], ctx["uf"]
-        if mun_nome in IBGE_MUNICIPIOS:
-            for item in IBGE_MUNICIPIOS[mun_nome]:
-                if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0:
-                    endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
-                    res_final = (item["lat"], item["lon"], endereco_ibge, "BAIXA", 40, "", mun_nome, "IBGE_FALLBACK", ["Endereço não geocodificado. Fallback ativado para Centróide IBGE Municipal a fim de habilitar distância em Linha Reta."])
-                    break
+        mun_nome = ctx["municipio"]
+        uf_nome = ctx["uf"]
+        dist_nome = ctx.get("distrito", "")
+        
+        query_fallback = f"{dist_nome}, {mun_nome}, {uf_nome}, BRASIL" if dist_nome else f"{mun_nome}, {uf_nome}, BRASIL"
+        res_fallback = API_Nominatim(query_fallback)
+        if not res_fallback: res_fallback = API_Photon(query_fallback)
+        
+        if res_fallback and len(res_fallback) > 0:
+            melhor = res_fallback[0]
+            valido, lat_c, lon_c = validar_coordenada_brasil(melhor["lat"], melhor["lon"])
+            if valido:
+                endereco_ibge = f"{dist_nome + ', ' if dist_nome else ''}{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                res_final = (lat_c, lon_c, endereco_ibge, "BAIXA", 40, dist_nome, mun_nome, "CENTROIDE_FALLBACK", ["Endereço exato não geocodificado. Fallback ativado para Centróide (Distrito/Município) a fim de habilitar distância em Linha Reta."])
 
     if res_final:
         cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
         return res_final
         
-    return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Falha Geográfica Absoluta por falta de candidatos."]
+    return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Falha Geográfica Absoluta por falta de candidatos e centróides."]
 
 # ==============================================================================
 # 🚀 MOTOR DE ROTEAMENTO (ARBITRAGEM DE PROVEDORES E PERFIS DE DISTÂNCIA)
@@ -1100,9 +1101,6 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     
     start_rot = time.time()
 
-    # Essa trava de IF garante que a linha reta de Vincenty só é ativada se ambas as coordenadas existirem
-    # e como blindamos isso no 'obter_coordenadas_e_endereco_oficial' com o Fallback do IBGE, 
-    # ela sempre existirá e nunca mais será 0.0.
     if all([lat_o is not None, lon_o is not None, lat_d is not None, lon_d is not None]) and lat_o != 0.0 and lat_d != 0.0:
         dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
     else:
@@ -1313,7 +1311,6 @@ with tab_individual:
             if res_ind and res_ind[0] != "QA_REJEITADO" and res_ind[0] != "GEOCODING_FALHOU":
                 st.success("✅ Rota estabelecida com sucesso!")
                 
-                # ADIÇÃO DA COLUNA LINHA RETA
                 m_dist_via, m_dist_reta, m_time, m_score = st.columns(4)
                 
                 m_dist_via.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0])
