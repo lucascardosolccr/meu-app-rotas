@@ -1046,9 +1046,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                     
                 res_final = (lat_c, lon_c, endereco_ibge, "BAIXA", 40, dist_nome, mun_nome, "CENTROIDE_FALLBACK", ["Endereço exato não geocodificado. Fallback ativado para Centróide (Distrito/Município) a fim de habilitar distância em Linha Reta."])
 
-    # ATUALIZAÇÃO 1.15: A Cartada Final do IBGE.
-    # Se todas as APIs falharam em achar Porto de Moz (ex: bugs de nome antigo ou timeout da web),
-    # o sistema busca puramente na nossa base IBGE offline local para garantir que a Linha Reta não morra.
     if not res_final and ctx.get("municipio") and ctx.get("uf"):
         mun_nome = ctx["municipio"]
         uf_nome = ctx["uf"]
@@ -1072,13 +1069,6 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
     cache_key = f"{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
-    if not usar_coordenadas and lat_d != 0.0 and lon_d != 0.0:
-        google_dest_geo = API_Google_Geocoding_Scraper(destino_raw)
-        if google_dest_geo:
-            dist_cross = calcular_distancia_vincenty(lat_d, lon_d, google_dest_geo[0]["lat"], google_dest_geo[0]["lon"])
-            if dist_cross > 20.0: return None 
-
-    # URL OFICIAL do Scraper com usar_coordenadas forçado para blindar rotas amazônicas longas
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
     url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
@@ -1097,9 +1087,9 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         if match_km and match_tempo:
             km_puro = float(match_km[0].replace('.', '').replace(',', '.'))
             
-            if dist_linha_reta > 0:
-                limite_curto = max(dist_linha_reta * 2.0, dist_linha_reta + 15.0)
-                if dist_linha_reta <= 50.0 and km_puro > limite_curto: return None  
+            # ATUALIZAÇÃO 1.15: Fim da Restrição Geodésica no Scraper
+            # Distâncias fluviais na Amazônia podem ser 30x maiores que a linha reta.
+            # Aceitamos a verdade matemática entregue pelo Provedor.
 
             envolve_balsa = "Sim" if any(re.search(p, texto_resposta.lower()) for p in [r'\"utilizar\s+balsa\b', r'\"ferry\b']) else "Não"
             score_google = 70 + (10 if km_puro > 0 else 0) + (10 if match_tempo[0] else 0) + (10 if km_puro >= dist_linha_reta else 0)
@@ -1157,31 +1147,31 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     if usar_coords:
         res_osrm = rota_osrm(lat_o, lon_o, lat_d, lon_d)
 
-    # Identidade Absoluta: Scraper deve usar Coordenadas para alinhar com o Iframe e evitar 
-    # que Strings de cidades remotas sejam lidas incorretamente pelo proxy.
+    # Identidade Absoluta Visual/Lógica: Coordenadas Exatas + Google Maps Vencedor Obrigatório
     res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True)
 
-    # ATUALIZAÇÃO 1.15: Hierarquia Viária Absoluta. O Google é prioridade 1 para refletir exatamente
-    # o que aparece no Frontend (1.897km em vez da Balsa irreal do OSRM de 653km).
+    # ATUALIZAÇÃO 1.15: Soberania Google Maps para fix de Empacotamento de Tupla (29 index)
     if res_google:
-        melhor_opcao = (res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4])
+        # Reconstrução da tupla perfeita de 7 elementos para não quebrar o Excel
+        melhor_opcao = (res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Maps", res_google[4])
         
         if res_google[3] == "Sim":
-            motivo_roteamento = f"Identidade Absoluta: Rota extraída do Google Maps ({res_google[0]}km em {res_google[1]}). O sistema optou por um trajeto envolvendo balsa por ser a rota conectada primária."
+            motivo_roteamento = f"Identidade Absoluta: Rota extraída do Google Maps ({res_google[0]}km em {res_google[1]}). O sistema optou por um trajeto envolvendo balsa por ser a rota conectada primária oficial."
         else:
             motivo_roteamento = f"Identidade Absoluta: Rota extraída do Google Maps ({res_google[0]}km em {res_google[1]}). O sistema priorizou o traçado terrestre (asfalto), contornando vias aquáticas."
         
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-        # O Motivo Roteamento foi inserido na posição correta, fundido numa tupla de 29 elementos para salvar o Excel
         retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
-        cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
+        cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
+        return retorno
 
     if res_osrm:
         melhor_opcao = (res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, "OSRM", 95)
         motivo_roteamento = "Google indisponível. Fallback de roteamento via malha OSRM ativado."
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
         retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
-        cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
+        cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
+        return retorno
 
     km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
     v_comercial = 45.0 if km_terrestre < 50.0 else 65.0
@@ -1209,7 +1199,8 @@ def embrulhar_task_paralela(item):
         return par_id, executar_pipeline_unificado(orig, dest)
     except Exception as e: 
         msg_erro = f"FALHA INTERNA: {str(e)}"
-        fallback = (0.0, "0 min", "", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "", "", "N/A", str(orig), "BAIXA", 0, "", "", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], "Erro Crítico.")
+        # A Tupla de Fallback possui exatamente 29 elementos (0 a 28) para prevenir o IndexError.
+        fallback = (0.0, "0 min", "", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "", "", "N/A", str(orig), "BAIXA", 0, "", "", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], "Erro Crítico de Exceção Python.")
         return par_id, fallback
 
 # ==============================================================================
@@ -1367,7 +1358,16 @@ with tab_individual:
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    url_iframe = f"https://maps.google.com/maps?saddr={lat_o},{lon_o}&daddr={lat_d},{lon_d}&output=embed"
+                    link_externo = res_ind[2]
+                    match = re.search(r'maps\.google\.com/2([^&]+)&destination=([^&]+)', link_externo)
+                    if match:
+                        o_param = match.group(1)
+                        d_param = match.group(2)
+                    else:
+                        o_param = requests.utils.quote(res_ind[12]) if res_ind[12] else requests.utils.quote(orig_ind)
+                        d_param = requests.utils.quote(res_ind[18]) if res_ind[18] else requests.utils.quote(dest_ind)
+
+                    url_iframe = f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed"
                     components.iframe(url_iframe, height=470, scrolling=True)
                 else:
                     st.warning("Renderização de mapa suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
