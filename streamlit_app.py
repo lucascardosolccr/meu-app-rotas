@@ -1084,7 +1084,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     rua_f = m["logradouro"] if m["logradouro"] else texto_cru.upper()
     endereco_f = ", ".join([c for c in [rua_f, m["bairro"], m["cidade"], m["estado"]] if c.strip()]) + ", BRASIL"
     
-    # Extração de Dados Administrativos Avançada
     dict_admin = {
         "cep": m.get("cep", input_usuario.get("cep", "")),
         "logradouro": m.get("logradouro", rua_f),
@@ -1104,8 +1103,6 @@ class GeocodingService:
     @staticmethod
     def geocodificar(localidade):
         texto_cru = str(localidade).strip()
-        
-        # Correção do NameError: Definindo a variável cedo
         chave_auto = hashlib.md5(texto_cru.upper().encode("utf-8")).hexdigest()
         
         if not texto_cru or texto_cru.lower() == 'nan': return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A", ["String Vazia"], {}
@@ -1231,7 +1228,6 @@ class GeocodingService:
                 res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
 
         if res_final:
-            # res_final: (lat, lon, endereco_f, confianca, score, distrito, municipio, fonte, xai, dict_admin)
             cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
             if res_final[4] >= 95 and res_final[3] == "ALTISSIMA":
                 cache_aprendizado_auto.set(chave_auto, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "distrito": res_final[5], "municipio": res_final[6], "metadata": {"evidencias_xai": res_final[8] if len(res_final) > 8 else []}}, expire=7776000)
@@ -1497,6 +1493,9 @@ class RoutingProviderManager:
 routing_manager = RoutingProviderManager()
 
 # ==============================================================================
+def obter_fator_desvio_rodoviario(linha_reta):
+    return 1.45 if linha_reta < 5.0 else 1.35 if linha_reta < 20.0 else 1.25 if linha_reta < 100.0 else 1.18
+
 # ROUTE SERVICE (MONTAGEM DO PIPELINE E PLANILHA ENRIQUECIDA)
 # ==============================================================================
 class RouteService:
@@ -1505,7 +1504,7 @@ class RouteService:
         start_total = time.time()
         origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
         
-        chave_rota_cache = f"ROTA_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}_{perfil_rota}_{veiculo.tipo}"
+        chave_rota_cache = f"R_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}_{perfil_rota}_{veiculo.tipo}"
         if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
         
         start_geo = time.time()
@@ -1575,6 +1574,11 @@ class RouteService:
         perc_urbano = 100.0 - perc_rural
         km_urbano = round(res_meta.distance_km * (perc_urbano / 100), 2)
         km_rural = round(res_meta.distance_km * (perc_rural / 100), 2)
+        
+        # 10. e 11. Estados e Municípios Cruzados
+        qtd_municipios = 3 if res_meta.distance_km > 100 else 1
+        qtd_estados = 2 if "df" in origem_clean.lower() or "df" in destino_clean.lower() else 1
+        incidentes_reais = IncidentProvider.checar_incidentes(lat_d, lon_d)
         
         # 13. Alertas Operacionais
         alertas = []
@@ -1675,6 +1679,7 @@ with st.sidebar:
     evitar_pedagio = st.checkbox("Evitar Pedágio", value=False)
     perfil_rota = st.radio("Perfil", ["Balanceado", "Rápido", "Econômico"]).lower()
     
+    # Construção do Perfil de Veículo (Gestão de Frota)
     peso = 23.0 if "Carreta" in tipo_veiculo else 14.0 if "Toco" in tipo_veiculo else 3.5
     altura = 4.3 if "Carreta" in tipo_veiculo else 3.8 if "Toco" in tipo_veiculo else 2.5
     veiculo_operacional = VehicleProfile(tipo_veiculo, peso, altura, 2.6, eixos=5, valor_hora=60.0, custo_km_dep=0.45, fator_manut=0.25)
@@ -1698,7 +1703,7 @@ with tab_individual:
             if res_ind and res_ind[0] != "QA_REJEITADO":
                 st.success("✅ Rota extraída e validada com sucesso!")
                 
-                # Exibindo os dados na interface baseados na nova tupla de 46 posições
+                # Exibindo os dados na interface baseados na nova tupla
                 c1, c2, c3, c4, c5, c6 = st.columns(6)
                 c1.metric("Distância Oficial", f"{res_ind[24]} km")
                 c2.metric("Dist. Linha Reta", f"{res_ind[25]} km")
@@ -1740,7 +1745,7 @@ with tab_processamento:
                 st.error(f"⚠️ Limite arquitetural de {MAX_LINHAS} linhas excedido. Fracione o arquivo.")
                 st.stop()
                 
-            st.success(f"Tabela com {len(df)} registros mapeada! Pronto para processar.")
+            st.success(f"Tabela com {len(df)} registros mapeada! Pronto para processar a Super-Planilha.")
             
             nome_operador = st.text_input("Matrícula / Nome do Operador (Opcional)", max_chars=50)
             
@@ -1784,7 +1789,7 @@ with tab_processamento:
                 barra_progresso = st.progress(0)
                 container_status = st.empty()
                 
-                # 5. Processamento fatiado (Chunking) para evitar Gargalos/Crash de RAM e Threads (Correção de Bug Silencioso)
+                # 5. Processamento fatiado (Chunking) para evitar Gargalos/Crash de RAM e Threads
                 batch_size = 50
                 for i in range(0, len(tarefas_unicas), batch_size):
                     lote_tarefas = tarefas_unicas[i:i+batch_size]
