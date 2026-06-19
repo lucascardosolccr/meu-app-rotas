@@ -515,6 +515,7 @@ def validar_consistencia_municipal(candidato, mun_inf):
 def API_Google_Geocoding_Scraper(query):
     start_t = time.time()
     try:
+        # A URL de busca foi higienizada para a sintaxe oficial, evitando problemas de CORS e Redirecionamento mascarado
         url = f"https://www.google.com/maps/search/{requests.utils.quote(query)}"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         r = session.get(url, headers=headers, timeout=5, allow_redirects=True)
@@ -1018,11 +1019,12 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             dist_cross = calcular_distancia_vincenty(lat_d, lon_d, google_dest_geo[0]["lat"], google_dest_geo[0]["lon"])
             if dist_cross > 20.0: return None 
 
+    # URL oficial higienizada
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
-    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
+    url_api = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/data=!4m2!4m1!3e0"
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_raw)}&destination={requests.utils.quote(destino_raw)}&travelmode=driving"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.google.com/maps"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     try:
         resposta = session.get(url_api, headers=headers, timeout=8)
@@ -1080,6 +1082,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     else:
         dist_linha_reta = 0.0
 
+    # URL oficial higienizada para fallback
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(end_oficial_o)}&destination={requests.utils.quote(end_oficial_d)}&travelmode=driving"
 
     res_osrm = None
@@ -1292,14 +1295,14 @@ with tab_individual:
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    # Iframe Inteligente do Google Maps aponta para as Coordenadas Absolutas do Consenso
+                    # A URL foi substituída pela rota nativa do Google Maps para evitar falhas de renderização iframe nulas (0.0, 0.0)
                     html_mapa = f"""
                     <iframe 
                         width="100%" 
                         height="470" 
                         frameborder="0" 
                         style="border:0; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);" 
-                        src="https://maps.google.com/maps?saddr={lat_o},{lon_o}&daddr={lat_d},{lon_d}&dirflg=d&output=embed" 
+                        src="https://maps.google.com/maps?saddr={lat_o},{lon_o}&daddr={lat_d},{lon_d}&output=embed" 
                         allowfullscreen>
                     </iframe>
                     """
