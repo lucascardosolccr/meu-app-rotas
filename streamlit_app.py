@@ -37,7 +37,7 @@ cache_geo = Cache("./cache_geo")
 cache_rotas = Cache("./cache_rotas")
 cache_poi = Cache("./cache_poi")
 cache_cep = Cache("./cache_cep")
-cache_google = Cache("./cache_google")
+cache_google = cache_google = Cache("./cache_google")
 cache_reverse = Cache("./cache_reverse")
 cache_base_local = Cache("./cache_base_local")
 cache_aprendizado = Cache("./cache_aprendizado")
@@ -1018,12 +1018,12 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             dist_cross = calcular_distancia_vincenty(lat_d, lon_d, google_dest_geo[0]["lat"], google_dest_geo[0]["lon"])
             if dist_cross > 20.0: return None 
 
-    # URL OFICIAL do Scraper restaurada para manter a compatibilidade do proxy/redirecionamento e ler o HTML
+    # URL OFICIAL do Scraper (Calculadora de Tempo e Distância)
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
     url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     
-    # Link Maps perfeitamente espelhado com os parâmetros da API para garantir a "Identidade Absoluta" visual
+    # Link Maps (Usado no Botão e extraído para o Iframe)
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.google.com/maps"}
     
@@ -1104,9 +1104,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
             retorno = (res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
             cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
 
-    # FORÇAR usar_coordenadas=False: Isso força o Scraper do Google a calcular tempo/distância em cima das
-    # Strings Canônicas (seus endereços limpos) em vez das coordenadas de centróide. 
-    # É ISSO que mata o "pequeno desvio quando uso o cep", fazendo a distância refletir a rua exata.
+    # FORÇAR usar_coordenadas=False garante que o Scraper usará as mesmas Strings do Link/Iframe 
     res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=False)
 
     if perfil_rota == "shortest":
@@ -1271,7 +1269,7 @@ with st.sidebar:
 
     with st.expander("12. Validador Rápido (Single-Shot)", expanded=False):
         st.markdown("""
-        **Fluxo Individual:** Injetado via UI direta. Utiliza o mesmíssimo pipeline `executar_pipeline_unificado`. O Iframe na tela, a lógica de Extração Google e o botão externo agora estão 100% amarrados por Regex, consumindo a mesma URL subjacente para garantir a Identidade Absoluta.
+        **Fluxo Individual:** Injetado via UI direta. Utiliza o mesmíssimo pipeline `executar_pipeline_unificado`. O Iframe na tela, a lógica de Extração Google e o botão externo agora estão 100% amarrados por Regex, consumindo a mesma URL subjacente para garantir a Identidade Absoluta. O cálculo geodésico exato de linha reta (Vincenty) é exibido na interface para pronta auditoria de desvio de percurso.
         """)
 
 tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
@@ -1291,29 +1289,39 @@ with tab_individual:
                 
             if res_ind and res_ind[0] != "QA_REJEITADO" and res_ind[0] != "GEOCODING_FALHOU":
                 st.success("✅ Rota estabelecida com sucesso!")
-                m_dist, m_time, m_score = st.columns(3)
-                m_dist.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0])
+                
+                # UPDATE V1.10: Expansão de 3 para 4 colunas para abrigar a Distância em Linha Reta
+                m_dist_via, m_dist_reta, m_time, m_score = st.columns(4)
+                
+                m_dist_via.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0])
+                m_dist_reta.metric("Distância Linha Reta", f"{res_ind[4]} km" if isinstance(res_ind[4], float) else res_ind[4])
                 m_time.metric("Tempo Estimado", res_ind[1])
                 score_g = round((0.35 * res_ind[8]) + (0.35 * res_ind[14]) + (0.30 * res_ind[6]), 2)
                 m_score.metric("Score Global de Qualidade", f"{score_g} / 100")
                 
-                # IDENTIDADE ABSOLUTA: Extrair exatamente os parâmetros que o scraper e o botão 
-                # externo usaram, para garantir que o mapa embedado mostre a mesma coisa.
-                link_externo = res_ind[2]
-                
-                # Regex que isola o Origin e Destination puros de dentro da URL calculada
-                match = re.search(r'maps\.google\.com/2([^&]+)&destination=([^&]+)', link_externo)
-                if match:
-                    o_param = match.group(1)
-                    d_param = match.group(2)
-                else:
-                    # Fallback de segurança robusto
-                    o_param = requests.utils.quote(res_ind[12]) if res_ind[12] else f"{res_ind[19]},{res_ind[20]}"
-                    d_param = requests.utils.quote(res_ind[18]) if res_ind[18] else f"{res_ind[21]},{res_ind[22]}"
+                lat_o, lon_o = res_ind[19], res_ind[20]
+                lat_d, lon_d = res_ind[21], res_ind[22]
 
-                # Alimentação do iframe com parâmetros extraídos limpos
-                url_iframe = f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed"
-                components.iframe(url_iframe, height=470, scrolling=True)
+                if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
+                    # IDENTIDADE ABSOLUTA: Extrair exatamente os parâmetros que o scraper e o botão 
+                    # externo usaram, para garantir que o mapa embedado mostre a mesma coisa.
+                    link_externo = res_ind[2]
+                    
+                    # Regex que isola o Origin e Destination puros de dentro da URL calculada
+                    match = re.search(r'maps\.google\.com/2([^&]+)&destination=([^&]+)', link_externo)
+                    if match:
+                        o_param = match.group(1)
+                        d_param = match.group(2)
+                    else:
+                        # Fallback de segurança robusto
+                        o_param = requests.utils.quote(res_ind[12]) if res_ind[12] else f"{lat_o},{lon_o}"
+                        d_param = requests.utils.quote(res_ind[18]) if res_ind[18] else f"{lat_d},{lon_d}"
+
+                    # Alimentação do iframe com parâmetros extraídos limpos
+                    url_iframe = f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed"
+                    components.iframe(url_iframe, height=470, scrolling=True)
+                else:
+                    st.warning("Renderização de mapa suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
 
                 st.info(f"**Origem fixada por:** {res_ind[11]} | **Destino fixada por:** {res_ind[17]} | **Motor da Rota:** {res_ind[5]}")
                 st.markdown(f"[🔗 Abrir Rota Completa no Aplicativo do Google Maps]({res_ind[2]})")
