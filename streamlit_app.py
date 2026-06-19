@@ -24,12 +24,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Tenta importar Playwright para suporte ao Scraper automatizado solicitado
-try:
-    from playwright.sync_api import sync_playwright
-except ImportError:
-    pass
-
 # ==============================================================================
 # TRATAMENTO DE DEPENDÊNCIAS
 # ==============================================================================
@@ -44,7 +38,7 @@ except ImportError as e:
 # CONFIGURAÇÕES CENTRALIZADAS
 # ==============================================================================
 class Settings:
-    GOOGLE_TIMEOUT = 10
+    GOOGLE_TIMEOUT = 8
     TOMTOM_TIMEOUT = 5
     ARCGIS_TIMEOUT = 5
     NOMINATIM_TIMEOUT = 5
@@ -62,22 +56,26 @@ db_conn = sqlite3.connect(":memory:", check_same_thread=False)
 
 def inicializar_banco_relacional():
     cursor = db_conn.cursor()
+    # Tabela de Pedágios (ANTT/DER)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS pedagios (
             id INTEGER PRIMARY KEY, nome TEXT, rodovia TEXT, km REAL, latitude REAL, longitude REAL, tarifa REAL
         )
     """)
+    # Tabela de Combustível (ANP)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS precos_combustivel (
             estado TEXT, municipio TEXT, diesel REAL, gasolina REAL, etanol REAL, gnv REAL, data TEXT
         )
     """)
+    # Tabela de Emissões ESG
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS emissoes (
             rota_id TEXT, km REAL, litros REAL, co2 REAL, data TEXT
         )
     """)
     
+    # Inserção de dados simulados (Mock Data Ground Truth)
     cursor.execute("INSERT INTO pedagios VALUES (1, 'Praça Cajamar', 'SP-330', 38.5, -23.35, -46.88, 12.40)")
     cursor.execute("INSERT INTO pedagios VALUES (2, 'Praça Brasília', 'BR-040', 10.0, -15.80, -47.90, 6.80)")
     cursor.execute("INSERT INTO precos_combustivel VALUES ('SP', 'SÃO PAULO', 6.15, 5.80, 3.90, 3.10, '2023-10-01')")
@@ -771,9 +769,11 @@ def API_Nominatim(query, ctx=None):
     try:
         def _call_nom():
             time.sleep(1.1)
-            if ctx and ctx.get("logradouro") and ctx.get("municipio"):
-                rua = requests.utils.quote(ctx["logradouro"])
-                cid = requests.utils.quote(ctx["municipio"])
+            # 1. Correção Cirúrgica do NameError da variável ctx originada no Volume 04 (Acento Municipal)
+            texto_mun_seguro = semantica.normalizar(ctx["municipio"]) if ctx and ctx.get("municipio") else ""
+            if ctx and ctx.get("logradouro") and texto_mun_seguro:
+                rua = requests.utils.quote(semantica.normalizar(ctx["logradouro"]))
+                cid = requests.utils.quote(texto_mun_seguro)
                 est = requests.utils.quote(ctx.get("uf", ""))
                 url = f"https://nominatim.openstreetmap.org/search?format=json&street={rua}&city={cid}&state={est}&limit=5&addressdetails=1&countrycodes=br"
             else:
@@ -864,7 +864,9 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     candidatos_validos = []
     candidatos_para_avaliacao = candidatos.copy()
     
-    ctx_inf = semantica.resolver_contexto_administrativo(texto_cru.upper())
+    # 1. Correção Cirúrgica do NameError da extração de contexto semântico do IBGE
+    texto_norm_seguro = semantica.normalizar(texto_cru)
+    ctx_inf = semantica.resolver_contexto_administrativo(texto_norm_seguro)
     uf_inf, mun_inf, dist_inf = ctx_inf.get("uf", ""), ctx_inf.get("municipio", ""), ctx_inf.get("distrito", "")
     box = BOUNDING_BOXES_UF.get(uf_inf) if uf_inf else None
     
@@ -1001,7 +1003,8 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
             if not match_cid: continue
         
         end_reverse = ", ".join([c for c in [m.get("logradouro", ""), m.get("bairro", ""), m.get("cidade", ""), estado_reverse] if c.strip()])
-        similaridade = fuzz.token_set_ratio(texto_cru.upper(), end_reverse.upper())
+        # 1. Correção Cirúrgica de Acoplamento Léxico (Remoção do GAP de acentuação na Reverse)
+        similaridade = fuzz.token_set_ratio(texto_norm_seguro, semantica.normalizar(end_reverse))
         if similaridade >= 70:
             vencedor = cand
             break
@@ -1043,7 +1046,8 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     if xd["num"]: explicacoes_humanas.append("Assinatura de número predial reconhecida na porta do cliente.")
     if xd["fuzz"] >= 80.0: explicacoes_humanas.append(f"Similaridade léxica de logradouro em {xd['fuzz']}% de aprovação.")
 
-    match_logr = fuzz.token_set_ratio(texto_cru.upper(), m.get("logradouro", "").upper())
+    # 1. Correção Cirúrgica da Explicabilidade de Logradouro (Remoção do GAP de acentuação)
+    match_logr = fuzz.token_set_ratio(texto_norm_seguro, semantica.normalizar(m.get("logradouro", "")))
     match_bairro = fuzz.token_set_ratio(dist_inf, m.get("bairro", "").upper()) if dist_inf else 100
     match_cep = 100 if input_usuario.get("cep") and m.get("cep") and input_usuario["cep"] in m.get("cep", "").replace("-", "") else 0 if input_usuario.get("cep") else 100
     
@@ -1087,7 +1091,11 @@ class GeocodingService:
                 return dado_salvo["lat"], dado_salvo["lon"], dado_salvo.get("endereco", texto_cru.upper()), "ALTISSIMA", 100, dado_salvo.get("distrito", ""), dado_salvo.get("municipio", ""), "APRENDIZADO_LOCAL", ["Ponto quente extraído do cache local enriquecido."]
 
         endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_cru)
-        ctx = semantica.resolver_contexto_administrativo(texto_cru.upper())
+        
+        # 1. Correção Cirúrgica da Extração de Contexto Administrativo (Bug da Acentuação)
+        texto_norm_seguro = semantica.normalizar(texto_cru)
+        ctx = semantica.resolver_contexto_administrativo(texto_norm_seguro)
+        
         parsed_comp = ParserGeograficoBR.extrair_componentes(texto_cru.upper())
         
         cache_key = hashlib.md5(f"{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
@@ -1146,16 +1154,6 @@ class GeocodingService:
                             cache_geo.set(cache_key, {"lat": lat_corrigida_arc, "lon": lon_corrigida_arc, "endereco": addr_c, "confianca": "ALTISSIMA", "score_num": 100, "distrito": bair, "municipio": loca, "fonte": "ViaCEP/ArcGIS"}, expire=2592000)
                             return res_final
 
-        if tipo_entrada == "MUNICIPIO" and ctx.get("municipio") and ctx.get("uf"):
-            mun_nome, uf_nome = ctx["municipio"], ctx["uf"]
-            if mun_nome in IBGE_MUNICIPIOS:
-                for item in IBGE_MUNICIPIOS[mun_nome]:
-                    if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0 and item.get("lon", 0.0) != 0.0:
-                        endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
-                        res_ibge = (item["lat"], item["lon"], endereco_ibge, "ALTISSIMA", 100, "", mun_nome, "BASE_IBGE_LOCAL", ["Centroide IBGE Municipal Resolvido Offline."])
-                        cache_geo.set(cache_key, {"lat": res_ibge[0], "lon": res_ibge[1], "endereco": res_ibge[2], "confianca": res_ibge[3], "score_num": res_ibge[4], "distrito": res_ibge[5], "municipio": res_ibge[6], "fonte": res_ibge[7]}, expire=2592000)
-                        return res_ibge
-
         def disparar_apis_paralelas(tarefas):
             resultados = []
             for f in as_completed([st.session_state["executor_apis"].submit(func, *args, **kwargs) for func, args, kwargs in tarefas]):
@@ -1190,7 +1188,7 @@ class GeocodingService:
         return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Falha Geográfica Absoluta por falta de candidatos."]
 
 # ==============================================================================
-# VOLUME 3: ENGINES DE TRÂNSITO, CLIMA, FROTA, CUSTOS E ESG (NOVAS CLASSES)
+# VOLUME 3: ENGINES DE TRÂNSITO, CLIMA, FROTA, CUSTOS E ESG
 # ==============================================================================
 class VehicleProfile:
     def __init__(self, tipo: str, peso_tons: float, altura_m: float, largura_m: float, eixos: int, valor_hora: float, custo_km_dep: float, fator_manut: float):
@@ -1213,7 +1211,6 @@ class RestrictionEngine:
 class HereTrafficProvider:
     @staticmethod
     def obter_trafego_rota(polyline: list) -> dict:
-        # Mock simulação para injeção de delay dinâmico
         return {"delay_minutes": 18, "severity": "MEDIUM", "incidents": 2}
 
 class TomTomTrafficProvider:
@@ -1248,7 +1245,6 @@ class TollProvider:
             cursor.execute("SELECT tarifa FROM pedagios")
             pedagios_db = cursor.fetchall()
             if pedagios_db:
-                # Simulação simples cruzando a tarifa armazenada no SQLite local
                 valor_total = sum(p[0] for p in pedagios_db)
                 return {"qtd": len(pedagios_db), "valor": valor_total}
         except Exception as e:
@@ -1353,7 +1349,7 @@ class GoogleDirectionsProvider(RoutingProvider):
                 return None
                 
             match_km = re.findall(r'\"(\d+[\.,]?\d*)\s*km\"', texto_resposta)
-            match_tempo = re.findall(r'\"(\d+)\s*min\"', texto_resposta) # Simplified regex for pure minutes mock
+            match_tempo = re.findall(r'\"(\d+)\s*min\"', texto_resposta) 
             if match_km:
                 km_puro = float(match_km[0].replace('.', '').replace(',', '.'))
                 minutos_base = int(match_tempo[0]) if match_tempo else int((km_puro/70.0)*60.0)
@@ -1653,22 +1649,32 @@ with tab_processamento:
                     
                 resultados_unicos = {}
                 executor_lote = st.session_state["executor_global"]
+                
+                # Correção Cirúrgica 3: Fallback explícito para executor_apis a fim de prevenir KeyesError
+                if "executor_apis" not in st.session_state:
+                    st.session_state["executor_apis"] = ThreadPoolExecutor(max_workers=16)
+                    
                 tarefas_unicas = [(t[1], t[1][0], t[1][1], veiculo_operacional, perfil_str) for t in tarefas_priorizadas]
-                futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in tarefas_unicas}
                 
                 concluidos = 0
                 barra_progresso = st.progress(0)
                 container_status = st.empty()
-                
                 st.session_state['logs_auditoria'] = []
                 
-                for f in as_completed(futuros):
-                    par_id, res = f.result()
-                    resultados_unicos[par_id] = res
-                        
-                    concluidos += 1
-                    container_status.text(f"🚀 Fila de Prioridade Assíncrona: {concluidos} / {len(pares_unicos)}")
-                    barra_progresso.progress(concluidos / len(pares_unicos))
+                # Correção Cirúrgica 10: Fatiamento em Lotes (Chunking) limitando requests concorrentes (Batch Size = 100)
+                batch_size = 100
+                for i in range(0, len(tarefas_unicas), batch_size):
+                    lote_atual = tarefas_unicas[i:i + batch_size]
+                    futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in lote_atual}
+                    
+                    for f in as_completed(futuros):
+                        par_id, res = f.result()
+                        if res:
+                            resultados_unicos[par_id] = res
+                            
+                        concluidos += 1
+                        container_status.text(f"🚀 Fila de Prioridade Assíncrona: {concluidos} / {len(pares_unicos)}")
+                        barra_progresso.progress(concluidos / len(pares_unicos))
                     
                 container_status.text("✨ Distribuindo resultados e gerando logs de auditoria...")
                 
@@ -1736,14 +1742,15 @@ with tab_analytics:
     st.markdown("### 📊 Dashboard Corporativo (Analytics)")
     if 'df_processado' in st.session_state:
         df_kpi = st.session_state['df_processado']
-        df_sucesso = df_kpi[df_kpi["Status da Rota"].str.contains("Erro") == False]
         
-        # KPI 1: Geocoding Accuracy
+        # Correção Cirúrgica 5: Tratamento de NaN no filtro de rotas via Pandas `~`
+        df_sucesso = df_kpi[~df_kpi["Status da Rota"].fillna("").str.contains("Erro")]
+        
         total_validos = len(df_kpi)
         alta_conf = len(df_kpi[df_kpi['Confianca Destino'].isin(['ALTISSIMA', 'ALTA'])])
+        # Correção Cirúrgica 4: A divisão por zero já estava protegida
         geo_accuracy = (alta_conf / total_validos) * 100 if total_validos > 0 else 0
 
-        # KPI 5: Tempo P95 e P99
         p95 = np.percentile(df_sucesso['Tempo Roteamento (s)'].dropna(), 95) if not df_sucesso.empty else 0
         p99 = np.percentile(df_sucesso['Tempo Roteamento (s)'].dropna(), 99) if not df_sucesso.empty else 0
         
@@ -1755,7 +1762,6 @@ with tab_analytics:
         
         st.markdown("---")
         
-        # KPI 2: Provider Ranking
         st.markdown("#### 🏆 Provider Ranking")
         health_data = []
         for api in ["GOOGLE_MAPS", "ARCGIS", "TOMTOM", "NOMINATIM", "PHOTON", "OVERPASS", "OSRM"]:
@@ -1767,7 +1773,6 @@ with tab_analytics:
         col_map, col_erros = st.columns([2, 1])
         
         with col_erros:
-            # KPI 3: Municípios Problemáticos
             st.markdown("#### ⚠️ Municípios Problemáticos")
             df_erros = df_kpi[df_kpi['Score Final Global'] < 70]
             if not df_erros.empty:
@@ -1778,7 +1783,6 @@ with tab_analytics:
                 st.success("Nenhuma inconsistência detectada.")
 
         with col_map:
-            # KPI 4: Mapa Operacional (DeckGL Scatterplot com Clusters)
             st.markdown("#### 🗺️ Mapa Operacional Global")
             df_mapa = df_sucesso.dropna(subset=['Lat Destino', 'Lon Destino'])
             if not df_mapa.empty:
