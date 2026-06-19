@@ -28,7 +28,7 @@ CACHE_IBGE_PATH = "municipios_ibge.pkl"
 
 ==============================================================================
 
-🎛️ INFRAESTRUTURA DE CONCORRÊNCIA E FILAS (FIM DO EFEITO COMBOIO)
+ INFRAESTRUTURA DE CONCORRÊNCIA E FILAS (FIM DO EFEITO COMBOIO)
 
 ==============================================================================
 
@@ -42,7 +42,7 @@ O contexto_regional_window (estado global) foi removido para garantir idempotên
 
 ==============================================================================
 
-🎛️ DADOS GLOBAIS THREAD-SAFE (RESOLUÇÃO DE HOMÔNIMOS MATRICIAL)
+ DADOS GLOBAIS THREAD-SAFE (RESOLUÇÃO DE HOMÔNIMOS MATRICIAL)
 
 ==============================================================================
 
@@ -103,7 +103,7 @@ BOUNDING_BOXES_UF = {"DF": {"lat_min": -16.05, "lat_max": -15.50, "lon_min": -48
 
 ==============================================================================
 
-🧹 ENGINE DE RESOLUÇÃO UNIVERSAL E ENDEREÇAMENTO CANÔNICO
+ ENGINE DE RESOLUÇÃO UNIVERSAL E ENDEREÇAMENTO CANÔNICO
 
 ==============================================================================
 
@@ -283,7 +283,7 @@ semantica = MotorEnderecoCanônico()
 
 ==============================================================================
 
-🧮 LÓGICA GEODÉSICA E LIMITES ESPACIAIS DO BRASIL
+ LÓGICA GEODÉSICA E LIMITES ESPACIAIS DO BRASIL
 
 ==============================================================================
 
@@ -299,7 +299,7 @@ def validar_consistencia_municipal(candidato, mun_inf):if not mun_inf: return Tr
 
 ==============================================================================
 
-🗺️ MÓDULOS DE GEOCODIFICAÇÃO (CONTRATO LISTA TOP-K)
+ MÓDULOS DE GEOCODIFICAÇÃO (CONTRATO LISTA TOP-K)
 
 ==============================================================================
 
@@ -337,7 +337,7 @@ def API_Overpass_POIs(texto_norm):if len(texto_norm) < 10: return Noneif texto_n
 
 ==============================================================================
 
-🧠 MOTOR DE CONSENSO STATELESS MULTIDIMENSIONAL (HYBRID CLUSTERING & SCORES)
+ MOTOR DE CONSENSO STATELESS MULTIDIMENSIONAL (HYBRID CLUSTERING & SCORES)
 
 ==============================================================================
 
@@ -499,7 +499,7 @@ return vencedor["lat"], vencedor["lon"], endereco_f, confianca, score_limitado, 
 
 ==============================================================================
 
-🎚️ ORQUESTRADOR EM CASCATA HIERÁRQUICA E OFFLINE-FIRST
+ ORQUESTRADOR EM CASCATA HIERÁRQUICA E OFFLINE-FIRST
 
 ==============================================================================
 
@@ -630,7 +630,7 @@ return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A"
 
 ==============================================================================
 
-🚀 MOTOR DE ROTEAMENTO (ARBITRAGEM DE PROVEDORES E PERFIS DE DISTÂNCIA)
+ MOTOR DE ROTEAMENTO (ARBITRAGEM DE PROVEDORES E PERFIS DE DISTÂNCIA)
 
 ==============================================================================
 
@@ -743,7 +743,7 @@ def embrulhar_task_paralela(item):par_id, orig, dest = itemtry: return par_id, c
 
 ==============================================================================
 
-🚗 INTERFACE STREAMLIT COM ENGINE DE DEDUPLICAÇÃO ASINTÓTICA O(U)
+ INTERFACE STREAMLIT COM ENGINE DE DEDUPLICAÇÃO ASINTÓTICA O(U)
 
 ==============================================================================
 
