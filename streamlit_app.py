@@ -69,18 +69,15 @@ session.mount("http://", adapter)
 CACHE_IBGE_PATH = "municipios_ibge.pkl"
 
 # ==============================================================================
-# 🎛️ INFRAESTRUTURA DE CONCORRÊNCIA E FILAS
+# 🎛️ INFRAESTRUTURA DE CONCORRÊNCIA E FILAS (THREAD-SAFE GLOBALS)
 # ==============================================================================
 WORKERS_DISPONIVEIS = 8
 
-if "executor_global" not in st.session_state:
-    st.session_state["executor_global"] = ThreadPoolExecutor(max_workers=WORKERS_DISPONIVEIS)
-
-if "fila_nominatim" not in st.session_state:
-    st.session_state["fila_nominatim"] = ThreadPoolExecutor(max_workers=1)
-
-if "executor_apis" not in st.session_state:
-    st.session_state["executor_apis"] = ThreadPoolExecutor(max_workers=16)
+# As instâncias de ThreadPoolExecutor agora são definidas como globais puras.
+# O uso de st.session_state dentro de threads aciona o erro de "ScriptRunContext" do Streamlit.
+EXECUTOR_GLOBAL = ThreadPoolExecutor(max_workers=WORKERS_DISPONIVEIS)
+FILA_NOMINATIM = ThreadPoolExecutor(max_workers=1)
+EXECUTOR_APIS = ThreadPoolExecutor(max_workers=16)
 
 # ==============================================================================
 # 🎛️ DADOS GLOBAIS THREAD-SAFE, HUB B2B E EXPANSÃO SEMÂNTICA
@@ -481,7 +478,7 @@ def cascata_postal_tripla(cep_limpo):
             time.sleep(1.1)
             url = f"https://nominatim.openstreetmap.org/search?format=json&postalcode={cep_limpo}&countrycodes=br&limit=1"
             return session.get(url, headers={"User-Agent": "RotasEnterprise/8.0"}, timeout=4).json()
-        r_nom = st.session_state["fila_nominatim"].submit(_nom_cep).result()
+        r_nom = FILA_NOMINATIM.submit(_nom_cep).result()
         if r_nom: lat, lon = float(r_nom[0]['lat']), float(r_nom[0]['lon'])
     except Exception: pass
     try:
@@ -563,7 +560,7 @@ def executar_reverse_geocoding_multimotor(lat, lon):
             time.sleep(1.1)
             url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&addressdetails=1"
             return session.get(url, headers={"User-Agent": "RotasEnterprise/8.0"}, timeout=4).json()
-        a = r_nom = st.session_state["fila_nominatim"].submit(_nom_rev).result().get("address", {})
+        a = r_nom = FILA_NOMINATIM.submit(_nom_rev).result().get("address", {})
         res.update({"logradouro": a.get("road", a.get("pedestrian", "")), "bairro": a.get("neighbourhood", a.get("suburb", a.get("city_district", ""))), "cidade": a.get("city", a.get("town", a.get("municipality", ""))), "estado": a.get("state", "").upper(), "cep": a.get("postcode", "")})
         cache_reverse.set(rev_key, res, expire=2592000); return res
     except Exception: pass
@@ -616,7 +613,7 @@ def API_Nominatim(query, ctx=None):
                 url = f"https://nominatim.openstreetmap.org/search?format=json&q={requests.utils.quote(query)}&limit=5&addressdetails=1&countrycodes=br"
             return session.get(url, headers={"User-Agent": "RotasEnterprise/8.0"}, timeout=4).json()
             
-        r = st.session_state["fila_nominatim"].submit(_call_nom).result()
+        r = FILA_NOMINATIM.submit(_call_nom).result()
         resultados = []
         if r:
             for a in r[:5]:
@@ -980,7 +977,8 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 
     def disparar_apis_paralelas(tarefas):
         resultados = []
-        for f in as_completed([st.session_state["executor_apis"].submit(func, *args, **kwargs) for func, args, kwargs in tarefas]):
+        # Utilizando a instância Global para evitar falha no background context do Streamlit
+        for f in as_completed([EXECUTOR_APIS.submit(func, *args, **kwargs) for func, args, kwargs in tarefas]):
             if res := f.result(): resultados.extend(res)
         return resultados
 
@@ -1141,8 +1139,13 @@ def executar_pipeline_unificado(origem_cru, destino_cru):
 
 def embrulhar_task_paralela(item):
     par_id, orig, dest = item
-    try: return par_id, executar_pipeline_unificado(orig, dest)
-    except Exception: return par_id, None
+    try: 
+        return par_id, executar_pipeline_unificado(orig, dest)
+    except Exception as e: 
+        # Em caso de pane isolada, garantir que não falhe silenciosamente retornando nulo e quebrando as colunas do df.
+        msg_erro = f"FALHA INTERNA: {str(e)}"
+        fallback = (0.0, "0 min", "", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "", "", "N/A", str(orig), "BAIXA", 0, "", "", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro])
+        return par_id, fallback
 
 # ==============================================================================
 # INTERFACE STREAMLIT COM ENGINE DE SIDEBAR MANUAL E ABAS DE AUDITORIA
@@ -1222,7 +1225,7 @@ with st.sidebar:
         **Como OSRM e Lógica Viária Funcionam:**
         Com as coordenadas cravadas, a requisição passa ao OSRM (*Open Source Routing Machine*) ou ao Google Directions para extrair o asfalto efetivo.
         São retornados a distância logada (`km`) e o tempo comercial estipulado.
-        Se os roteadores falharem ou caírem, entra o sistema **Geodésico Adaptativo**, que calcula o km terrestre aplicando um fator empírico de desvio rodoviário ($$ F $$) sobre a reta de Vincenty (geralmente multiplicando a reta aérea por 1.18 a 1.45, conforme a distância total).
+        Se os roteadores falharem ou caírem, entra o sistema **Geodésico Adaptativo**, que calcula o km terrestre aplicando um fator empírico de desvio rodoviário ($$F$$) sobre a reta de Vincenty (geralmente multiplicando a reta aérea por 1.18 a 1.45, conforme a distância total).
         """)
 
     with st.expander("8. Detecção de Balsas e Travessias", expanded=False):
@@ -1254,7 +1257,7 @@ with st.sidebar:
         st.markdown("""
         **O Fluxo Completo:**
         1. A planilha é lida com Pandas.
-        2. Os pares (`Origem, Destino`) são extraídos, limpos e jogados num *Set* de deduplicação temporal $$ O(U) $$.
+        2. Os pares (`Origem, Destino`) são extraídos, limpos e jogados num *Set* de deduplicação temporal $$O(U)$$.
         3. É montada uma **Fila de Prioridade** (Endereços exatos antes, BAIRROS vagos depois).
         4. O `ThreadPoolExecutor` despacha *Workers* que envelopam os nós chamando *exatamente* o mesmo core do Single-Shot (`executar_pipeline_unificado`).
         5. Os resultados são redistribuídos à planilha através do índice original.
@@ -1396,7 +1399,8 @@ with tab_processamento:
                 st.info(f"Otimização O(U) com Fila Inteligente Ativa: {len(pares_unicos)} rotas exclusivas na esteira de processamento pipeline-unificado.")
                     
                 resultados_unicos = {}
-                executor_lote = st.session_state["executor_global"]
+                # EXECUTOR_GLOBAL é acionado no módulo para ser Thread-Safe no ciclo de vida Streamlit.
+                executor_lote = EXECUTOR_GLOBAL
                 tarefas_unicas = [(t[1], t[1][0], t[1][1]) for t in tarefas_priorizadas]
                 futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in tarefas_unicas}
                 
@@ -1450,7 +1454,7 @@ with tab_processamento:
                             "Vencedor": res[11], "Score": res[8], "XAI Explicabilidade": " | ".join(res[26]) if len(res) > 26 else "N/A"
                         })
                     else:
-                        df.at[idx, 'Status da Rota'] = "Erro de Processamento"
+                        df.at[idx, 'Status da Rota'] = "Erro Crítico de Processamento"
 
                 tempo_lote_segundos = round(time.time() - start_lote_clock, 2)
                 cache_historico_lotes.set(f"lote_{start_lote_clock}", {
