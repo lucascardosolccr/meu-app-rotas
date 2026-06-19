@@ -1,4 +1,3 @@
-considerando o que pedi no prompt, o que acha desse script? está orreto? algum ajuste deve ser feito? import streamlit as st
 import pandas as pd
 import requests
 import time
