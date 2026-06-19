@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import pydeck as pdk
@@ -515,7 +514,6 @@ def validar_consistencia_municipal(candidato, mun_inf):
 def API_Google_Geocoding_Scraper(query):
     start_t = time.time()
     try:
-        # A URL de busca foi higienizada para a sintaxe oficial, evitando problemas de CORS e Redirecionamento mascarado
         url = f"https://www.google.com/maps/search/{requests.utils.quote(query)}"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         r = session.get(url, headers=headers, timeout=5, allow_redirects=True)
@@ -1019,7 +1017,6 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             dist_cross = calcular_distancia_vincenty(lat_d, lon_d, google_dest_geo[0]["lat"], google_dest_geo[0]["lon"])
             if dist_cross > 20.0: return None 
 
-    # URL oficial higienizada
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
     url_api = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/data=!4m2!4m1!3e0"
@@ -1082,7 +1079,6 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     else:
         dist_linha_reta = 0.0
 
-    # URL oficial higienizada para fallback
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(end_oficial_o)}&destination={requests.utils.quote(end_oficial_d)}&travelmode=driving"
 
     res_osrm = None
@@ -1296,6 +1292,7 @@ with tab_individual:
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
                     # A URL foi substituída pela rota nativa do Google Maps para evitar falhas de renderização iframe nulas (0.0, 0.0)
+                    # O uso de components.html foi substituído por st.markdown(unsafe_allow_html=True) para evitar o Bug de removeChild do React
                     html_mapa = f"""
                     <iframe 
                         width="100%" 
@@ -1306,7 +1303,7 @@ with tab_individual:
                         allowfullscreen>
                     </iframe>
                     """
-                    components.html(html_mapa, height=490)
+                    st.markdown(html_mapa, unsafe_allow_html=True)
                 else:
                     st.warning("Renderização de mapa suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
 
