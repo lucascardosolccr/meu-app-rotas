@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import pydeck as pdk
@@ -1020,9 +1019,11 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
-    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
-    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_raw)}&destination={requests.utils.quote(destino_raw)}&travelmode=driving"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.google.com/maps"}
+    url_api = f"https://www.google.com/maps/search/{origem_param}!1m2!1m1!1s{destino_param}!3e0"
+    
+    # URL de Fallback e Botão consertada para a sintaxe oficial limpa (Direções Google Maps)
+    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={lat_o},{lon_o}&destination={lat_d},{lon_d}&travelmode=driving"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     try:
         resposta = session.get(url_api, headers=headers, timeout=8)
@@ -1080,7 +1081,8 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     else:
         dist_linha_reta = 0.0
 
-    link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(end_oficial_o)}&destination={requests.utils.quote(end_oficial_d)}&travelmode=driving"
+    # URL oficial higienizada para fallback universal
+    link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={lat_o},{lon_o}&destination={lat_d},{lon_d}&travelmode=driving"
 
     res_osrm = None
     if lat_o != 0.0 and lat_d != 0.0:
@@ -1262,7 +1264,7 @@ with st.sidebar:
 
     with st.expander("12. Validador Rápido (Single-Shot)", expanded=False):
         st.markdown("""
-        **Fluxo Individual:** Injetado via UI direta. Utiliza o mesmíssimo pipeline `executar_pipeline_unificado`. Conta com um componente `iframe` nativo do Streamlit, que isola a renderização do mapa de direções oficial do Google Maps, impedindo erros de virtual DOM no React ao mesmo tempo em que exibe as ruas do trajeto na tela.
+        **Fluxo Individual:** Injetado via UI direta. Utiliza o mesmíssimo pipeline `executar_pipeline_unificado`. A extração do mapa da rota viária (GeoJSON) é feita consultando a topologia exata das vias em background, renderizando a geometria das ruas sobre um mapa base 3D robusto da biblioteca PyDeck.
         """)
 
 tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
@@ -1277,11 +1279,11 @@ with tab_individual:
     
     if st.button("🚀 Calcular Rota Individual", type="primary"):
         if orig_ind and dest_ind:
-            with st.spinner("Acionando motores de geocodificação e consenso unificado..."):
+            with st.spinner("Acionando motores de geocodificação e extraindo geometria da rota..."):
                 res_ind = executar_pipeline_unificado(orig_ind, dest_ind)
                 
             if res_ind and res_ind[0] != "QA_REJEITADO" and res_ind[0] != "GEOCODING_FALHOU":
-                st.success("✅ Rota estabelecida com sucesso!")
+                st.success("✅ Rota e Geometria estabelecidas com sucesso!")
                 m_dist, m_time, m_score = st.columns(3)
                 m_dist.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0])
                 m_time.metric("Tempo Estimado", res_ind[1])
@@ -1292,10 +1294,42 @@ with tab_individual:
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    # Usando componente Iframe nativo do Streamlit para evitar o erro 'removeChild' 
-                    # do DOM React, formatando com a URL oficial de direções embutidas do Google.
-                    url_iframe = f"https://maps.google.com/maps?saddr={lat_o},{lon_o}&daddr={lat_d},{lon_d}&output=embed"
-                    components.iframe(url_iframe, height=470, scrolling=True)
+                    # Nova Abordagem (GeoJSON PathLayer): Extrai a rota real das ruas em vez de usar iframe
+                    rota_coords = [[lon_o, lat_o], [lon_d, lat_d]]
+                    try:
+                        url_osrm_geo = f"https://router.project-osrm.org/route/v1/driving/{lon_o},{lat_o};{lon_d},{lat_d}?overview=full&geometries=geojson"
+                        r_geo = requests.get(url_osrm_geo, timeout=5).json()
+                        if r_geo.get("routes") and len(r_geo["routes"]) > 0:
+                            rota_coords = r_geo["routes"][0]["geometry"]["coordinates"]
+                    except Exception:
+                        pass
+                        
+                    rota_layer = pdk.Layer(
+                        "PathLayer",
+                        data=[{"path": rota_coords}],
+                        get_path="path",
+                        get_color=[0, 200, 255, 200], # Traçado Ciano Brilhante
+                        width_scale=20,
+                        width_min_pixels=4,
+                        get_width=5,
+                    )
+                    
+                    scatter_layer = pdk.Layer(
+                        "ScatterplotLayer",
+                        data=[{"pos": [lon_o, lat_o], "color": [0, 255, 128]}, {"pos": [lon_d, lat_d], "color": [255, 0, 0]}],
+                        get_position="pos",
+                        get_fill_color="color",
+                        get_radius=800,
+                        radius_min_pixels=5,
+                    )
+                    
+                    lat_c, lon_c = (lat_o + lat_d) / 2, (lon_o + lon_d) / 2
+                    
+                    st.pydeck_chart(pdk.Deck(
+                        layers=[rota_layer, scatter_layer], 
+                        initial_view_state=pdk.ViewState(latitude=lat_c, longitude=lon_c, zoom=5, pitch=40), 
+                        map_style="mapbox://styles/mapbox/dark-v10"
+                    ))
                 else:
                     st.warning("Renderização de mapa suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
 
