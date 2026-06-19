@@ -240,6 +240,10 @@ class MotorEnderecoCanônico:
             if isinstance(dado_salvo, str): 
                 t_raw = dado_salvo
 
+        # ATUALIZAÇÃO V1.12: Remoção absoluta de vírgulas e pontos-e-vírgulas.
+        # Isso destrói o "Bug da Vírgula" que impedia o chunking de parear com a base do IBGE
+        t_raw = t_raw.replace(',', ' ').replace(';', ' ')
+
         t = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', t_raw)
         t = unidecode(t).upper()
         t = re.sub(r'\b0+(\d{1,4})\b', r'\1', t) 
@@ -373,6 +377,22 @@ semantica = MotorEnderecoCanônico()
 # ==============================================================================
 # 🧮 VALIDADOR PRÉ-GEOCODING E LÓGICA GEODÉSICA
 # ==============================================================================
+
+def parse_tempo_minutos(t_str):
+    if not isinstance(t_str, str): return 999999
+    try:
+        h = re.search(r'(\d+)\s*h', t_str)
+        m = re.search(r'(\d+)\s*min', t_str)
+        horas = int(h.group(1)) if h else 0
+        mins = int(m.group(1)) if m else 0
+        if not h and not m:
+            nums = re.findall(r'\d+', t_str)
+            if nums: return int(nums[0])
+            return 999999
+        return horas * 60 + mins
+    except Exception:
+        return 999999
+
 def validar_coordenadas_mapa(lat, lon):
     try:
         if pd.isna(lat) or pd.isna(lon): return False
@@ -1012,9 +1032,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             melhor = res_fallback[0]
             valido, lat_c, lon_c = validar_coordenada_brasil(melhor["lat"], melhor["lon"])
             if valido:
-                # ATUALIZAÇÃO 1.12: Proxy Semântico. 
-                # Preserva o texto digitado pelo usuário para que a matemática rode no centróide
-                # mas o Google Maps leia a rua oficial, acabando com o erro de rotas direcionadas pro centro da cidade.
                 rua_crua = texto_cru.upper().strip(" ,-")
                 if dist_nome and dist_nome not in rua_crua:
                     endereco_ibge = f"{rua_crua}, {dist_nome}, {mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
@@ -1060,10 +1077,10 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         if match_km and match_tempo:
             km_puro = float(match_km[0].replace('.', '').replace(',', '.'))
             
+            # ATUALIZAÇÃO 1.12: Remoção do limite restritivo de Linha Reta (* 4.0)
+            # Na Amazônia, o contorno viário pode facilmente superar 10x a distância aérea devido à bacia hidrográfica.
             if dist_linha_reta > 0:
-                limite_curto = max(dist_linha_reta * 2.0, dist_linha_reta + 15.0)
-                if dist_linha_reta <= 50.0 and km_puro > limite_curto: return None  
-                elif km_puro < dist_linha_reta * 0.8 or km_puro > dist_linha_reta * 4.0: return None  
+                if km_puro < dist_linha_reta * 0.7: return None  
 
             envolve_balsa = "Sim" if any(re.search(p, texto_resposta.lower()) for p in [r'\"utilizar\s+balsa\b', r'\"ferry\b']) else "Não"
             score_google = 70 + (10 if km_puro > 0 else 0) + (10 if match_tempo[0] else 0) + (10 if km_puro >= dist_linha_reta else 0)
@@ -1133,7 +1150,9 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
         if res_google: opcoes.append((res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4]))
         
         if opcoes:
-            melhor_opcao = min(opcoes, key=lambda x: x[0]) 
+            # ATUALIZAÇÃO V1.12: Arbitragem por TEMPO (Fastest) e não por Distância.
+            # Garante que rotas de asfalto compridas vençam rotas de balsa excessivamente demoradas.
+            melhor_opcao = min(opcoes, key=lambda x: parse_tempo_minutos(x[1])) 
             tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
             retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
             cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
