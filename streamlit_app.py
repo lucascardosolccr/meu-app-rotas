@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import pydeck as pdk
@@ -1019,9 +1020,9 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
-    url_api = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/data=!4m2!4m1!3e0"
+    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_raw)}&destination={requests.utils.quote(destino_raw)}&travelmode=driving"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.google.com/maps"}
     
     try:
         resposta = session.get(url_api, headers=headers, timeout=8)
@@ -1261,7 +1262,7 @@ with st.sidebar:
 
     with st.expander("12. Validador Rápido (Single-Shot)", expanded=False):
         st.markdown("""
-        **Fluxo Individual:** Injetado via UI direta. Utiliza o mesmíssimo pipeline `executar_pipeline_unificado`. Conta com um renderizador geoespacial interativo do **Google Maps** embutido via `iframe` que traça a rota com base na resolução geodésica em radianos extraída pelo consenso interno.
+        **Fluxo Individual:** Injetado via UI direta. Utiliza o mesmíssimo pipeline `executar_pipeline_unificado`. Conta com um componente `iframe` nativo do Streamlit, que isola a renderização do mapa de direções oficial do Google Maps, impedindo erros de virtual DOM no React ao mesmo tempo em que exibe as ruas do trajeto na tela.
         """)
 
 tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
@@ -1291,19 +1292,10 @@ with tab_individual:
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    # A URL foi substituída pela rota nativa do Google Maps para evitar falhas de renderização iframe nulas (0.0, 0.0)
-                    # O uso de components.html foi substituído por st.markdown(unsafe_allow_html=True) para evitar o Bug de removeChild do React
-                    html_mapa = f"""
-                    <iframe 
-                        width="100%" 
-                        height="470" 
-                        frameborder="0" 
-                        style="border:0; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);" 
-                        src="https://maps.google.com/maps?saddr={lat_o},{lon_o}&daddr={lat_d},{lon_d}&output=embed" 
-                        allowfullscreen>
-                    </iframe>
-                    """
-                    st.markdown(html_mapa, unsafe_allow_html=True)
+                    # Usando componente Iframe nativo do Streamlit para evitar o erro 'removeChild' 
+                    # do DOM React, formatando com a URL oficial de direções embutidas do Google.
+                    url_iframe = f"https://maps.google.com/maps?saddr={lat_o},{lon_o}&daddr={lat_d},{lon_d}&output=embed"
+                    components.iframe(url_iframe, height=470, scrolling=True)
                 else:
                     st.warning("Renderização de mapa suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
 
