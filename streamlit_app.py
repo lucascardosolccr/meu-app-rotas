@@ -11,9 +11,7 @@ import os
 import pickle
 import collections
 import hashlib
-import sqlite3     # Correção Cirúrgica: Importação restaurada
-import json        # Correção Cirúrgica: Importação restaurada
-import threading   # Correção Cirúrgica: Importação restaurada
+import json
 from unidecode import unidecode
 from rapidfuzz import process, fuzz
 from diskcache import Cache
@@ -71,7 +69,7 @@ session.mount("http://", adapter)
 CACHE_IBGE_PATH = "municipios_ibge.pkl"
 
 # ==============================================================================
-# 🎛️ INFRAESTRUTURA DE CONCORRÊNCIA E FILAS (FIM DO EFEITO COMBOIO)
+# 🎛️ INFRAESTRUTURA DE CONCORRÊNCIA E FILAS
 # ==============================================================================
 WORKERS_DISPONIVEIS = 8
 
@@ -157,8 +155,8 @@ def carregar_dados_ibge():
                     "lon": dist.get("lon", 0.0)
                 })
 
-            with open(CACHE_IBGE_PATH, "wb") as f:
-                pickle.dump({"municipios": base_mun, "estados": base_est, "distritos": base_dist}, f)
+                with open(CACHE_IBGE_PATH, "wb") as f:
+                    pickle.dump({"municipios": base_mun, "estados": base_est, "distritos": base_dist}, f)
     except Exception: pass
     
     lista_completa = list(base_mun.keys()) + list(base_dist.keys())
@@ -353,7 +351,7 @@ class MotorEnderecoCanônico:
                 comp_str = f", {parsed['complemento']}" if parsed["complemento"] else ""
                 if parsed["numero"] or parsed["complemento"]: lat_cep, lon_cep = 0.0, 0.0 
                 nome_estado_cep = IBGE_ESTADOS.get(uf, uf) if uf else ""
-                return f"{logr}{num_str}{comp_str}, {bair}, {loca}, {nome_estado_cep}, BRASIL", "CEP", "", lat_cep, lon_cep
+                return f"{logr}{num_str}{comp_str}, {bair}, {loca}, {nome_estado_cep}, BRASIL", "CEP", parsed["cep"], lat_cep, lon_cep
 
         texto_fuzzy = self.aplicar_fuzzy_multidimensional(texto_norm)
         tipo = self.classificar_entrada(texto_fuzzy)
@@ -379,6 +377,23 @@ semantica = MotorEnderecoCanônico()
 # ==============================================================================
 # 🧮 VALIDADOR PRÉ-GEOCODING E LÓGICA GEODÉSICA
 # ==============================================================================
+def validar_coordenadas_mapa(lat, lon):
+    try:
+        if pd.isna(lat) or pd.isna(lon): return False
+        lat_f, lon_f = float(lat), float(lon)
+        if math.isnan(lat_f) or math.isnan(lon_f) or math.isinf(lat_f) or math.isinf(lon_f): return False
+        if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= lon_f <= 180.0): return False
+        return True
+    except (ValueError, TypeError):
+        return False
+
+def validar_json_mapa(dados):
+    try:
+        json.dumps(dados)
+        return True
+    except (TypeError, OverflowError):
+        return False
+
 def auditoria_pre_geocoding(texto_cru, contexto, tipo_entrada):
     if len(texto_cru) < 4: return "INSUFICIENTE"
     if tipo_entrada in ["BAIRRO", "RURAL"] and not contexto.get("municipio"): return "INSUFICIENTE"
@@ -446,10 +461,6 @@ def auditoria_geografica(km_rota, minutos_str, dist_linha_reta, lat_o, lon_o, la
     return None
 
 def cascata_postal_tripla(cep_limpo):
-    provider = "cascata_postal"
-    if not circuit_breaker.allow(provider): return "", "", "", "", 0.0, 0.0
-    rate_limiter.wait(provider)
-    
     if cep_limpo in cache_cep:
         d = cache_cep[cep_limpo]
         if len(d) == 4: return d[0], d[1], d[2], d[3], 0.0, 0.0
@@ -994,9 +1005,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 
     if res_final:
         cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
-        if res_final[4] >= 95 and res_final[3] == "ALTISSIMA":
-            chave_auto = texto_cru.upper()
-            cache_aprendizado_auto.set(chave_auto, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "distrito": res_final[5], "municipio": res_final[6], "metadata": {"evidencias_xai": res_final[8] if len(res_final) > 8 else []}}, expire=7776000)
         return res_final
         
     return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Falha Geográfica Absoluta por falta de candidatos."]
@@ -1122,9 +1130,18 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
     return retorno
 
+def executar_pipeline_unificado(origem_cru, destino_cru):
+    orig = str(origem_cru).strip() if pd.notna(origem_cru) else ""
+    dest = str(destino_cru).strip() if pd.notna(destino_cru) else ""
+    
+    if orig.lower() in ['nan', 'none', 'null', ''] or dest.lower() in ['nan', 'none', 'null', '']:
+        return ("GEOCODING_FALHOU", "0 min", "", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "", "", "N/A", orig, "BAIXA", 0, "", "", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [])
+        
+    return calcular_pipeline_logistico(orig, dest, perfil_rota="shortest")
+
 def embrulhar_task_paralela(item):
     par_id, orig, dest = item
-    try: return par_id, calcular_pipeline_logistico(orig, dest, perfil_rota="shortest")
+    try: return par_id, executar_pipeline_unificado(orig, dest)
     except Exception: return par_id, None
 
 # ==============================================================================
@@ -1138,31 +1155,115 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("📖 Manual do Sistema")
-    with st.expander("🎯 Visão Geral"):
+    st.header("📖 Documentação Oficial e Arquitetura")
+    st.caption("Manual Técnico Aprofundado do Sistema")
+    
+    with st.expander("1. Visão Geral e Arquitetura", expanded=False):
         st.markdown("""
-        O sistema realiza:
-        1. Interpretação do endereço via Parser Brasileiro.
-        2. Geocodificação multi-API assíncrona.
-        3. Consenso espacial ponderado por densidade (DBSCAN).
-        4. Validação IBGE e bases offline locais.
-        5. Reverse Geocoding Closed-Loop.
-        6. Roteamento rodoviário.
-        7. Geração da planilha final enriquecida.
+        **Objetivo do Sistema:** Automatizar a roteirização logística em nível nacional, resolvendo problemas complexos de strings sujas, endereçamentos irregulares e rurais que falham em APIs convencionais.
+        
+        **Arquitetura Lógica:** Microserviço *offline-first*. O fluxo opera em:  
+        `Parser NLP` → `Validação de Contexto IBGE` → `Cascata Multi-API Paralela` → `DBSCAN Clustering Espacial` → `Inferência Bayesiana de Score` → `Roteamento Viário Dinâmico`.
+        
+        **Componentes Internos:** Módulos isolados de *Garbage Collection*, persistência L2 em disco, *ThreadPools* assíncronas para eliminação do efeito comboio (Head-of-Line Blocking) e renderização visual tolerante a falhas.
         """)
-    with st.expander("📍 Como a Geocodificação Funciona"):
+
+    with st.expander("2. Fluxo Completo da Geocodificação", expanded=False):
         st.markdown("""
-        APIs utilizadas de forma paralela:
-        - ArcGIS, Google Geocoding, TomTom
-        - Nominatim, Photon, Overpass (POIs)
-        - BrasilAPI & ViaCEP (Cascata Postal)
+        **Como o endereço é recebido e tratado:**
+        O texto bruto é limpo removendo caracteres não imprimíveis e acentos (`unidecode`). A normalização expande abreviações logísticas (`AV -> AVENIDA`, `CD -> CENTRO DE DISTRIBUICAO`).
+        
+        **Ação do Parser e Semântica:**
+        O `ParserGeograficoBR` extrai CEPs via Expressões Regulares (`regex`), extrai a assinatura do número predial e separa complementos textuais.
+        A classe `MotorEnderecoCanônico` constrói o *contexto administrativo*. Ele deduz **UF**, **Município** e **Distrito/RA** cruzando *chunks* do texto contra a malha oficial do IBGE carregada em memória.
         """)
-    with st.expander("🛣️ Como a Rota é Calculada"):
-        st.markdown("Prioridade Viária: 1. OSRM | 2. Google Directions | 3. Geodésico Adaptativo.")
-    with st.expander("📏 Linha Reta vs Rota"):
-        st.markdown("A linha reta usa a fórmula de *Vincenty*. A rota real avalia restrições de malha e manobras terrestres.")
-    with st.expander("📊 Score Global"):
-        st.markdown("Fórmula Ponderada: 35% Origem + 35% Destino + 30% Qualidade da Rota Viária.")
+
+    with st.expander("3. Cascata de Geocodificação Multi-API", expanded=False):
+        st.markdown("""
+        Para mitigar *Single Point of Failure* e *Vendor Lock-in*, o sistema dispara *threads* paralelas para:
+        * **Google Maps (Scraper):** Focado em *places* e inteligência comercial não estruturada.
+        * **ArcGIS:** Alta precisão para malha viária urbana estruturada.
+        * **Nominatim & Photon (OSM):** Resolução descentralizada para interiores e toponímia.
+        * **TomTom:** Inteligência estrita de logística B2B.
+        * **Overpass:** Consulta sintática hiper-focada em POIs (Hospitais, Aeroportos).
+        
+        **Análise de Comparação:** Todas as respostas geram "candidatos". Cada API confere uma métrica base, mas a palavra final pertence ao motor de consenso interno.
+        """)
+
+    with st.expander("4. Motor de Consenso Espacial (Clustering)", expanded=False):
+        st.markdown("""
+        **O que é?** É o processo de encontrar a "verdade" quando APIs discordam.
+        
+        **O Mecanismo (DBSCAN & Bayes):**
+        1. As coordenadas retornadas são mapeadas em radianos.
+        2. O algoritmo `DBSCAN` (com métrica de *Haversine*) cria *clusters* de candidatos baseando-se num raio geodésico de tolerância (ex: 500m para CEP, 10km para rural).
+        3. Apenas os membros do maior *cluster* avançam (eliminando pontos fora da curva).
+        4. O sistema calcula a **Probabilidade Posterior Bayesiana** combinando: *Match* Léxico da Rua (usando *Fuzzy String Matching*), validação da UF/Cidade contra o IBGE e multiplicadores de confiança.
+        5. O candidato com maior *score* probabilístico é eleito o vencedor.
+        """)
+
+    with st.expander("5. Reverse Geocoding (Auditoria Cruzada)", expanded=False):
+        st.markdown("""
+        **Como e Quando é Executado?**
+        Após o motor de consenso eleger os top candidatos, suas coordenadas são submetidas a um processo de engenharia reversa (*Reverse Geocoding* em cascata Nominatim/ArcGIS).
+        
+        **Influência:** O sistema compara o endereço *retornado* pela coordenada vencedora com a *string originalmente digitada* pelo usuário. Se a similaridade despencar vertiginosamente, o sistema detecta uma "Interpolação Fantasma" e rebaixa a confiança do ponto para `REVISAO_MANUAL`.
+        """)
+
+    with st.expander("6. Geodésia e Linha Reta", expanded=False):
+        st.markdown("""
+        **Fórmula Utilizada:** O sistema implementa o **Algoritmo de Vincenty** em Python puro. Diferente da fórmula de *Haversine* (que assume a Terra esférica), Vincenty modela a Terra como um *elipsoide oblato* (WGS-84), conferindo precisão milimétrica.
+        
+        **Limitações e Diferenças:** A linha reta é um vetor aéreo abstrato, servindo primariamente para estabelecer o limite base matemático (o desvio mínimo teórico) para detecção de fraudes na rota viária real (onde o asfalto deve contornar topografia).
+        """)
+
+    with st.expander("7. Cálculo de Rota Dinâmica", expanded=False):
+        st.markdown("""
+        **Como OSRM e Lógica Viária Funcionam:**
+        Com as coordenadas cravadas, a requisição passa ao OSRM (*Open Source Routing Machine*) ou ao Google Directions para extrair o asfalto efetivo.
+        São retornados a distância logada (`km`) e o tempo comercial estipulado.
+        Se os roteadores falharem ou caírem, entra o sistema **Geodésico Adaptativo**, que calcula o km terrestre aplicando um fator empírico de desvio rodoviário ($$ F $$) sobre a reta de Vincenty (geralmente multiplicando a reta aérea por 1.18 a 1.45, conforme a distância total).
+        """)
+
+    with st.expander("8. Detecção de Balsas e Travessias", expanded=False):
+        st.markdown("""
+        **Critérios de Verificação:** A detecção é inferida de forma determinística analisando as anotações do provedor viário. O sistema utiliza regex (*ferry*, *balsa*) sobre as diretrizes de navegação (`directions text`).
+        
+        **Limitações:** A detecção depende exclusivamente da base de dados do OSRM/Google; travessias fluviais não cadastradas oficialmente podem passar como rodovias comuns (especialmente no norte do país).
+        """)
+
+    with st.expander("9. Sistema de Auditoria de Score (XAI)", expanded=False):
+        st.markdown("""
+        **Explainable AI (XAI):** Cada decisão deixa uma trilha.
+        O "Score Final Global" é calculado com a fórmula:
+        `(Confiança Numérica Origem * 35%) + (Confiança Numérica Destino * 35%) + (Qualidade da Rota * 30%)`
+        
+        *Rotas confiáveis:* Score acima de 80. Match IBGE positivo. Ensemble Multi-API concordante.
+        *Rotas suspeitas:* Score abaixo de 70. Alerta Anti-Fantasma acionado. Apenas uma fonte respondeu e sem validação municipal.
+        """)
+
+    with st.expander("10. Estratégia de Cache e Persistência", expanded=False):
+        st.markdown("""
+        **DiskCache L1/L2:** A aplicação mantém múltiplos bancos de cache locais em disco (SQLite-based):
+        `cache_geo` (Geocodificação final), `cache_rotas` (Pipeline completo), `cache_cep` (Dicionário Postal).
+        
+        **Benefício de Performance:** Rotas já consultadas respondem em milissegundos sem gastar a quota financeira de chamadas HTTP, mitigando a latência de rede em processamentos extensos (Lote).
+        """)
+
+    with st.expander("11. Processamento em Lote (Batch)", expanded=False):
+        st.markdown("""
+        **O Fluxo Completo:**
+        1. A planilha é lida com Pandas.
+        2. Os pares (`Origem, Destino`) são extraídos, limpos e jogados num *Set* de deduplicação temporal $$ O(U) $$.
+        3. É montada uma **Fila de Prioridade** (Endereços exatos antes, BAIRROS vagos depois).
+        4. O `ThreadPoolExecutor` despacha *Workers* que envelopam os nós chamando *exatamente* o mesmo core do Single-Shot (`executar_pipeline_unificado`).
+        5. Os resultados são redistribuídos à planilha através do índice original.
+        """)
+
+    with st.expander("12. Validador Rápido (Single-Shot)", expanded=False):
+        st.markdown("""
+        **Fluxo Individual:** Injetado via UI direta. Utiliza o mesmíssimo pipeline `executar_pipeline_unificado`. Conta com um renderizador geoespacial exclusivo (`Deck.GL` via PyDeck) que ilustra a geometria da cobertura geodésica em 3 níveis e a linha de desejo da rota, incorporando blindagem interna contra *NaNs* de coordenada para não gerar tela de erro (Expressões JSON resilientes).
+        """)
 
 tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
     "📍 Geocodificação Rápida", "⚙️ Processamento em Lote", "📊 Analytics & Saúde", "🕵️ Aba de Auditoria"
@@ -1176,8 +1277,8 @@ with tab_individual:
     
     if st.button("🚀 Calcular Rota Individual", type="primary"):
         if orig_ind and dest_ind:
-            with st.spinner("Acionando motores de geocodificação e consenso..."):
-                res_ind = calcular_pipeline_logistico(orig_ind, dest_ind, perfil_rota="shortest")
+            with st.spinner("Acionando motores de geocodificação e consenso unificado..."):
+                res_ind = executar_pipeline_unificado(orig_ind, dest_ind)
                 
             if res_ind and res_ind[0] != "QA_REJEITADO" and res_ind[0] != "GEOCODING_FALHOU":
                 st.success("✅ Rota estabelecida com sucesso!")
@@ -1187,49 +1288,56 @@ with tab_individual:
                 score_g = round((0.35 * res_ind[8]) + (0.35 * res_ind[14]) + (0.30 * res_ind[6]), 2)
                 m_score.metric("Score Global de Qualidade", f"{score_g} / 100")
                 
-                lat_c, lon_c = (res_ind[19] + res_ind[21]) / 2, (res_ind[20] + res_ind[22]) / 2
-                
-                arc_layer = pdk.Layer(
-                    "ArcLayer",
-                    data=[{"origem": [res_ind[20], res_ind[19]], "destino": [res_ind[22], res_ind[21]]}],
-                    get_source_position="origem",
-                    get_target_position="destino",
-                    get_source_color=[0, 255, 128, 160],
-                    get_target_color=[255, 0, 0, 160],
-                    width_scale=0.04,
-                    width_min_pixels=3,
-                    width_max_pixels=15,
-                )
-                
-                scatter_layer = pdk.Layer(
-                    "ScatterplotLayer",
-                    data=[{"pos": [res_ind[20], res_ind[19]], "color": [0, 255, 128]}, {"pos": [res_ind[22], res_ind[21]], "color": [255, 0, 0]}],
-                    get_position="pos",
-                    get_fill_color="color",
-                    get_radius=800,
-                )
-                
-                coverage_layer = pdk.Layer(
-                    "ScatterplotLayer",
-                    data=[
-                        {"pos": [res_ind[22], res_ind[21]], "radius": 50000, "color": [255, 165, 0, 80]},
-                        {"pos": [res_ind[22], res_ind[21]], "radius": 100000, "color": [0, 191, 255, 60]},
-                        {"pos": [res_ind[22], res_ind[21]], "radius": 200000, "color": [138, 43, 226, 40]}
-                    ],
-                    get_position="pos",
-                    get_radius="radius",
-                    stroked=True,
-                    filled=True,
-                    get_fill_color="color",
-                    get_line_color=[255, 255, 255, 150],
-                    line_width_min_pixels=1
-                )
-                
-                st.pydeck_chart(pdk.Deck(layers=[coverage_layer, arc_layer, scatter_layer], initial_view_state=pdk.ViewState(latitude=lat_c, longitude=lon_c, zoom=4, pitch=45), map_style="mapbox://styles/mapbox/dark-v10"))
+                lat_o, lon_o = res_ind[19], res_ind[20]
+                lat_d, lon_d = res_ind[21], res_ind[22]
+
+                if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
+                    lat_c, lon_c = (lat_o + lat_d) / 2, (lon_o + lon_d) / 2
+                    
+                    arc_layer = pdk.Layer(
+                        "ArcLayer",
+                        data=[{"origem": [lon_o, lat_o], "destino": [lon_d, lat_d]}],
+                        get_source_position="origem",
+                        get_target_position="destino",
+                        get_source_color=[0, 255, 128, 160],
+                        get_target_color=[255, 0, 0, 160],
+                        width_scale=0.04,
+                        width_min_pixels=3,
+                        width_max_pixels=15,
+                    )
+                    
+                    scatter_layer = pdk.Layer(
+                        "ScatterplotLayer",
+                        data=[{"pos": [lon_o, lat_o], "color": [0, 255, 128]}, {"pos": [lon_d, lat_d], "color": [255, 0, 0]}],
+                        get_position="pos",
+                        get_fill_color="color",
+                        get_radius=800,
+                    )
+                    
+                    coverage_layer = pdk.Layer(
+                        "ScatterplotLayer",
+                        data=[
+                            {"pos": [lon_d, lat_d], "radius": 50000, "color": [255, 165, 0, 80]},
+                            {"pos": [lon_d, lat_d], "radius": 100000, "color": [0, 191, 255, 60]},
+                            {"pos": [lon_d, lat_d], "radius": 200000, "color": [138, 43, 226, 40]}
+                        ],
+                        get_position="pos",
+                        get_radius="radius",
+                        stroked=True,
+                        filled=True,
+                        get_fill_color="color",
+                        get_line_color=[255, 255, 255, 150],
+                        line_width_min_pixels=1
+                    )
+                    
+                    st.pydeck_chart(pdk.Deck(layers=[coverage_layer, arc_layer, scatter_layer], initial_view_state=pdk.ViewState(latitude=lat_c, longitude=lon_c, zoom=4, pitch=45), map_style="mapbox://styles/mapbox/dark-v10"))
+                else:
+                    st.warning("Renderização 3D suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
+
                 st.info(f"**Origem fixada por:** {res_ind[11]} | **Destino fixada por:** {res_ind[17]} | **Motor da Rota:** {res_ind[5]}")
                 st.markdown(f"[🔗 Abrir Rota no Google Maps]({res_ind[2]})")
             else:
-                st.error("Falha na validação de consistência geodésica.")
+                st.error("Falha na validação de consistência geodésica unificada.")
         else:
             st.warning("Preencha origem e destino.")
 
@@ -1249,7 +1357,7 @@ with tab_processamento:
                 st.error(f"⚠️ Limite arquitetural de {MAX_LINHAS} linhas excedido. Fracione o arquivo.")
                 st.stop()
                 
-            st.success(f"Tabela com {len(df)} registros mapeada! Pronto para processar.")
+            st.success(f"Tabela com {len(df)} registros mapeada! Pronto para processar o Lote Unificado.")
             
             nome_operador = st.text_input("Matrícula / Nome do Operador (Opcional)", max_chars=50)
             
@@ -1267,15 +1375,15 @@ with tab_processamento:
                 mapeamento_linhas = []
                 
                 for index, linha in df.iterrows():
-                    origem = str(getattr(linha, 'Origem', '')).strip() if pd.notna(getattr(linha, 'Origem', '')) else ""
-                    destino = str(getattr(linha, 'Destino', '')).strip() if pd.notna(getattr(linha, 'Destino', '')) else ""
+                    origem = str(linha.get('Origem', '')).strip() if pd.notna(linha.get('Origem', '')) else ""
+                    destino = str(linha.get('Destino', '')).strip() if pd.notna(linha.get('Destino', '')) else ""
                     if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
                         par = (origem, destino)
                         pares_unicos.add(par)
                         mapeamento_linhas.append((index, origem, destino))
                 
                 if not pares_unicos:
-                    st.warning("Nenhuma linha contendo endereços válidos detectada.")
+                    st.warning("Nenhuma linha contendo endereços válidos detectada após sanitização.")
                     st.stop()
                     
                 MAPA_PRIORIDADE = {"CEP": 1, "ENDERECO_COMPLETO": 2, "POI": 3, "CONDOMINIO": 3, "MUNICIPIO": 4, "BAIRRO": 5, "RURAL": 6, "LOGRADOURO": 7}
@@ -1285,7 +1393,7 @@ with tab_processamento:
                     tarefas_priorizadas.append((MAPA_PRIORIDADE.get(tipo_o, 99), p))
                 tarefas_priorizadas.sort(key=lambda x: x[0])
                 
-                st.info(f"Otimização O(U) com Fila Inteligente Ativa: {len(pares_unicos)} rotas exclusivas na esteira de processamento.")
+                st.info(f"Otimização O(U) com Fila Inteligente Ativa: {len(pares_unicos)} rotas exclusivas na esteira de processamento pipeline-unificado.")
                     
                 resultados_unicos = {}
                 executor_lote = st.session_state["executor_global"]
@@ -1386,19 +1494,27 @@ with tab_analytics:
         
         st.markdown("---")
         st.markdown("#### 🚨 Mapa de Calor de Inconsistências (Score < 70)")
-        df_erros = df_kpi[df_kpi['Score Final Global'] < 70].dropna(subset=['Lat Destino', 'Lon Destino'])
-        if not df_erros.empty:
+        df_erros = df_kpi[df_kpi['Score Final Global'] < 70].copy()
+        
+        # Filtro Rigoroso PyDeck / Prevenção de quebra de frontend
+        df_erros['Lat Destino'] = pd.to_numeric(df_erros['Lat Destino'], errors='coerce')
+        df_erros['Lon Destino'] = pd.to_numeric(df_erros['Lon Destino'], errors='coerce')
+        df_erros = df_erros.dropna(subset=['Lat Destino', 'Lon Destino'])
+        df_erros = df_erros[df_erros.apply(lambda row: validar_coordenadas_mapa(row['Lat Destino'], row['Lon Destino']), axis=1)]
+        df_erros['Peso_Inverso'] = 100 - pd.to_numeric(df_erros['Score Final Global'], errors='coerce').fillna(0)
+        
+        if not df_erros.empty and validar_json_mapa(df_erros.to_dict(orient='records')):
             heatmap_layer = pdk.Layer(
                 "HeatmapLayer",
                 data=df_erros,
                 get_position=['Lon Destino', 'Lat Destino'],
                 aggregation='"SUM"',
-                get_weight="100 - `Score Final Global`",
+                get_weight="Peso_Inverso",
                 radiusPixels=50,
             )
             st.pydeck_chart(pdk.Deck(layers=[heatmap_layer], initial_view_state=pdk.ViewState(latitude=-15.78, longitude=-47.92, zoom=3), map_style="mapbox://styles/mapbox/dark-v10"))
         else:
-            st.success("🎉 Nenhuma inconsistência crítica detectada nas execuções atuais.")
+            st.success("🎉 Nenhuma inconsistência crítica detectada nas execuções atuais ou os dados não possuem geolocalização processável em mapa.")
             
         st.markdown("---")
         st.markdown("#### ⚙️ Monitor de Saúde das APIs e Latência")
