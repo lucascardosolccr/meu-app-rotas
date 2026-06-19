@@ -691,7 +691,9 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     candidatos_validos = []
     candidatos_para_avaliacao = candidatos.copy()
     
-    ctx_inf = semantica.resolver_contexto_administrativo(texto_cru.upper())
+    # ATUALIZAÇÃO V1.14: Sincronização Léxica em Todo o Motor de Consenso
+    texto_norm = semantica.normalizar(texto_cru)
+    ctx_inf = semantica.resolver_contexto_administrativo(texto_norm)
     uf_inf, mun_inf, dist_inf = ctx_inf.get("uf", ""), ctx_inf.get("municipio", ""), ctx_inf.get("distrito", "")
     box = BOUNDING_BOXES_UF.get(uf_inf) if uf_inf else None
     
@@ -746,7 +748,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     if not candidatos_validos: return None
 
     tolerancia_km = raio_cluster_km
-    input_usuario = ParserGeograficoBR.extrair_componentes(texto_cru.upper())
+    input_usuario = ParserGeograficoBR.extrair_componentes(texto_norm)
 
     candidatos_consistentes_uf = [c for c in candidatos_validos if validar_consistencia_administrativa(c, uf_inf)]
     if candidatos_consistentes_uf: candidatos_validos = candidatos_consistentes_uf
@@ -776,10 +778,10 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         feat_cep = input_usuario.get("cep") and c1.get("cep") and input_usuario["cep"] in c1["cep"].replace("-", "")
         feat_bairro = dist_inf and c1.get("bairro") and dist_inf in c1["bairro"]
         feat_numero = input_usuario.get("numero") and c1.get("numero") and input_usuario["numero"] in c1["numero"]
-        fuzz_rua = fuzz.token_set_ratio(texto_cru.upper(), c1.get("logradouro", "")) / 100.0 if c1.get("logradouro") else 0.1
+        fuzz_rua = fuzz.token_set_ratio(texto_norm, c1.get("logradouro", "")) / 100.0 if c1.get("logradouro") else 0.1
         
         PADROES_RODOVIA = [r'\bBR[- ]?\d+\b', r'\bSP[- ]?\d+\b', r'\bMG[- ]?\d+\b', r'\bGO[- ]?\d+\b', r'\bDF[- ]?\d+\b', r'\bRJ[- ]?\d+\b', r'\bPR[- ]?\d+\b', r'\bSC[- ]?\d+\b', r'\bRS[- ]?\d+\b']
-        input_tem_rodovia = any(re.search(p, texto_cru.upper()) for p in PADROES_RODOVIA)
+        input_tem_rodovia = any(re.search(p, texto_norm) for p in PADROES_RODOVIA)
         api_tem_rodovia = any(re.search(p, c1.get("logradouro", "").upper()) for p in PADROES_RODOVIA) or bool(re.search(r'\b(RODOVIA|KM|ESTRADA)\b', c1.get("logradouro", "").upper()))
         feat_punicao_rodovia = not input_tem_rodovia and api_tem_rodovia
         
@@ -832,7 +834,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
             if not match_cid: continue
         
         end_reverse = ", ".join([c for c in [m.get("logradouro", ""), m.get("bairro", ""), m.get("cidade", ""), estado_reverse] if c.strip()])
-        similaridade = fuzz.token_set_ratio(texto_cru.upper(), end_reverse.upper())
+        similaridade = fuzz.token_set_ratio(texto_norm, end_reverse.upper())
         
         if similaridade >= 55 or tipo_entrada in ["BAIRRO", "MUNICIPIO", "RURAL"]:
             vencedor = cand
@@ -882,7 +884,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     if xd["num"]: explicacoes_humanas.append("Assinatura de número predial reconhecida na porta do cliente.")
     if xd["fuzz"] >= 80.0: explicacoes_humanas.append(f"Similaridade léxica de logradouro em {xd['fuzz']}% de aprovação.")
 
-    match_logr = fuzz.token_set_ratio(texto_cru.upper(), m.get("logradouro", "").upper())
+    match_logr = fuzz.token_set_ratio(texto_norm, m.get("logradouro", "").upper())
     match_bairro = fuzz.token_set_ratio(dist_inf, m.get("bairro", "").upper()) if dist_inf else 100
     match_cep = 100 if input_usuario.get("cep") and m.get("cep") and input_usuario["cep"] in m.get("cep", "").replace("-", "") else 0 if input_usuario.get("cep") else 100
     
@@ -894,10 +896,9 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         if tipo_entrada in ["ENDERECO_COMPLETO", "CEP"] and not vencedor.get("logradouro"): confianca = "MUNICIPAL"
         else: confianca = "ALTISSIMA" if score_limitado >= 85 else "ALTA" if score_limitado >= 75 else "MEDIA" if score_limitado >= 60 else "BAIXA"
 
-    rua_f = m["logradouro"] if m["logradouro"] else texto_cru.upper()
+    rua_f = m["logradouro"] if m["logradouro"] else texto_norm
     endereco_f = ", ".join([c for c in [rua_f, m["bairro"], m["cidade"], m["estado"]] if c.strip()]) + ", BRASIL"
     
-    # ATUALIZAÇÃO 1.13: Blindagem Extra. Se for 0.0 (Oceano/Falha), invalida a tupla pro Fallback Assumir
     if vencedor["lat"] == 0.0 or vencedor["lon"] == 0.0:
         return None
         
@@ -910,6 +911,9 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     texto_cru = str(localidade).strip()
     if not texto_cru or texto_cru.lower() == 'nan': return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A", ["String Vazia"]
     
+    # ATUALIZAÇÃO V1.14: Sincronização Léxica Absoluta
+    texto_norm = semantica.normalizar(texto_cru)
+    
     if match_coords := re.match(r'^\s*(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$', texto_cru):
         lat_in, lon_in = float(match_coords.group(1)), float(match_coords.group(2))
         valido, lat_in, lon_in = validar_coordenada_brasil(lat_in, lon_in)
@@ -919,22 +923,20 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             return lat_in, lon_in, end_f, "ABSOLUTA", 100, m.get("bairro", ""), m.get("cidade", ""), "COORDENADA_EXATA", ["Entrada direta via Coordenadas Numéricas."]
 
     for poi_key, poi_data in BASE_POIS_LOGISTICOS.items():
-        if poi_key in texto_cru.upper():
+        if poi_key in texto_norm:
             return poi_data["lat"], poi_data["lon"], poi_data["endereco"], "ABSOLUTA", 100, "", poi_data["municipio"], "BASE_POIS_NACIONAIS", ["Resolvido via Base Nacional de POIs Logísticos Ground Truth."]
 
-    chave_aprendizado_coord = texto_cru.upper()
-    if chave_aprendizado_coord in cache_aprendizado:
-        dado_salvo = cache_aprendizado[chave_aprendizado_coord]
+    if texto_norm in cache_aprendizado:
+        dado_salvo = cache_aprendizado[texto_norm]
         if isinstance(dado_salvo, dict) and "lat" in dado_salvo and "lon" in dado_salvo:
-            return dado_salvo["lat"], dado_salvo["lon"], dado_salvo.get("endereco", texto_cru.upper()), "ALTISSIMA", 100, dado_salvo.get("distrito", ""), dado_salvo.get("municipio", ""), "APRENDIZADO_LOCAL", ["Ponto quente extraído do cache local enriquecido."]
+            return dado_salvo["lat"], dado_salvo["lon"], dado_salvo.get("endereco", texto_norm), "ALTISSIMA", 100, dado_salvo.get("distrito", ""), dado_salvo.get("municipio", ""), "APRENDIZADO_LOCAL", ["Ponto quente extraído do cache local enriquecido."]
 
-    endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_cru)
-    ctx = semantica.resolver_contexto_administrativo(texto_cru.upper())
-    parsed_comp = ParserGeograficoBR.extrair_componentes(texto_cru.upper())
+    endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
+    ctx = semantica.resolver_contexto_administrativo(texto_norm)
+    parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
     cache_key = hashlib.md5(f"{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
-    # ATUALIZAÇÃO 1.13: Blindagem contra lixo legado no Cache (como o 0.0, 0.0 de Ribeirão Cascalheira)
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
         if c.get("lat", 0.0) != 0.0 and c.get("lon", 0.0) != 0.0:
@@ -948,15 +950,15 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     if parsed_comp["numero"]: rua_limpa = f"{rua_limpa} {parsed_comp['numero']}".strip()
     
     contexto_estruturado = {
-        "logradouro": rua_limpa if rua_limpa else texto_cru.upper(),
+        "logradouro": rua_limpa if rua_limpa else texto_norm,
         "bairro": ctx.get("distrito", ""),
         "municipio": ctx.get("municipio", ""),
         "uf": ctx.get("uf", ""),
         "cep": parsed_comp.get("cep", "")
     }
 
-    if auditoria_pre_geocoding(texto_cru, contexto_estruturado, tipo_entrada) == "INSUFICIENTE":
-        return 0.0, 0.0, texto_cru, "INSUFICIENTE", 0, "", "", "PRE_FLIGHT", ["Abortado pelo validador pré-geocoding: informações insuficientes."]
+    if auditoria_pre_geocoding(texto_norm, contexto_estruturado, tipo_entrada) == "INSUFICIENTE":
+        return 0.0, 0.0, texto_norm, "INSUFICIENTE", 0, "", "", "PRE_FLIGHT", ["Abortado pelo validador pré-geocoding: informações insuficientes."]
 
     if match_offline := obedience_base_local(contexto_estruturado):
         return match_offline["lat"], match_offline["lon"], match_offline["endereco"], "ALTISSIMA", 100, match_offline.get("distrito", ""), match_offline.get("municipio", ""), "BASE_NACIONAL_OFFLINE", ["Ponto resolvido via CNEFE/Bases Locais Estáticas."]
@@ -967,7 +969,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     candidatos_validos = []
 
     if tipo_entrada == "CEP":
-        cep_estrito = re.search(r'\b\d{5}-?\d{3}\b', texto_cru)
+        cep_estrito = re.search(r'\b\d{5}-?\d{3}\b', texto_norm)
         if cep_estrito:
             cep_limpo = cep_estrito.group(0).replace("-", "")
             logr, bair, loca, uf, lat_c, lon_c = cascata_postal_tripla(cep_limpo)
@@ -1008,7 +1010,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
         return resultados
 
     if tipo_entrada == "POI" or tipo_entrada == "CONDOMINIO":
-        candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Overpass_POIs, (semantica.normalizar(texto_cru),), {}), (API_TomTom, (endereco_canonico,), {})]))
+        candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Overpass_POIs, (texto_norm,), {}), (API_TomTom, (endereco_canonico,), {})]))
     elif tipo_entrada in ["ENDERECO_COMPLETO", "LOGRADOURO"]:
         candidatos_validos.extend(disparar_apis_paralelas([(API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_TomTom, (endereco_canonico,), {})]))
     elif tipo_entrada in ["BAIRRO", "MUNICIPIO", "DISTRITO"]:
@@ -1038,7 +1040,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             melhor = res_fallback[0]
             valido, lat_c, lon_c = validar_coordenada_brasil(melhor["lat"], melhor["lon"])
             if valido:
-                rua_crua = texto_cru.upper().strip(" ,-")
+                rua_crua = texto_norm.strip(" ,-")
                 if dist_nome and dist_nome not in rua_crua:
                     endereco_ibge = f"{rua_crua}, {dist_nome}, {mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
                 else:
@@ -1084,7 +1086,8 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             km_puro = float(match_km[0].replace('.', '').replace(',', '.'))
             
             if dist_linha_reta > 0:
-                if km_puro < dist_linha_reta * 0.7: return None  
+                limite_curto = max(dist_linha_reta * 2.0, dist_linha_reta + 15.0)
+                if dist_linha_reta <= 50.0 and km_puro > limite_curto: return None  
 
             envolve_balsa = "Sim" if any(re.search(p, texto_resposta.lower()) for p in [r'\"utilizar\s+balsa\b', r'\"ferry\b']) else "Não"
             score_google = 70 + (10 if km_puro > 0 else 0) + (10 if match_tempo[0] else 0) + (10 if km_puro >= dist_linha_reta else 0)
@@ -1148,15 +1151,12 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     if res_osrm: opcoes.append((res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3]))
     if res_google: opcoes.append((res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4]))
     
-    # ==============================================================================
-    # ATUALIZAÇÃO 1.13: EXPLAINABLE AI DE ROTEAMENTO (XAI) E ARBITRAGEM TEMPORAL
-    # ==============================================================================
     if opcoes:
         opcoes_tempo = sorted(opcoes, key=lambda x: parse_tempo_minutos(x[1]))
         opcoes_dist = sorted(opcoes, key=lambda x: x[0])
         
-        melhor_opcao = opcoes_tempo[0] # The Fastest
-        curta_opcao = opcoes_dist[0]   # The Shortest
+        melhor_opcao = opcoes_tempo[0] 
+        curta_opcao = opcoes_dist[0]   
         
         if len(opcoes) == 1:
             motivo_roteamento = f"Trajeto único validado pelos provedores viários. Distância: {melhor_opcao[0]}km. Tempo Estipulado: {melhor_opcao[1]}. Balsas: {melhor_opcao[3]}."
@@ -1166,7 +1166,6 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
             motivo_roteamento = f"Otimização Temporal Ativada: O sistema avaliou múltiplos cenários e decidiu rejeitar o trajeto mais curto ({curta_opcao[0]}km em {curta_opcao[1]} | Balsas: {curta_opcao[3]}) para priorizar a rota rodoviária mais rápida, garantindo maior fluidez logística ({melhor_opcao[0]}km em {melhor_opcao[1]} | Balsas: {melhor_opcao[3]})."
 
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-        # O Motivo Roteamento foi inserido na posição [28] da tupla de retorno
         retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
 
@@ -1338,7 +1337,6 @@ with tab_individual:
             if res_ind and res_ind[0] != "QA_REJEITADO" and res_ind[0] != "GEOCODING_FALHOU":
                 st.success("✅ Rota estabelecida com sucesso!")
                 
-                # ADIÇÃO DAS NOVAS MÉTRICAS: Balsas (Sim/Não) inserido nas colunas ativas
                 m_dist_via, m_dist_reta, m_time, m_balsa, m_score = st.columns(5)
                 
                 m_dist_via.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0])
@@ -1349,7 +1347,6 @@ with tab_individual:
                 score_g = round((0.35 * res_ind[8]) + (0.35 * res_ind[14]) + (0.30 * res_ind[6]), 2)
                 m_score.metric("Score Global", f"{score_g} / 100")
                 
-                # EXPLAINABLE AI VISUAL: Caixa de info explicando a decisão (Tempo vs Distância e Balsas)
                 st.info(f"🧠 **Estratégia de Roteamento:** {res_ind[28]}")
                 
                 lat_o, lon_o = res_ind[19], res_ind[20]
@@ -1370,6 +1367,7 @@ with tab_individual:
                 else:
                     st.warning("Renderização de mapa suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
 
+                st.info(f"**Origem fixada por:** {res_ind[11]} | **Destino fixada por:** {res_ind[17]} | **Motor da Rota:** {res_ind[5]}")
                 st.markdown(f"[🔗 Abrir Rota Completa no Aplicativo do Google Maps]({res_ind[2]})")
             else:
                 st.error("Falha na validação de consistência geodésica unificada.")
@@ -1399,7 +1397,6 @@ with tab_processamento:
             if st.button("Iniciar Processamento em Lote"):
                 start_lote_clock = time.time()
                 
-                # ADIÇÃO DA COLUNA 'Motivo Roteamento' NO LOTE EXCEL
                 novas_colunas = [
                     'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Motivo Roteamento', 'Linha Reta', 'Fonte da Rota', 'Score da Rota', 
                     'Confianca Origem', 'Score Num Origem', 'Distrito Origem', 'Municipio Origem', 'Fonte Geocoding Origem', 'Endereco Oficial Origem',
