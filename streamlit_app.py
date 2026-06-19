@@ -625,7 +625,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
                 alocado = True
                 break
         if not alocado: clusters.append([c])
-            Você deve aguardar eu enviar o script todo para propor todas as melhorias. Essa é a segunda parte: if clusters:
+        if clusters:
         tamanho_maior_cluster = max(len(cluster) for cluster in clusters)
         if tamanho_maior_cluster > 1:
             candidatos_validos = [c for cluster in clusters if len(cluster) == tamanho_maior_cluster for c in cluster]
