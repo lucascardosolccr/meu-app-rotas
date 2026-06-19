@@ -45,13 +45,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-# ATUALIZAÇÃO 1.18: NUKE DE CACHE
-# Utilizar .clear() pulveriza fisicamente todo o lixo armazenado no disco local do usuário.
-# Resolve definitivamente os problemas de "IndexError" e coordenadas zeradas do passado.
-if "cache_limpo_v18" not in st.session_state:
+if "cache_limpo_v19" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v18"] = True
+    st.session_state["cache_limpo_v19"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -84,7 +81,7 @@ FILA_NOMINATIM = ThreadPoolExecutor(max_workers=1)
 EXECUTOR_APIS = ThreadPoolExecutor(max_workers=16)
 
 # ==============================================================================
-# 🎛️ DADOS GLOBAIS THREAD-SAFE, HUB B2B E EXPANSÃO SEMÂNTICA
+# 🎛️ DADOS GLOBAIS THREAD-SAFE E HUB B2B
 # ==============================================================================
 BASE_POIS_LOGISTICOS = {
     "CD MAGAZINE LUIZA CAXIAS": {"lat": -22.7853, "lon": -43.3121, "endereco": "Centro de Distribuição Magazine Luiza, Duque de Caxias, RJ, BRASIL", "municipio": "DUQUE DE CAXIAS", "uf": "RJ"},
@@ -110,58 +107,48 @@ def registrar_telemetria(fonte, sucesso, tempo_gasto):
 
 @st.cache_data
 def carregar_dados_ibge():
+    dados_carregados = None
     if os.path.exists(CACHE_IBGE_PATH):
-        if time.time() - os.path.getmtime(CACHE_IBGE_PATH) > (30 * 86400):
-            os.remove(CACHE_IBGE_PATH)
-        else:
-            try:
-                with open(CACHE_IBGE_PATH, "rb") as f:
-                    d = pickle.load(f)
-                    return d.get("municipios", {}), d.get("estados", {}), d.get("distritos", {}), list(d.get("municipios", {}).keys()) + list(d.get("distritos", {}).keys())
-            except Exception: pass
+        try:
+            with open(CACHE_IBGE_PATH, "rb") as f:
+                dados_carregados = pickle.load(f)
+                # ATUALIZAÇÃO 1.19: Retorna do cache se estiver no prazo de validade
+                if time.time() - os.path.getmtime(CACHE_IBGE_PATH) <= (30 * 86400):
+                    return dados_carregados.get("municipios", {}), dados_carregados.get("estados", {}), dados_carregados.get("distritos", {}), list(dados_carregados.get("municipios", {}).keys()) + list(dados_carregados.get("distritos", {}).keys())
+        except Exception: pass
 
     base_mun, base_est, base_dist = {}, {}, {}
     try:
-        r_est = session.get("https://servicodados.ibge.gov.br/api/v1/localidades/estados", timeout=8)
+        r_est = session.get("https://servicodados.ibge.gov.br/api/v1/localidades/estados", timeout=10)
         if r_est.status_code == 200:
-            for est in r_est.json():
-                base_est[est["sigla"]] = unidecode(est["nome"]).upper()
+            for est in r_est.json(): base_est[est["sigla"]] = unidecode(est["nome"]).upper()
                 
-        r_mun = session.get("https://servicodados.ibge.gov.br/api/v1/localidades/municipios", timeout=12)
+        r_mun = session.get("https://servicodados.ibge.gov.br/api/v1/localidades/municipios", timeout=15)
         if r_mun.status_code == 200:
             for mun in r_mun.json():
                 nome_norm = unidecode(mun["nome"]).upper().strip()
                 uf_sigla = mun["microrregiao"]["mesorregiao"]["UF"]["sigla"].upper()
                 if nome_norm not in base_mun: base_mun[nome_norm] = []
+                base_mun[nome_norm].append({"uf": uf_sigla, "municipio": nome_norm, "lat": mun.get("lat", 0.0), "lon": mun.get("lon", 0.0)})
                 
-                base_mun[nome_norm].append({
-                    "uf": uf_sigla, 
-                    "municipio": nome_norm,
-                    "lat": mun.get("lat", 0.0), 
-                    "lon": mun.get("lon", 0.0)
-                })
-                
-        r_dist = session.get("https://servicodados.ibge.gov.br/api/v1/localidades/distritos", timeout=12)
+        r_dist = session.get("https://servicodados.ibge.gov.br/api/v1/localidades/distritos", timeout=15)
         if r_dist.status_code == 200:
             for dist in r_dist.json():
                 nome_dist = unidecode(dist["nome"]).upper().strip()
                 nome_muni = unidecode(dist["municipio"]["nome"]).upper().strip()
                 uf_dist = dist["municipio"]["microrregiao"]["mesorregiao"]["UF"]["sigla"].upper()
-                
                 if nome_dist not in base_dist: base_dist[nome_dist] = []
-                base_dist[nome_dist].append({
-                    "uf": uf_dist, 
-                    "municipio": nome_muni,
-                    "lat": dist.get("lat", 0.0), 
-                    "lon": dist.get("lon", 0.0)
-                })
+                base_dist[nome_dist].append({"uf": uf_dist, "municipio": nome_muni, "lat": dist.get("lat", 0.0), "lon": dist.get("lon", 0.0)})
 
-                with open(CACHE_IBGE_PATH, "wb") as f:
-                    pickle.dump({"municipios": base_mun, "estados": base_est, "distritos": base_dist}, f)
-    except Exception: pass
-    
-    lista_completa = list(base_mun.keys()) + list(base_dist.keys())
-    return base_mun, base_est, base_dist, lista_completa
+        with open(CACHE_IBGE_PATH, "wb") as f: 
+            pickle.dump({"municipios": base_mun, "estados": base_est, "distritos": base_dist}, f)
+        
+        return base_mun, base_est, base_dist, list(base_mun.keys()) + list(base_dist.keys())
+    except Exception:
+        # Se a API cair, jamais deixe a lista vazia. Resgata o arquivo antigo para o Motor Semântico não apagar.
+        if dados_carregados:
+            return dados_carregados.get("municipios", {}), dados_carregados.get("estados", {}), dados_carregados.get("distritos", {}), list(dados_carregados.get("municipios", {}).keys()) + list(dados_carregados.get("distritos", {}).keys())
+        return {}, {}, {}, []
 
 IBGE_MUNICIPIOS, IBGE_ESTADOS, IBGE_DISTRITOS, LISTA_TOPONIMOS = carregar_dados_ibge()
 
@@ -172,12 +159,7 @@ for k, v_list in IBGE_DISTRITOS.items():
     for v in v_list: LISTA_CONTEXTO_FUZZY.append(f"{k} {v['uf']}")
 LISTA_CONTEXTO_FUZZY = list(set(LISTA_CONTEXTO_FUZZY))
 
-POI_KEYWORDS = [
-    "AEROPORTO", "HOSPITAL", "UNIVERSIDADE", "FACULDADE", "ESCOLA", "SHOPPING", 
-    "HOTEL", "RODOVIARIA", "ESTADIO", "MINISTERIO", "AGENCIA", "BANCO", 
-    "IGREJA", "FORUM", "TRIBUNAL", "DELEGACIA", "PREFEITURA", "CLINICA",
-    "CENTRO DE DISTRIBUICAO", "TERMINAL", "BASE OPERACIONAL"
-]
+POI_KEYWORDS = ["AEROPORTO", "HOSPITAL", "UNIVERSIDADE", "FACULDADE", "ESCOLA", "SHOPPING", "HOTEL", "RODOVIARIA", "ESTADIO", "MINISTERIO", "AGENCIA", "BANCO", "IGREJA", "FORUM", "TRIBUNAL", "DELEGACIA", "PREFEITURA", "CLINICA", "CENTRO DE DISTRIBUICAO", "TERMINAL", "BASE OPERACIONAL"]
 
 BOUNDING_BOXES_UF = {
     "DF": {"lat_min": -16.05, "lat_max": -15.50, "lon_min": -48.30, "lon_max": -47.30},
@@ -575,7 +557,7 @@ def API_TomTom(query):
     return None
 
 def executar_reverse_geocoding_multimotor(lat, lon):
-    rev_key = f"V5_{round(lat,5)}|{round(lon,5)}"
+    rev_key = f"V6_{round(lat,5)}|{round(lon,5)}"
     if rev_key in cache_reverse: return cache_reverse[rev_key]
     res = {"logradouro": "", "bairro": "", "cidade": "", "municipio": "", "distrito": "", "estado": "", "cep": ""}
     try:
@@ -938,8 +920,8 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     ctx = semantica.resolver_contexto_administrativo(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    # Marcador V5 para chaves do Banco Local - Fuga definitiva do IndexError Local
-    cache_key = hashlib.md5(f"GEO_V5_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    # ATUALIZAÇÃO 1.18: Chave V6 para erradicar completamente o IndexError
+    cache_key = hashlib.md5(f"GEO_V6_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1052,13 +1034,10 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                     
                 res_final = (lat_c, lon_c, endereco_ibge, "BAIXA", 40, dist_nome, mun_nome, "CENTROIDE_FALLBACK", ["Endereço exato não geocodificado. Fallback ativado para Centróide (Distrito/Município) a fim de habilitar distância em Linha Reta."])
 
-    # ATUALIZAÇÃO 1.18: A Rede de Segurança Final de Coordenadas (IBGE Fallback Melhorado). 
-    # Impede de forma absoluta que Municípios Válidos (como Ribeirão Cascalheira) fiquem em 0.0.
     if not res_final and ctx.get("municipio") and ctx.get("uf"):
         mun_nome = ctx["municipio"]
         uf_nome = ctx["uf"]
         
-        # Algoritmo de Similaridade para absorver leves erros de digitação vs a Base do IBGE
         matches = process.extract(mun_nome, list(IBGE_MUNICIPIOS.keys()), scorer=fuzz.WRatio, limit=3)
         mun_ibge_match = None
         if matches and matches[0][1] >= 85:
@@ -1081,41 +1060,39 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # ==============================================================================
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
-def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V5_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+def extrair_dados_reais_google(origem_text, destino_text, lat_o, lon_o, lat_d, lon_d, dist_linha_reta):
+    # ATUALIZAÇÃO 1.18: Geração do URL Oficial Universal para Link e Iframe
+    orig_str = requests.utils.quote(origem_text) if origem_text else f"{lat_o},{lon_o}"
+    dest_str = requests.utils.quote(destino_text) if destino_text else f"{lat_d},{lon_d}"
+    
+    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={orig_str}&destination={dest_str}&travelmode=driving"
+    cache_key = f"GOOG_V6_{origem_text}|{destino_text}"
     if cache_key in cache_google: return cache_google[cache_key]
 
-    origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
-    destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
-    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
-    
-    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
+    url_api = f"https://www.google.com/maps/dir/{orig_str}/{dest_str}/data=!4m2!4m1!3e0"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     try:
-        resposta = session.get(url_api, headers=headers, timeout=8)
+        resposta = session.get(url_api, headers=headers, timeout=12)
         texto_resposta = resposta.text
         if len(texto_resposta) < 500 or "directions" not in texto_resposta.lower(): return None
         with open(f"logs_google/{hash(cache_key)}.txt", "w", encoding="utf-8") as f: f.write(texto_resposta)
             
-        match_km = re.findall(r'\"(\d+[\.,]?\d*)\s*km\"', texto_resposta)
-        match_tempo = re.findall(r'\"(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)\"', texto_resposta)
+        match_km = re.search(r'\"(\d{1,3}(?:\.\d{3})*(?:,\d+)?)\s*km\"', texto_resposta)
+        match_tempo = re.search(r'\"(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)\"', texto_resposta)
         
         if match_km and match_tempo:
-            km_puro = float(match_km[0].replace('.', '').replace(',', '.'))
+            km_puro = float(match_km.group(1).replace('.', '').replace(',', '.'))
             
-            # ATUALIZAÇÃO 1.18: A Heurística Definitiva de Balsa (Anti-Falsos Positivos HTML).
+            # ATUALIZAÇÃO 1.18: Heurística Anti-Falsos Positivos de Balsa
             balsa_patterns = [r'\"[^\"]*instruções de navegação[^\"]*balsa[^\"]*\"', r'\"[^\"]*utilizar balsa[^\"]*\"', r'\"[^\"]*ferry[^\"]*\"']
             envolve_balsa = "Sim" if any(re.search(p, texto_resposta.lower()) for p in balsa_patterns) else "Não"
             
-            # Proteção Matemática contra desvios: Se a distância via asfalto for mais de 2.0x a distância da linha reta,
-            # significa que a rota é um contorno continental terrestre (como Porto de Moz para Almeirim em 1.897km), 
-            # portanto a balsa obrigatoriamente NÃO está na rota, mesmo que o Google a cite nas "Dicas" HTML.
             if dist_linha_reta > 0 and km_puro > (dist_linha_reta * 2.0):
                 envolve_balsa = "Não"
 
-            score_google = 70 + (10 if km_puro > 0 else 0) + (10 if match_tempo[0] else 0) + (10 if km_puro >= dist_linha_reta else 0)
-            res = (km_puro, match_tempo[0], link_maps, envolve_balsa, score_google)
+            score_google = 70 + (10 if km_puro > 0 else 0) + (10 if match_tempo.group(1) else 0) + (10 if km_puro >= dist_linha_reta else 0)
+            res = (km_puro, match_tempo.group(1), link_maps, envolve_balsa, score_google)
             cache_google.set(cache_key, res, expire=2592000); return res
     except Exception: pass
     return None
@@ -1127,7 +1104,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V5_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V6_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1146,33 +1123,37 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     dest_param_fb = requests.utils.quote(end_oficial_d) if end_oficial_d else f"{lat_d},{lon_d}"
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
 
-    res_google = None
-    if lat_o != 0.0 and lat_d != 0.0:
-        res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True)
-        if not res_google:
-            res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=False)
+    # ATUALIZAÇÃO 1.18: Bloqueio do Salvar em Cache caso a coordenada tenha sido perdida
+    if lat_o == 0.0 or lat_d == 0.0:
+        km_terrestre = 0.0
+        tempo_geo_str = "0 min"
+        tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
+        motivo_fallback = "Falha crítica de geocodificação. O motor foi incapaz de resolver o Endereço/IBGE."
+        # A tupla tem exatamente 29 elementos (Index 0 ao 28)
+        retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "N/A", 0, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback)
+        return retorno
+
+    res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta)
 
     if res_google:
         melhor_opcao = (res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Maps", res_google[4])
         
         if res_google[3] == "Sim":
-            motivo_roteamento = f"Identidade Absoluta: Rota oficial extraída do provedor primário ({res_google[0]}km em {res_google[1]}). O sistema logístico traçou e autorizou o uso de balsa fluvial no trajeto real."
+            motivo_roteamento = f"Identidade Absoluta: Rota oficial extraída do provedor primário ({res_google[0]}km em {res_google[1]}). O sistema logístico confirmou o uso de balsa fluvial no trajeto real."
         else:
-            motivo_roteamento = f"Identidade Absoluta: Rota oficial extraída do provedor primário ({res_google[0]}km em {res_google[1]}). O sistema priorizou o traçado terrestre (asfalto), garantindo que não haja dependência de balsas em operação."
+            motivo_roteamento = f"Identidade Absoluta: Rota oficial extraída do provedor primário ({res_google[0]}km em {res_google[1]}). O sistema priorizou o traçado puramente terrestre, contornando rios ou mares."
         
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-        # Tupla Exata com 29 elementos (Indexação 0 ao 28)
         retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
         return retorno
 
-    # Fallback caso o Google falhe globalmente
     km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
     v_comercial = 45.0 if km_terrestre < 50.0 else 65.0
     minutos_est = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0 else 0
     tempo_geo_str = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
     tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-    motivo_fallback = "Provedor viário indisponível (Timeout de Rede). Trajeto matematicamente projetado por aproximação geodésica baseada na Linha Reta Absoluta."
+    motivo_fallback = "Provedor viário indisponível (Timeout de Rede). Trajeto matematicamente projetado por aproximação geodésica."
     
     retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback)
     cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
@@ -1182,25 +1163,19 @@ def executar_pipeline_unificado(origem_cru, destino_cru):
     orig = str(origem_cru).strip() if pd.notna(origem_cru) else ""
     dest = str(destino_cru).strip() if pd.notna(destino_cru) else ""
     if orig.lower() in ['nan', 'none', 'null', ''] or dest.lower() in ['nan', 'none', 'null', '']:
-        return ("GEOCODING_FALHOU", "0 min", "", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "", "", "N/A", orig, "BAIXA", 0, "", "", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha na leitura da célula (Campo Vazio).")
+        return ("GEOCODING_FALHOU", "0 min", "", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "", "", "N/A", orig, "BAIXA", 0, "", "", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha pré-processamento.")
     return calcular_pipeline_logistico(orig, dest, perfil_rota="shortest")
 
 def embrulhar_task_paralela(item):
     par_id, orig, dest = item
     try: 
         res = executar_pipeline_unificado(orig, dest)
-        
-        # ATUALIZAÇÃO 1.18: PADDING DINÂMICO ANTI-INDEXERROR
-        # Se algum cache de versão arcaica escapar e retornar uma tupla menor,
-        # o sistema preenche as colunas faltantes com N/A antes de entregar ao Pandas,
-        # impedindo 100% que a linha inteira da planilha desapareça e jogue o erro "tuple index out of range".
         if res and isinstance(res, tuple) and len(res) < 29:
-            res = tuple(list(res) + ["N/A/Dado não armazenado"] * (29 - len(res)))
+            res = tuple(list(res) + ["N/A"] * (29 - len(res)))
         return par_id, res
-        
     except Exception as e: 
-        msg_erro = f"FALHA INTERNA: {str(e)}"
-        fallback = (0.0, "0 min", "", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "", "", "N/A", str(orig), "BAIXA", 0, "", "", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], "Erro Crítico e Falha de Exceção de Código.")
+        msg_erro = f"FALHA INTERNA DE CÓDIGO: {str(e)}"
+        fallback = (0.0, "0 min", "", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "", "", "N/A", str(orig), "BAIXA", 0, "", "", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], "Erro Crítico e Falha de Exceção Isolada.")
         return par_id, fallback
 
 # ==============================================================================
@@ -1268,7 +1243,7 @@ with st.sidebar:
     with st.expander("8. Processamento em Lote e Google Sheets", expanded=False):
         st.markdown("""
         **O Fluxo em Lote (Batch):**
-        A planilha é processada através de uma **Fila de Prioridade** usando *ThreadPoolExecutor* para mitigar efeito comboio. O sistema gera uma planilha altamente resiliente contra *IndexErrors*. Ao final, o lote não apenas disponibiliza o `.xlsx` para download, como exibe visualmente os dados finalizados em interface nativa, dispondo de atalho ágil de importação para o **Google Sheets**.
+        A planilha é processada através de uma **Fila de Prioridade** usando *ThreadPoolExecutor*. O sistema gera uma planilha com PADDING dinâmico contra *IndexErrors*. Ao final, a planilha é exibida visualmente na tela e liberada para o **Google Sheets**.
         """)
 
 tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
@@ -1305,14 +1280,9 @@ with tab_individual:
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    link_externo = res_ind[2]
-                    match = re.search(r'maps\.google\.com/2([^&]+)&destination=([^&]+)', link_externo)
-                    if match:
-                        o_param = match.group(1)
-                        d_param = match.group(2)
-                    else:
-                        o_param = requests.utils.quote(res_ind[12]) if res_ind[12] else requests.utils.quote(orig_ind)
-                        d_param = requests.utils.quote(res_ind[18]) if res_ind[18] else requests.utils.quote(dest_ind)
+                    # ATUALIZAÇÃO 1.18: Iframe Oficial Universal consumindo exatamente os nomes corrigidos
+                    o_param = requests.utils.quote(res_ind[12]) if res_ind[12] else requests.utils.quote(orig_ind)
+                    d_param = requests.utils.quote(res_ind[18]) if res_ind[18] else requests.utils.quote(dest_ind)
 
                     url_iframe = f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed"
                     components.iframe(url_iframe, height=470, scrolling=True)
@@ -1463,11 +1433,8 @@ with tab_processamento:
                 with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: df.to_excel(writer, index=False)
                 st.session_state['planilha_pronta'] = output_buffer.getvalue()
 
-        # ATUALIZAÇÃO 1.18: Melhoria da UX pós-lote (Prévia Interativa e Link Direto Sheets)
-        if 'df_processado' in st.session_state and 'planilha_pronta' in st.session_state:
-            st.write("---")
-            st.balloons()
-            
+        if 'planilha_pronta' in st.session_state:
+            st.write("---"); st.balloons()
             st.markdown("### 📋 Prévia Interativa da Planilha Final")
             st.dataframe(st.session_state['df_processado'], use_container_width=True, height=250)
             
@@ -1477,7 +1444,7 @@ with tab_processamento:
             with col_down2:
                 st.markdown(
                     """
-                    <a href="https://sheets.new/" target="_blank" style="display:inline-block; padding:0.5em 1em; background-color:#0F9D58; color:white; border-radius:5px; text-decoration:none; font-weight:bold; text-align:center; width:100%; border: 1px solid rgba(255,255,255,0.2);">
+                    <a href="https://sheets.new/" target="_blank" style="display:inline-block; padding:0.55em 1em; background-color:#0F9D58; color:white; border-radius:5px; text-decoration:none; font-weight:bold; text-align:center; width:100%; border: 1px solid rgba(255,255,255,0.2);">
                         📊 Abrir Google Sheets Vazio (Para Importar o Arquivo)
                     </a>
                     """, unsafe_allow_html=True
