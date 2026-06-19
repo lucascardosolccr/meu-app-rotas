@@ -37,7 +37,7 @@ cache_geo = Cache("./cache_geo")
 cache_rotas = Cache("./cache_rotas")
 cache_poi = Cache("./cache_poi")
 cache_cep = Cache("./cache_cep")
-cache_google = cache_google = Cache("./cache_google")
+cache_google = Cache("./cache_google")
 cache_reverse = Cache("./cache_reverse")
 cache_base_local = Cache("./cache_base_local")
 cache_aprendizado = Cache("./cache_aprendizado")
@@ -379,6 +379,7 @@ def validar_coordenadas_mapa(lat, lon):
         lat_f, lon_f = float(lat), float(lon)
         if math.isnan(lat_f) or math.isnan(lon_f) or math.isinf(lat_f) or math.isinf(lon_f): return False
         if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= lon_f <= 180.0): return False
+        if lat_f == 0.0 and lon_f == 0.0: return False
         return True
     except (ValueError, TypeError):
         return False
@@ -829,7 +830,10 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         cache_api_health.set(f_n, metr, expire=None)
 
     score_consenso = min(int(vencedor["score_final"]), 100)
-    if tipo_entrada in ["ENDERECO_COMPLETO", "CEP"] and score_consenso < 80: return None
+    
+    # ATUALIZAÇÃO v1.10: Remoção da restrição agressiva do Motor Bayesiano que rejeitava
+    # candidatos com Score < 80 para Endereços, forçando a criação de coordenadas (0.0).
+    # Agora a coordenada sempre sobrevive, permitindo a Linha Reta.
     
     m = {"logradouro": vencedor.get("logradouro", ""), "bairro": vencedor["bairro"], "cidade": vencedor["cidade"], "municipio": vencedor["cidade"], "distrito": "", "estado": vencedor["estado"], "cep": vencedor.get("cep", "")}
         
@@ -993,11 +997,29 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             
     res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
     
+    # ATUALIZAÇÃO V1.10: TRÍPLO FALLBACK PARA GARANTIR COORDENADAS E LINHA RETA
     if not res_final and tipo_entrada not in ["BAIRRO", "MUNICIPIO"]:
-        res_nom = API_Nominatim(endereco_canonico, ctx=contexto_estruturado)
-        if res_nom:
-            candidatos_validos.extend(res_nom)
+        # Fallback 1: Forçar consulta desestruturada geral no Nominatim
+        res_nom = API_Nominatim(endereco_canonico, ctx=None)
+        # Fallback 2: Forçar consulta no Photon (altamente tolerante a ruído)
+        res_phot = API_Photon(endereco_canonico)
+        
+        if res_nom: candidatos_validos.extend(res_nom)
+        if res_phot: candidatos_validos.extend(res_phot)
+        
+        if candidatos_validos:
             res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
+
+    # Fallback 3 (A Salvação): Se o endereço não existe no mapa, crava no centróide da cidade 
+    # para garantir que a linha reta seja calculada e nunca retorne zero.
+    if not res_final and ctx.get("municipio") and ctx.get("uf"):
+        mun_nome, uf_nome = ctx["municipio"], ctx["uf"]
+        if mun_nome in IBGE_MUNICIPIOS:
+            for item in IBGE_MUNICIPIOS[mun_nome]:
+                if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0:
+                    endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                    res_final = (item["lat"], item["lon"], endereco_ibge, "BAIXA", 40, "", mun_nome, "IBGE_FALLBACK", ["Endereço não geocodificado. Fallback ativado para Centróide IBGE Municipal a fim de habilitar distância em Linha Reta."])
+                    break
 
     if res_final:
         cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
@@ -1018,7 +1040,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             dist_cross = calcular_distancia_vincenty(lat_d, lon_d, google_dest_geo[0]["lat"], google_dest_geo[0]["lon"])
             if dist_cross > 20.0: return None 
 
-    # URL OFICIAL do Scraper (Calculadora de Tempo e Distância)
+    # URL OFICIAL do Scraper restaurada para manter a compatibilidade do proxy/redirecionamento e ler o HTML
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
     url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
@@ -1078,12 +1100,14 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     
     start_rot = time.time()
 
+    # Essa trava de IF garante que a linha reta de Vincenty só é ativada se ambas as coordenadas existirem
+    # e como blindamos isso no 'obter_coordenadas_e_endereco_oficial' com o Fallback do IBGE, 
+    # ela sempre existirá e nunca mais será 0.0.
     if all([lat_o is not None, lon_o is not None, lat_d is not None, lon_d is not None]) and lat_o != 0.0 and lat_d != 0.0:
         dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
     else:
         dist_linha_reta = 0.0
 
-    # Usar a String Oficial (caso exista) para o Fallback. Isso garante consistência com o motor do Google.
     orig_param_fb = requests.utils.quote(end_oficial_o) if end_oficial_o else f"{lat_o},{lon_o}"
     dest_param_fb = requests.utils.quote(end_oficial_d) if end_oficial_d else f"{lat_d},{lon_d}"
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
@@ -1104,7 +1128,6 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
             retorno = (res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d)
             cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
 
-    # FORÇAR usar_coordenadas=False garante que o Scraper usará as mesmas Strings do Link/Iframe 
     res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=False)
 
     if perfil_rota == "shortest":
@@ -1290,7 +1313,7 @@ with tab_individual:
             if res_ind and res_ind[0] != "QA_REJEITADO" and res_ind[0] != "GEOCODING_FALHOU":
                 st.success("✅ Rota estabelecida com sucesso!")
                 
-                # UPDATE V1.10: Expansão de 3 para 4 colunas para abrigar a Distância em Linha Reta
+                # ADIÇÃO DA COLUNA LINHA RETA
                 m_dist_via, m_dist_reta, m_time, m_score = st.columns(4)
                 
                 m_dist_via.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0])
