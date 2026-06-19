@@ -375,7 +375,6 @@ semantica = MotorEnderecoCanônico()
 # ==============================================================================
 def validar_coordenadas_mapa(lat, lon):
     try:
-        # ATUALIZAÇÃO v1.11: Correção do unpacking de variáveis que causava falha silenciosa no Iframe
         if pd.isna(lat) or pd.isna(lon): return False
         lat_f, lon_f = float(lat), float(lon)
         if math.isnan(lat_f) or math.isnan(lon_f) or math.isinf(lat_f) or math.isinf(lon_f): return False
@@ -817,8 +816,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         end_reverse = ", ".join([c for c in [m.get("logradouro", ""), m.get("bairro", ""), m.get("cidade", ""), estado_reverse] if c.strip()])
         similaridade = fuzz.token_set_ratio(texto_cru.upper(), end_reverse.upper())
         
-        # ATUALIZAÇÃO V1.11: Tolerância aumentada de 70 para 55 para garantir que 
-        # endereços vagos como bairros ("Ponte Alta Norte") sobrevivam à engenharia reversa.
         if similaridade >= 55 or tipo_entrada in ["BAIRRO", "MUNICIPIO", "RURAL"]:
             vencedor = cand
             break
@@ -993,7 +990,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     else:
         candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Photon, (endereco_canonico,), {}), (API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_TomTom, (endereco_canonico,), {})]))
             
-    # Retirada a trava que impedia Fallback 1 e 2 para Bairros
     res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
     
     if not res_final:
@@ -1003,9 +999,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             candidatos_validos.extend(res_nom)
             res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
 
-    # ATUALIZAÇÃO V1.11: FALLBACK TRIPLO E CENTRÓIDE MUNICIPAL
-    # A Salvação Absoluta: Se o endereço não existe no mapa e a API zera, o sistema localiza o Centróide
-    # do Distrito ou Município para garantir que a Linha Reta de Vincenty sempre tenha uma âncora real.
     if not res_final and ctx.get("municipio") and ctx.get("uf"):
         mun_nome = ctx["municipio"]
         uf_nome = ctx["uf"]
@@ -1019,7 +1012,15 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             melhor = res_fallback[0]
             valido, lat_c, lon_c = validar_coordenada_brasil(melhor["lat"], melhor["lon"])
             if valido:
-                endereco_ibge = f"{dist_nome + ', ' if dist_nome else ''}{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                # ATUALIZAÇÃO 1.12: Proxy Semântico. 
+                # Preserva o texto digitado pelo usuário para que a matemática rode no centróide
+                # mas o Google Maps leia a rua oficial, acabando com o erro de rotas direcionadas pro centro da cidade.
+                rua_crua = texto_cru.upper().strip(" ,-")
+                if dist_nome and dist_nome not in rua_crua:
+                    endereco_ibge = f"{rua_crua}, {dist_nome}, {mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                else:
+                    endereco_ibge = f"{rua_crua}, {mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                    
                 res_final = (lat_c, lon_c, endereco_ibge, "BAIXA", 40, dist_nome, mun_nome, "CENTROIDE_FALLBACK", ["Endereço exato não geocodificado. Fallback ativado para Centróide (Distrito/Município) a fim de habilitar distância em Linha Reta."])
 
     if res_final:
@@ -1041,12 +1042,10 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             dist_cross = calcular_distancia_vincenty(lat_d, lon_d, google_dest_geo[0]["lat"], google_dest_geo[0]["lon"])
             if dist_cross > 20.0: return None 
 
-    # URL OFICIAL do Scraper restaurada para manter a compatibilidade do proxy/redirecionamento e ler o HTML
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
     url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     
-    # Link Maps (Usado no Botão e extraído para o Iframe)
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.google.com/maps"}
     
@@ -1323,21 +1322,16 @@ with tab_individual:
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    # IDENTIDADE ABSOLUTA: Extrair exatamente os parâmetros que o scraper e o botão 
-                    # externo usaram, para garantir que o mapa embedado mostre a mesma coisa.
                     link_externo = res_ind[2]
                     
-                    # Regex que isola o Origin e Destination puros de dentro da URL calculada
                     match = re.search(r'maps\.google\.com/2([^&]+)&destination=([^&]+)', link_externo)
                     if match:
                         o_param = match.group(1)
                         d_param = match.group(2)
                     else:
-                        # Fallback de segurança robusto
-                        o_param = requests.utils.quote(res_ind[12]) if res_ind[12] else f"{lat_o},{lon_o}"
-                        d_param = requests.utils.quote(res_ind[18]) if res_ind[18] else f"{lat_d},{lon_d}"
+                        o_param = requests.utils.quote(res_ind[12]) if res_ind[12] else requests.utils.quote(orig_ind)
+                        d_param = requests.utils.quote(res_ind[18]) if res_ind[18] else requests.utils.quote(dest_ind)
 
-                    # Alimentação do iframe com parâmetros extraídos limpos
                     url_iframe = f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed"
                     components.iframe(url_iframe, height=470, scrolling=True)
                 else:
