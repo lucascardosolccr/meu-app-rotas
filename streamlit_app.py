@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import pydeck as pdk
@@ -73,8 +74,6 @@ CACHE_IBGE_PATH = "municipios_ibge.pkl"
 # ==============================================================================
 WORKERS_DISPONIVEIS = 8
 
-# As instâncias de ThreadPoolExecutor agora são definidas como globais puras.
-# O uso de st.session_state dentro de threads aciona o erro de "ScriptRunContext" do Streamlit.
 EXECUTOR_GLOBAL = ThreadPoolExecutor(max_workers=WORKERS_DISPONIVEIS)
 FILA_NOMINATIM = ThreadPoolExecutor(max_workers=1)
 EXECUTOR_APIS = ThreadPoolExecutor(max_workers=16)
@@ -977,7 +976,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 
     def disparar_apis_paralelas(tarefas):
         resultados = []
-        # Utilizando a instância Global para evitar falha no background context do Streamlit
         for f in as_completed([EXECUTOR_APIS.submit(func, *args, **kwargs) for func, args, kwargs in tarefas]):
             if res := f.result(): resultados.extend(res)
         return resultados
@@ -1142,7 +1140,6 @@ def embrulhar_task_paralela(item):
     try: 
         return par_id, executar_pipeline_unificado(orig, dest)
     except Exception as e: 
-        # Em caso de pane isolada, garantir que não falhe silenciosamente retornando nulo e quebrando as colunas do df.
         msg_erro = f"FALHA INTERNA: {str(e)}"
         fallback = (0.0, "0 min", "", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "", "", "N/A", str(orig), "BAIXA", 0, "", "", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro])
         return par_id, fallback
@@ -1265,7 +1262,7 @@ with st.sidebar:
 
     with st.expander("12. Validador Rápido (Single-Shot)", expanded=False):
         st.markdown("""
-        **Fluxo Individual:** Injetado via UI direta. Utiliza o mesmíssimo pipeline `executar_pipeline_unificado`. Conta com um renderizador geoespacial exclusivo (`Deck.GL` via PyDeck) que ilustra a geometria da cobertura geodésica em 3 níveis e a linha de desejo da rota, incorporando blindagem interna contra *NaNs* de coordenada para não gerar tela de erro (Expressões JSON resilientes).
+        **Fluxo Individual:** Injetado via UI direta. Utiliza o mesmíssimo pipeline `executar_pipeline_unificado`. Conta com um renderizador geoespacial interativo do **Google Maps** embutido via `iframe` que traça a rota com base na resolução geodésica em radianos extraída pelo consenso interno.
         """)
 
 tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
@@ -1295,50 +1292,23 @@ with tab_individual:
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    lat_c, lon_c = (lat_o + lat_d) / 2, (lon_o + lon_d) / 2
-                    
-                    arc_layer = pdk.Layer(
-                        "ArcLayer",
-                        data=[{"origem": [lon_o, lat_o], "destino": [lon_d, lat_d]}],
-                        get_source_position="origem",
-                        get_target_position="destino",
-                        get_source_color=[0, 255, 128, 160],
-                        get_target_color=[255, 0, 0, 160],
-                        width_scale=0.04,
-                        width_min_pixels=3,
-                        width_max_pixels=15,
-                    )
-                    
-                    scatter_layer = pdk.Layer(
-                        "ScatterplotLayer",
-                        data=[{"pos": [lon_o, lat_o], "color": [0, 255, 128]}, {"pos": [lon_d, lat_d], "color": [255, 0, 0]}],
-                        get_position="pos",
-                        get_fill_color="color",
-                        get_radius=800,
-                    )
-                    
-                    coverage_layer = pdk.Layer(
-                        "ScatterplotLayer",
-                        data=[
-                            {"pos": [lon_d, lat_d], "radius": 50000, "color": [255, 165, 0, 80]},
-                            {"pos": [lon_d, lat_d], "radius": 100000, "color": [0, 191, 255, 60]},
-                            {"pos": [lon_d, lat_d], "radius": 200000, "color": [138, 43, 226, 40]}
-                        ],
-                        get_position="pos",
-                        get_radius="radius",
-                        stroked=True,
-                        filled=True,
-                        get_fill_color="color",
-                        get_line_color=[255, 255, 255, 150],
-                        line_width_min_pixels=1
-                    )
-                    
-                    st.pydeck_chart(pdk.Deck(layers=[coverage_layer, arc_layer, scatter_layer], initial_view_state=pdk.ViewState(latitude=lat_c, longitude=lon_c, zoom=4, pitch=45), map_style="mapbox://styles/mapbox/dark-v10"))
+                    # Iframe Inteligente do Google Maps aponta para as Coordenadas Absolutas do Consenso
+                    html_mapa = f"""
+                    <iframe 
+                        width="100%" 
+                        height="470" 
+                        frameborder="0" 
+                        style="border:0; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);" 
+                        src="https://maps.google.com/maps?saddr={lat_o},{lon_o}&daddr={lat_d},{lon_d}&dirflg=d&output=embed" 
+                        allowfullscreen>
+                    </iframe>
+                    """
+                    components.html(html_mapa, height=490)
                 else:
-                    st.warning("Renderização 3D suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
+                    st.warning("Renderização de mapa suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
 
                 st.info(f"**Origem fixada por:** {res_ind[11]} | **Destino fixada por:** {res_ind[17]} | **Motor da Rota:** {res_ind[5]}")
-                st.markdown(f"[🔗 Abrir Rota no Google Maps]({res_ind[2]})")
+                st.markdown(f"[🔗 Abrir Rota Completa no Aplicativo do Google Maps]({res_ind[2]})")
             else:
                 st.error("Falha na validação de consistência geodésica unificada.")
         else:
@@ -1399,7 +1369,6 @@ with tab_processamento:
                 st.info(f"Otimização O(U) com Fila Inteligente Ativa: {len(pares_unicos)} rotas exclusivas na esteira de processamento pipeline-unificado.")
                     
                 resultados_unicos = {}
-                # EXECUTOR_GLOBAL é acionado no módulo para ser Thread-Safe no ciclo de vida Streamlit.
                 executor_lote = EXECUTOR_GLOBAL
                 tarefas_unicas = [(t[1], t[1][0], t[1][1]) for t in tarefas_priorizadas]
                 futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in tarefas_unicas}
@@ -1500,7 +1469,6 @@ with tab_analytics:
         st.markdown("#### 🚨 Mapa de Calor de Inconsistências (Score < 70)")
         df_erros = df_kpi[df_kpi['Score Final Global'] < 70].copy()
         
-        # Filtro Rigoroso PyDeck / Prevenção de quebra de frontend
         df_erros['Lat Destino'] = pd.to_numeric(df_erros['Lat Destino'], errors='coerce')
         df_erros['Lon Destino'] = pd.to_numeric(df_erros['Lon Destino'], errors='coerce')
         df_erros = df_erros.dropna(subset=['Lat Destino', 'Lon Destino'])
