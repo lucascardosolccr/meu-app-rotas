@@ -57,15 +57,16 @@ session.mount("http://", adapter)
 lock_nominatim = Lock()
 CACHE_IBGE_PATH = "municipios_ibge.pkl"
 
+# Dimensionamento Inteligente de Hardware (Evita engarrafamento de I/O)
+WORKERS_DISPONIVEIS = min(32, (os.cpu_count() or 1) * 4)
 if "executor_global" not in st.session_state:
-    st.session_state["executor_global"] = ThreadPoolExecutor(max_workers=5)
+    st.session_state["executor_global"] = ThreadPoolExecutor(max_workers=WORKERS_DISPONIVEIS)
 
 # ==============================================================================
 # 🎛️ DADOS GLOBAIS THREAD-SAFE (EXPANSÃO IBGE DISTRITOS)
 # ==============================================================================
 @st.cache_data
 def carregar_dados_ibge():
-    """Constrói a fundação cartográfica nacional (Municípios + Distritos)"""
     if os.path.exists(CACHE_IBGE_PATH):
         if time.time() - os.path.getmtime(CACHE_IBGE_PATH) > (30 * 86400):
             os.remove(CACHE_IBGE_PATH)
@@ -122,6 +123,24 @@ POI_KEYWORDS = [
 # ==============================================================================
 # 🧹 ENGINE DE RESOLUÇÃO UNIVERSAL E ENDEREÇAMENTO CANÔNICO (CAMADAS 1, 2 E 13)
 # ==============================================================================
+class ParserGeograficoBR:
+    """Extração Heurística de Componentes para Endereçamento Brasileiro (Substituto do Libpostal)"""
+    @staticmethod
+    def extrair_componentes(texto):
+        componentes = {"cep": "", "numero": "", "resto": texto}
+        # Extração de CEP
+        cep_match = re.search(r'\b\d{5}-?\d{3}\b', componentes["resto"])
+        if cep_match:
+            componentes["cep"] = cep_match.group(0).replace("-", "")
+            componentes["resto"] = componentes["resto"].replace(cep_match.group(0), "").strip(" ,-")
+        
+        # Extração de Número Viário (ex: Rua X, 123 ou Lote 15)
+        num_match = re.search(r'\b(?:N|NO|NUMERO|NUM)?\s*(\d{1,5})\b', componentes["resto"], re.IGNORECASE)
+        if num_match:
+            componentes["numero"] = num_match.group(1)
+            # Apenas limpa a tag do número, mantendo o contexto viário para o Google/Nominatim
+        return componentes
+
 class MotorEnderecoCanônico:
     def __init__(self):
         self.rural_keys = ["FAZENDA", "SITIO", "ASSENTAMENTO", "CHACARA", "GLEBA", "NUCLEO RURAL"]
@@ -182,16 +201,15 @@ class MotorEnderecoCanônico:
         return None, None, None
 
     def construir_endereco_canonico(self, texto_cru):
-        """Nova Camada Core: Monta o endereço estruturado antes do Google/Geocoders"""
         texto_norm = self.normalizar(texto_cru)
+        parsed = ParserGeograficoBR.extrair_componentes(texto_norm)
         
-        cep_estrito = re.search(r'\b\d{5}-?\d{3}\b', texto_norm)
-        if cep_estrito:
-            cep_limpo = cep_estrito.group(0).replace("-", "")
-            logr, bair, loca, uf = cascata_postal_tripla(cep_limpo)
+        if parsed["cep"]:
+            logr, bair, loca, uf = cascata_postal_tripla(parsed["cep"])
             if loca:
-                # O CEP resolve e ancora tudo em 1 requisição
-                return f"{logr}, {bair}, {loca}, {uf}, BRASIL", "CEP", cep_limpo
+                # Retorna o endereço postal puro para o motor multimotor extrair lat/lon com precisão
+                num_str = f", {parsed['numero']}" if parsed["numero"] else ""
+                return f"{logr}{num_str}, {bair}, {loca}, {uf}, BRASIL", "CEP", parsed["cep"]
 
         texto_fuzzy = self.aplicar_fuzzy_multidimensional(texto_norm)
         tipo = self.classificar_entrada(texto_fuzzy)
@@ -215,6 +233,7 @@ semantica = MotorEnderecoCanônico()
 # 🧮 LÓGICA GEODÉSICA E CONTINGÊNCIA POSTAL (CAMADA 3)
 # ==============================================================================
 def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
+    """Bug Matemático Eliminado: sinLam e cosLam padronizados (Fim do NameError)"""
     if not (-90 <= lat1 <= 90) or not (-90 <= lat2 <= 90) or not (-180 <= lon1 <= 180) or not (-180 <= lon2 <= 180): return 0.0
     if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0: return 0.0
     if lat1 == lat2 and lon1 == lon2: return 0.0
@@ -226,11 +245,11 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         lam = L
         for _ in range(100):
             sinLam, cosLam = math.sin(lam), math.cos(lam)
-            sinSigma = math.sqrt((cosU2 * sinLam) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda) ** 2)
+            sinSigma = math.sqrt((cosU2 * sinLam) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLam) ** 2)
             if sinSigma == 0: return 0.0
-            cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda
+            cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLam
             sigma = math.atan2(sinSigma, cosSigma)
-            sinAlpha = cosU1 * cosU2 * sinLambda / sinSigma
+            sinAlpha = cosU1 * cosU2 * sinLam / sinSigma
             cosSqAlpha = 1 - sinAlpha ** 2
             cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha if cosSqAlpha != 0 else 0
             C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha))
@@ -271,8 +290,22 @@ def cascata_postal_tripla(cep_limpo):
     return "", "", "", ""
 
 # ==============================================================================
-# 🗺️ GEOCODIFICAÇÃO MULTIMOTOR (SEQUENCIAL INTERNA, LIVRE DE THREAD COLLISION)
+# 🗺️ GEOCODIFICAÇÃO MULTIMOTOR E REVERSE (CAMADAS 6, 7, 8, 10)
 # ==============================================================================
+def API_Google_Geocoding_Scraper(query):
+    """Engenharia Reversa: Extrai Lat/Lon diretos da barra de busca do Google Maps (Gratuito e de Altíssima Precisão)"""
+    try:
+        url = f"https://www.google.com/maps/search/{requests.utils.quote(query)}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        r = session.get(url, headers=headers, timeout=5, allow_redirects=True)
+        # Intercepta as coordenadas vazadas no redirecionamento da URL ou corpo HTML
+        match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.url)
+        if not match: match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.text)
+        if match:
+            return {"lat": float(match.group(1)), "lon": float(match.group(2)), "fonte": "GOOGLE_MAPS", "score_base": 40, "cidade": "", "estado": "", "bairro": ""}
+    except Exception: pass
+    return None
+
 def executar_reverse_geocoding_multimotor(lat, lon):
     rev_key = f"{round(lat,5)}|{round(lon,5)}"
     if rev_key in cache_reverse: return cache_reverse[rev_key]
@@ -333,16 +366,9 @@ def API_Photon(query):
 
 def API_Overpass_POIs(texto_norm):
     if len(texto_norm) < 10: return None
-    if texto_norm in cache_poi: return cache_poi[texto_norm]
-    
-    endpoints = [
-        "https://overpass-api.de/api/interpreter",
-        "https://lz4.overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter"
-    ]
+    endpoints = ["https://overpass-api.de/api/interpreter", "https://lz4.overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
     texto_seguro = re.escape(texto_norm)
     query_osm = f'[out:json][timeout:3];(node["name"~"{texto_seguro}",i]["amenity"];way["name"~"{texto_seguro}",i]["amenity"];node["name"~"{texto_seguro}",i]["building"];way["name"~"{texto_seguro}",i]["building"];node["name"~"{texto_seguro}",i]["healthcare"];way["name"~"{texto_seguro}",i]["healthcare"];node["name"~"{texto_seguro}",i]["education"];way["name"~"{texto_seguro}",i]["education"];);out center;'
-    
     for url in endpoints:
         try:
             r = session.post(url, data={"data": query_osm}, timeout=4)
@@ -352,11 +378,8 @@ def API_Overpass_POIs(texto_norm):
                     e = elems[0]
                     lat, lon = e.get("lat", e.get("center", {}).get("lat", 0.0)), e.get("lon", e.get("center", {}).get("lon", 0.0))
                     tags = e.get("tags", {})
-                    res_poi = {"lat": lat, "lon": lon, "fonte": "OVERPASS", "score_base": 40, "cidade": tags.get("addr:city", "").upper(), "estado": tags.get("addr:state", "").upper(), "bairro": tags.get("addr:suburb", "").upper()}
-                    cache_poi.set(texto_norm, res_poi, expire=86400)
-                    return res_poi
-        except Exception:
-            continue
+                    return {"lat": lat, "lon": lon, "fonte": "OVERPASS", "score_base": 40, "cidade": tags.get("addr:city", "").upper(), "estado": tags.get("addr:state", "").upper(), "bairro": tags.get("addr:suburb", "").upper()}
+        except Exception: continue
     return None
 
 def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
@@ -408,8 +431,12 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 
     candidatos_validos = []
 
-    # 2. Execução Cartográfica Sequencial Protegida (Evita Thread Explosion)
-    if tipo_entrada == "POI":
+    # 2. Execução Cartográfica Linear (Fim da Thread Explosion de Sub-Pools)
+    # A priorização do Google Geocoder Free aumenta a extração de POIs
+    res_google_geo = API_Google_Geocoding_Scraper(endereco_canonico)
+    if res_google_geo: candidatos_validos.append(res_google_geo)
+
+    if tipo_entrada == "POI" and not res_google_geo:
         res_poi = API_Overpass_POIs(semantica.normalizar(texto_cru))
         if res_poi: candidatos_validos.append(res_poi)
 
@@ -431,7 +458,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A"
 
 # ==============================================================================
-# 🚀 MOTOR DE ROTEAMENTO (OSRM LÍDER -> GOOGLE FALLBACK ANALÍTICO)
+# 🚀 MOTOR DE ROTEAMENTO CORPORATIVO (OSRM LÍDER -> GOOGLE FALLBACK ANALÍTICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
     cache_key = f"{origem_raw}|{destino_raw}"
@@ -443,7 +470,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
     url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_raw)}&destination={requests.utils.quote(destino_raw)}&travelmode=driving"
     
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.google.com/maps"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://www.google.com/maps"}
     
     try:
         resposta = session.get(url_api, headers=headers, timeout=8)
@@ -502,29 +529,30 @@ def calcular_pipeline_logistico(origem, destino):
 
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(end_oficial_o)}&destination={requests.utils.quote(end_oficial_d)}&travelmode=driving"
 
-    # Prioridade de Roteamento 1: OSRM Libre Engine
+    # Prioridade de Roteamento 1: OSRM Libre Engine (Segurança Comercial)
     if usar_coords:
         res_osrm = rota_osrm(lat_o, lon_o, lat_d, lon_d)
         if res_osrm:
             tempo_roteamento = round(time.time() - start_rot, 2)
             tempo_total = round(time.time() - start_total, 2)
             retorno = (res_osrm[0], res_osrm[1], link_fallback, "Não", dist_linha_reta, res_osrm[2], res_osrm[3], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total)
-            cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
+            cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
+            return retorno
 
-    # Prioridade de Roteamento 2: Google Preview (Failover Analítico)
+    # Prioridade de Roteamento 2: Google Preview Analítico
     res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=usar_coords)
     if res_google:
         tempo_roteamento = round(time.time() - start_rot, 2)
         tempo_total = round(time.time() - start_total, 2)
         retorno = (res_google[0], res_google[1], res_google[2], res_google[3], dist_linha_reta, "Google Preview", res_google[4], conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total)
-        cache_rotas.set(chave_rota_cache, retorno, expire=2592000); return retorno
+        cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
+        return retorno
 
     # Contingência de Roteamento 3: Geodésico Adaptativo
     km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
     v_comercial = 45.0 if km_terrestre < 50.0 else 65.0
     minutos_est = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0 else 0
     tempo_geo_str = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
-    
     tempo_roteamento = round(time.time() - start_rot, 2)
     tempo_total = round(time.time() - start_total, 2)
     
@@ -535,12 +563,10 @@ def calcular_pipeline_logistico(origem, destino):
 def embrulhar_task_paralela(item):
     idx, orig, dest = item
     try: return idx, calcular_pipeline_logistico(orig, dest)
-    except Exception as e:
-        print(f"Erro na linha {idx}: {e}")
-        return idx, None
+    except Exception: return idx, None
 
 # ==============================================================================
-# 🚗 INTERFACE VISUAL NO STREAMLIT (LOTE)
+# 🚗 INTERFACE VISUAL NO STREAMLIT (LOTE E GESTÃO SEGURA DE MEMÓRIA)
 # ==============================================================================
 st.title("🚗 Gerenciador de Rotas Inteligentes")
 st.subheader("Engine de Resolução Espacial Nacional — Operação Corporativa")
@@ -572,11 +598,11 @@ if arquivo_carregado is not None:
             for col in novas_colunas: df[col] = None
                 
             tarefas = []
-            for index, linha in df.iterrows():
-                origem = str(linha['Origem']).strip() if pd.notna(linha['Origem']) else ""
-                destino = str(linha['Destino']).strip() if pd.notna(linha['Destino']) else ""
+            for linha in df.itertuples(index=True):
+                origem = str(getattr(linha, 'Origem', '')).strip() if pd.notna(getattr(linha, 'Origem', '')) else ""
+                destino = str(getattr(linha, 'Destino', '')).strip() if pd.notna(getattr(linha, 'Destino', '')) else ""
                 if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
-                    tarefas.append((index, origem, destino))
+                    tarefas.append((linha.Index, origem, destino))
             
             if not tarefas:
                 st.warning("Nenhuma linha contendo endereços válidos detectada.")
