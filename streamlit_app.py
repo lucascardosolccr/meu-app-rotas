@@ -376,7 +376,7 @@ semantica = MotorEnderecoCanônico()
 def validar_coordenadas_mapa(lat, lon):
     try:
         if pd.isna(lat) or pd.isna(lon): return False
-        lat_f, lon_f = float(lat), float(lon)
+        lat_f, float(lon)
         if math.isnan(lat_f) or math.isnan(lon_f) or math.isinf(lat_f) or math.isinf(lon_f): return False
         if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= lon_f <= 180.0): return False
         return True
@@ -1018,13 +1018,14 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             dist_cross = calcular_distancia_vincenty(lat_d, lon_d, google_dest_geo[0]["lat"], google_dest_geo[0]["lon"])
             if dist_cross > 20.0: return None 
 
-    # URL oficial higienizada para evitar quebras por obfuscation
+    # URL OFICIAL do Scraper restaurada para manter a compatibilidade do proxy/redirecionamento e ler o HTML
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
+    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     
-    url_api = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/data=!4m2!4m1!3e0"
-    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    # URL OFICIAL do Link restaurada
+    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(origem_raw)}&destination={requests.utils.quote(destino_raw)}&travelmode=driving"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.google.com/maps"}
     
     try:
         resposta = session.get(url_api, headers=headers, timeout=8)
@@ -1082,7 +1083,6 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     else:
         dist_linha_reta = 0.0
 
-    # URL oficial higienizada para fallback universal
     orig_param_fb = f"{lat_o},{lon_o}" if (lat_o != 0.0 and lon_o != 0.0) else requests.utils.quote(origem_clean)
     dest_param_fb = f"{lat_d},{lon_d}" if (lat_d != 0.0 and lon_d != 0.0) else requests.utils.quote(destino_clean)
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
@@ -1296,11 +1296,8 @@ with tab_individual:
                 lat_o, lon_o = res_ind[19], res_ind[20]
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
-                # ==============================================================================
-                # LÓGICA DE FALLBACK DIRETO: Impede o "Ponto Zero do Oceano (0.0, 0.0)"
-                # Se as coordenadas geocodificadas forem 0.0 mas a rota foi calculada,
-                # injeta as strings de entrada diretas no iframe para o Google Maps resolver.
-                # ==============================================================================
+                # LÓGICA DE FALLBACK DIRETO: Se o geocoder der 0.0 (oceano), o sistema usa o próprio texto 
+                # digitado ("ponte alta norte") para forçar o Iframe do Google Maps a fazer a busca visual da rota.
                 o_param = f"{lat_o},{lon_o}" if (lat_o != 0.0 and lon_o != 0.0) else requests.utils.quote(orig_ind)
                 d_param = f"{lat_d},{lon_d}" if (lat_d != 0.0 and lon_d != 0.0) else requests.utils.quote(dest_ind)
 
