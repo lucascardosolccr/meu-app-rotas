@@ -24,6 +24,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# Tenta importar Playwright para suporte ao Scraper automatizado solicitado
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    pass
+
 # ==============================================================================
 # TRATAMENTO DE DEPENDÊNCIAS
 # ==============================================================================
@@ -479,18 +485,7 @@ class MotorEnderecoCanônico:
         endereco_canonico = ", ".join(componentes)
         endereco_canonico = re.sub(r',\s*,', ',', endereco_canonico).strip()
         
-        # Enriquecimento de Dados Administrativos (Extraindo Bairro e Rua)
-        # O Motor original retorna 5 elementos. Vamos retornar um dict expandido como sexto elemento
-        dados_admin = {
-            "cep": parsed.get("cep", ""),
-            "logradouro": componentes[0] if tipo in ["LOGRADOURO", "ENDERECO_COMPLETO", "POI"] else "",
-            "numero": parsed.get("numero", ""),
-            "bairro": distrito,
-            "municipio": municipio,
-            "uf": uf
-        }
-        
-        return endereco_canonico, tipo, "", 0.0, 0.0, dados_admin
+        return endereco_canonico, tipo, "", 0.0, 0.0
 
 semantica = MotorEnderecoCanônico()
 
@@ -1073,9 +1068,6 @@ class GeocodingService:
         texto_cru = str(localidade).strip()
         if not texto_cru or texto_cru.lower() == 'nan': return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A", ["String Vazia"]
         
-        # Correção OBRIGATÓRIA 13: Definindo chave_auto precocemente para evitar NameError
-        chave_auto = texto_cru.upper()
-        
         if match_coords := re.match(r'^\s*(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$', texto_cru):
             lat_in, lon_in = float(match_coords.group(1)), float(match_coords.group(2))
             valido, lat_in, lon_in = validar_coordenada_brasil(lat_in, lon_in)
@@ -1094,8 +1086,7 @@ class GeocodingService:
             if isinstance(dado_salvo, dict) and "lat" in dado_salvo and "lon" in dado_salvo:
                 return dado_salvo["lat"], dado_salvo["lon"], dado_salvo.get("endereco", texto_cru.upper()), "ALTISSIMA", 100, dado_salvo.get("distrito", ""), dado_salvo.get("municipio", ""), "APRENDIZADO_LOCAL", ["Ponto quente extraído do cache local enriquecido."]
 
-        # Extração de Dados Administrativos Obrigatórios Integrada (Item 4)
-        endereco_canonico, tipo_entrada, _, _, _, dict_admin = semantica.construir_endereco_canonico(texto_cru)
+        endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_cru)
         ctx = semantica.resolver_contexto_administrativo(texto_cru.upper())
         parsed_comp = ParserGeograficoBR.extrair_componentes(texto_cru.upper())
         
@@ -1155,9 +1146,18 @@ class GeocodingService:
                             cache_geo.set(cache_key, {"lat": lat_corrigida_arc, "lon": lon_corrigida_arc, "endereco": addr_c, "confianca": "ALTISSIMA", "score_num": 100, "distrito": bair, "municipio": loca, "fonte": "ViaCEP/ArcGIS"}, expire=2592000)
                             return res_final
 
+        if tipo_entrada == "MUNICIPIO" and ctx.get("municipio") and ctx.get("uf"):
+            mun_nome, uf_nome = ctx["municipio"], ctx["uf"]
+            if mun_nome in IBGE_MUNICIPIOS:
+                for item in IBGE_MUNICIPIOS[mun_nome]:
+                    if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0 and item.get("lon", 0.0) != 0.0:
+                        endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                        res_ibge = (item["lat"], item["lon"], endereco_ibge, "ALTISSIMA", 100, "", mun_nome, "BASE_IBGE_LOCAL", ["Centroide IBGE Municipal Resolvido Offline."])
+                        cache_geo.set(cache_key, {"lat": res_ibge[0], "lon": res_ibge[1], "endereco": res_ibge[2], "confianca": res_ibge[3], "score_num": res_ibge[4], "distrito": res_ibge[5], "municipio": res_ibge[6], "fonte": res_ibge[7]}, expire=2592000)
+                        return res_ibge
+
         def disparar_apis_paralelas(tarefas):
             resultados = []
-            if "executor_apis" not in st.session_state: st.session_state["executor_apis"] = ThreadPoolExecutor(max_workers=16)
             for f in as_completed([st.session_state["executor_apis"].submit(func, *args, **kwargs) for func, args, kwargs in tarefas]):
                 if res := f.result(): resultados.extend(res)
             return resultados
@@ -1184,19 +1184,24 @@ class GeocodingService:
         if res_final:
             cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
             if res_final[4] >= 95 and res_final[3] == "ALTISSIMA":
-                # Resolução garantida da variável de cache (Bug corrigido)
-                cache_aprendizado_auto.set(chave_auto, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "distrito": res_final[5], "municipio": res_final[6], "metadata": {"evidencias_xai": res_final[8] if len(res_final) > 8 else []}}, expire=7776000)
+                cache_aprendizado_auto.set(chave_aprendizado_coord, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "distrito": res_final[5], "municipio": res_final[6], "metadata": {"evidencias_xai": res_final[8] if len(res_final) > 8 else []}}, expire=7776000)
             return res_final
             
         return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Falha Geográfica Absoluta por falta de candidatos."]
 
 # ==============================================================================
-# MOTOR DE CONEXÃO LOGÍSTICA (TRAFFIC, INCIDENTS & WEATHER ENGINES)
+# VOLUME 3: ENGINES DE TRÂNSITO, CLIMA, FROTA, CUSTOS E ESG (NOVAS CLASSES)
 # ==============================================================================
 class VehicleProfile:
     def __init__(self, tipo: str, peso_tons: float, altura_m: float, largura_m: float, eixos: int, valor_hora: float, custo_km_dep: float, fator_manut: float):
-        self.tipo = tipo; self.peso_tons = peso_tons; self.altura_m = altura_m; self.largura_m = largura_m
-        self.eixos = eixos; self.valor_hora = valor_hora; self.custo_km_depreciacao = custo_km_dep; self.fator_manutencao = fator_manut
+        self.tipo = tipo
+        self.peso_tons = peso_tons
+        self.altura_m = altura_m
+        self.largura_m = largura_m
+        self.eixos = eixos
+        self.valor_hora = valor_hora
+        self.custo_km_depreciacao = custo_km_dep
+        self.fator_manutencao = fator_manut
 
 class RestrictionEngine:
     @staticmethod
@@ -1205,20 +1210,26 @@ class RestrictionEngine:
         if veiculo.peso_tons > 23.0 and "urbano" in veiculo.tipo.lower(): return "REJEITADA", "Peso bruto incompatível com a via urbana"
         return "APROVADA", "Nenhuma restrição de tráfego detectada"
 
-# 12. Incorporação de Incidentes Reais e Feedback Operacional
-class IncidentProvider:
-    @staticmethod
-    def extrair_incidentes_reais(lat, lon):
-        # Mapeamento estendido via APIs de congestionamento e Works
-        return "2 incidentes detectados"
-
 class HereTrafficProvider:
     @staticmethod
-    def obter_trafego_rota(polyline: list) -> dict: return {"delay_minutes": 15, "severity": "MEDIUM", "incidents": 2}
+    def obter_trafego_rota(polyline: list) -> dict:
+        # Mock simulação para injeção de delay dinâmico
+        return {"delay_minutes": 18, "severity": "MEDIUM", "incidents": 2}
+
+class TomTomTrafficProvider:
+    @staticmethod
+    def obter_flow_segment(lat: float, lon: float) -> dict:
+        return {"velocidade_livre": 80, "velocidade_atual": 65}
+
+class IncidentProvider:
+    @staticmethod
+    def checar_incidentes(lat: float, lon: float) -> dict:
+        return {"acidente": 0, "obra": 1, "bloqueio": 0}
 
 class WeatherProvider:
     @staticmethod
-    def obter_clima_rota(lat: float, lon: float) -> dict: return {"chuva_mm": 5, "vento": 15, "temperatura": 25}
+    def obter_clima_rota(lat: float, lon: float) -> dict:
+        return {"chuva_mm": 5, "vento": 15, "temperatura": 25}
 
 class WeatherRiskEngine:
     @staticmethod
@@ -1229,24 +1240,20 @@ class WeatherRiskEngine:
         if chuva > 5: return "MÉDIO", 10
         return "BAIXO", 0
 
-# 6. Melhoria da Extração e Cálculo Real de Pedágios Georreferenciados
 class TollProvider:
     @staticmethod
     def calcular_pedagios(lat_o, lon_o, lat_d, lon_d) -> dict:
         try:
             cursor = db_conn.cursor()
-            cursor.execute("SELECT tarifa, latitude, longitude FROM pedagios")
+            cursor.execute("SELECT tarifa FROM pedagios")
             pedagios_db = cursor.fetchall()
             if pedagios_db:
-                # Filtragem espacial simulada baseada num Bounding Box com buffer
-                min_lat, max_lat = min(lat_o, lat_d) - 0.5, max(lat_o, lat_d) + 0.5
-                min_lon, max_lon = min(lon_o, lon_d) - 0.5, max(lon_o, lon_d) + 0.5
-                pedagios_interceptados = [p[0] for p in pedagios_db if min_lat <= p[1] <= max_lat and min_lon <= p[2] <= max_lon]
-                qtd = len(pedagios_interceptados)
-                val_total = sum(pedagios_interceptados)
-                return {"qtd": qtd, "valor": val_total, "media": val_total / max(1, qtd)}
-        except Exception as e: ErrorManager.registrar("TollProvider", e)
-        return {"qtd": 0, "valor": 0.0, "media": 0.0}
+                # Simulação simples cruzando a tarifa armazenada no SQLite local
+                valor_total = sum(p[0] for p in pedagios_db)
+                return {"qtd": len(pedagios_db), "valor": valor_total}
+        except Exception as e:
+            ErrorManager.registrar("TollProvider", e)
+        return {"qtd": 0, "valor": 0.0}
 
 class FuelCostEngine:
     @staticmethod
@@ -1265,6 +1272,12 @@ class CarbonEngine:
     @staticmethod
     def calcular_esg(litros_diesel: float, rota_id: str) -> dict:
         emissoes = litros_diesel * 2.68
+        try:
+            cursor = db_conn.cursor()
+            cursor.execute("INSERT INTO emissoes VALUES (?, ?, ?, ?, ?)", (rota_id, 0.0, litros_diesel, emissoes, str(datetime.now())))
+            db_conn.commit()
+        except Exception as e:
+            ErrorManager.registrar("CarbonEngine", e)
         return {"kg_co2": emissoes}
 
 class LogisticsCostEngine:
@@ -1273,34 +1286,28 @@ class LogisticsCostEngine:
         litros = km / (2.5 if veiculo.peso_tons > 20 else 5.0)
         fuel = FuelCostEngine.calcular_combustivel(uf, litros)
         horas = minutos_total / 60.0
+        
         motorista = horas * veiculo.valor_hora
         depreciacao = km * veiculo.custo_km_depreciacao
         manutencao = km * veiculo.fator_manutencao
+        
         total = fuel["custo"] + valor_pedagio + motorista + depreciacao + manutencao
         co2_esg = CarbonEngine.calcular_esg(fuel["litros"], rota_id)
-        return {"combustivel": fuel["custo"], "pedagio": valor_pedagio, "motorista": motorista, "manutencao": manutencao, "depreciacao": depreciacao, "total": total, "litros": fuel["litros"], "co2": co2_esg["kg_co2"]}
+        
+        return {
+            "combustivel": fuel["custo"], "pedagio": valor_pedagio, 
+            "motorista": motorista, "manutencao": manutencao, 
+            "depreciacao": depreciacao, "total": total, 
+            "litros": fuel["litros"], "co2": co2_esg["kg_co2"]
+        }
 
 # ==============================================================================
-# 1. 2. 3. 5. 7. 8. NOVA CLASSE DE METADATA PARA AGRUPAMENTO SÓLIDO
-# ==============================================================================
-class RouteMetadata:
-    def __init__(self, distance_km, duration_base, duration_traffic, provider, score, geometry, ferries=False, roads=None, alt_routes=None):
-        self.distance_km = distance_km
-        self.duration_base = duration_base
-        self.duration_traffic = duration_traffic
-        self.provider = provider
-        self.score = score
-        self.geometry = geometry
-        self.ferries = ferries
-        self.roads = roads if roads else []
-        self.alt_routes = alt_routes if alt_routes else []
-
-# ==============================================================================
-# MOTOR AUTOMATIZADO DE CAPTURA DE ROTAS CORPORATIVAS
+# 🚀 MOTOR DE ROTEAMENTO CORPORATIVO (ROUTING PROVIDER MANAGER)
 # ==============================================================================
 class RoutingProvider(ABC):
     @abstractmethod
-    def calcular_rota(self, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, perfil_rota) -> RouteMetadata: pass
+    def calcular_rota(self, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, perfil_rota):
+        pass
 
 class OsrmProvider(RoutingProvider):
     def calcular_rota(self, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, perfil_rota):
@@ -1308,6 +1315,7 @@ class OsrmProvider(RoutingProvider):
         if not circuit_breaker.allow(provider): return None
         rate_limiter.wait(provider)
         route_requests.labels(provider=provider).inc()
+        
         start_t = time.time()
         try:
             url = f"https://router.project-osrm.org/route/v1/driving/{lon_o},{lat_o};{lon_d},{lat_d}?overview=full&geometries=geojson"
@@ -1317,114 +1325,78 @@ class OsrmProvider(RoutingProvider):
                 km = round(rota["distance"] / 1000, 2)
                 minutos_base = round(rota["duration"] / 60)
                 
-                # 7. Identificação simulada básica de vias para fallback
-                rodovias = ["BR-040"] if km > 50 else ["Via Urbana Local"]
-                
                 api_latency.labels(provider=provider).observe(time.time() - start_t)
                 circuit_breaker.record_success(provider)
-                return RouteMetadata(km, minutos_base, minutos_base, provider, 95, rota.get("geometry", {}).get("coordinates", []), ferries=False, roads=rodovias)
+                return {"km": km, "minutos_base": minutos_base, "provider": provider, "score": 95, "geometry": rota.get("geometry", {}).get("coordinates", [])}
         except Exception as e:
             ErrorManager.registrar(provider, e)
+            api_failures.labels(provider=provider).inc()
             circuit_breaker.record_failure(provider)
         return None
 
-# 1. RESTAURAÇÃO COMPLETA DA INTEGRAÇÃO DO GOOGLE MAPS (SCRAPING WEB ROBUSTO)
-class GoogleMapsScraper(RoutingProvider):
-    def capturar_rota_google_playwright(self, origem_str, destino_str):
-        # Abstração solicitada utilizando Playwright para evitar falhas de Scraping direto
-        if 'sync_playwright' not in globals():
-            return ""
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                url = f"https://www.google.com/maps/dir/{origem_str}/{destino_str}/"
-                page.goto(url, timeout=10000)
-                page.wait_for_timeout(3000)
-                html = page.content()
-                browser.close()
-                return html
-        except Exception as e:
-            ErrorManager.registrar("Playwright_Scraper", e)
-            return ""
-            
-    def capturar_rota_google_requests(self, origem_str, destino_str):
-        # Contingência Web pura (utilizada na ausência de engine headless)
-        url = f"https://www.google.com/maps/dir/?api=1&origin={origem_str}&destination={destino_str}&travelmode=driving"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-        try:
-            return session.get(url, headers=headers, timeout=10).text
-        except Exception:
-            return ""
-
+class GoogleDirectionsProvider(RoutingProvider):
     def calcular_rota(self, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, perfil_rota):
-        provider = "GOOGLE_ROUTE_SCRAPER"
+        provider = "GOOGLE_ROUTE"
         if not circuit_breaker.allow(provider): return None
         rate_limiter.wait(provider)
         route_requests.labels(provider=provider).inc()
+        
         start_t = time.time()
-        
-        origem_str = f"{lat_o},{lon_o}"
-        destino_str = f"{lat_d},{lon_d}"
-        
-        # Tentativa Multi-Layer de Extração de Malha do Google Maps
-        html = self.capturar_rota_google_playwright(origem_str, destino_str)
-        if not html: html = self.capturar_rota_google_requests(origem_str, destino_str)
-        if not html: return None
-        
         try:
-            # 1. Extração fidedigna da Distância Oficial (Descartando o fallback geodésico original do script)
-            match_km = re.search(r'\"(\d+[\.,]\d+|\d+)\s*km\"', html)
+            url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{lat_o},{lon_o}!1m2!1m1!1s{lat_d},{lon_d}!3e0"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.google.com/maps"}
+            resposta = session.get(url_api, headers=headers, timeout=Settings.GOOGLE_TIMEOUT)
+            texto_resposta = resposta.text
+            
+            if len(texto_resposta) < 500 or "directions" not in texto_resposta.lower(): 
+                circuit_breaker.record_failure(provider)
+                return None
+                
+            match_km = re.findall(r'\"(\d+[\.,]?\d*)\s*km\"', texto_resposta)
+            match_tempo = re.findall(r'\"(\d+)\s*min\"', texto_resposta) # Simplified regex for pure minutes mock
             if match_km:
-                km_oficial = float(match_km.group(1).replace('.', '').replace(',', '.'))
-            else:
-                km_oficial = dist_linha_reta * 1.35
-            
-            # 2. 3. TEMPO SEM TRÂNSITO (TEMPO BASE) e COM TRÂNSITO
-            match_tempo = re.findall(r'\"((?:\d+\s*h\s*)?\d+\s*min)\"', html)
-            if match_tempo:
-                tempo_str = match_tempo[0]
-                horas = int(re.search(r'(\d+)\s*h', tempo_str).group(1)) if re.search(r'(\d+)\s*h', tempo_str) else 0
-                minutos = int(re.search(r'(\d+)\s*min', tempo_str).group(1)) if re.search(r'(\d+)\s*min', tempo_str) else 0
-                minutos_base = (horas * 60) + minutos
-            else:
-                minutos_base = int((km_oficial / 70.0) * 60)
+                km_puro = float(match_km[0].replace('.', '').replace(',', '.'))
+                minutos_base = int(match_tempo[0]) if match_tempo else int((km_puro/70.0)*60.0)
+                
+                if dist_linha_reta > 0:
+                    limite_curto = max(dist_linha_reta * 2.0, dist_linha_reta + 15.0)
+                    if dist_linha_reta <= 50.0 and km_puro > limite_curto: return None  
+                    elif km_puro < dist_linha_reta * 0.8 or km_puro > dist_linha_reta * 4.0: return None  
 
-            # Impacto preditivo de Tráfego do Google ("trânsito" ou delay via markup)
-            minutos_transito = minutos_base + int(minutos_base * 0.15) if "trânsito" in html.lower() else minutos_base
-
-            # 5. DETECÇÃO ROBUSTA DE BALSA/FERRY-BOAT/TRAVESSIA
-            envolve_balsa = any(term in html.lower() for term in ["balsa", "ferry", "travessia", "barco"])
-            
-            # 7. MAPEAMENTO INTELIGENTE DE RODOVIAS (BR-040, SP-330, etc.)
-            rodovias = list(set(re.findall(r'(BR-\d+|SP-\d+|MG-\d+|RJ-\d+|PR-\d+|SC-\d+|RS-\d+)', html.upper())))
-            if not rodovias: rodovias = ["BR-116"] if km_oficial > 100 else ["Via Urbana"]
-            
-            # 8. ESTRUTURAÇÃO DE ROTAS ALTERNATIVAS
-            alt_routes = [{"km": round(km_oficial * 1.1, 1), "tempo": minutos_transito + 10}]
-
-            score_google = 85 + (10 if len(rodovias) > 0 else 0)
-            res_meta = RouteMetadata(km_oficial, minutos_base, minutos_transito, provider, score_google, [[lon_o, lat_o], [lon_d, lat_d]], ferries=envolve_balsa, roads=rodovias, alt_routes=alt_routes)
-
-            api_latency.labels(provider=provider).observe(time.time() - start_t)
-            circuit_breaker.record_success(provider)
-            return res_meta
+                score_google = 70 + (10 if km_puro > 0 else 0) + (10 if km_puro >= dist_linha_reta else 0)
+                res_metricas = {"km": km_puro, "minutos_base": minutos_base, "provider": provider, "score": score_google, "geometry": [[lon_o, lat_o], [lon_d, lat_d]]}
+                
+                api_latency.labels(provider=provider).observe(time.time() - start_t)
+                circuit_breaker.record_success(provider)
+                return res_metricas
         except Exception as e:
-            ErrorManager.registrar("GoogleMapsScraper_Extractor", e)
-            circuit_breaker.record_failure(provider)
+            ErrorManager.registrar(provider, e)
             api_failures.labels(provider=provider).inc()
+            circuit_breaker.record_failure(provider)
         return None
+
+class HereRoutingProvider(RoutingProvider):
+    def calcular_rota(self, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, perfil_rota):
+        return None 
+        
+class TomTomRoutingProvider(RoutingProvider):
+    def calcular_rota(self, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, perfil_rota):
+        return None 
 
 class RoutingProviderManager:
     def __init__(self):
-        # OsrmProvider é rápido, GoogleMapsScraper é rico. Em arquitetura de produção TMS, usamos o Google como prioridade rica.
-        self.providers = [GoogleMapsScraper(), OsrmProvider()]
+        self.providers = [OsrmProvider(), GoogleDirectionsProvider()]
         
-    def obter_rota(self, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, perfil_rota="shortest") -> RouteMetadata:
+    def obter_rota(self, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, perfil_rota="shortest"):
+        opcoes = []
         for prov in self.providers:
-            if GeocodingValidationCore.validar_coordenada_brasil(lat_o, lon_o)[0] and GeocodingValidationCore.validar_coordenada_brasil(lat_d, lon_d)[0]:
-                res = prov.calcular_rota(lat_o, lon_o, lat_d, lon_d, dist_linha_reta, perfil_rota)
-                if res: return res
+            res = prov.calcular_rota(lat_o, lon_o, lat_d, lon_d, dist_linha_reta, perfil_rota)
+            if res:
+                if perfil_rota == "fastest": return res
+                opcoes.append(res)
+                
+        if opcoes:
+            return min(opcoes, key=lambda x: x["km"])
         return None
 
 routing_manager = RoutingProviderManager()
@@ -1438,7 +1410,7 @@ class RouteService:
         start_total = time.time()
         origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
         
-        chave_rota_cache = f"R_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}_{perfil_rota}_{veiculo.tipo}"
+        chave_rota_cache = f"ROTA_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}_{perfil_rota}_{veiculo.tipo}"
         if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
         
         start_geo = time.time()
@@ -1447,88 +1419,62 @@ class RouteService:
         tempo_geocoding = round(time.time() - start_geo, 2)
         
         start_rot = time.time()
-        
-        # DISTÂNCIA EM LINHA RETA (Exigência Administrativa e Analítica 2)
-        dist_linha_reta = 0.0
+
         if all([lat_o is not None, lon_o is not None, lat_d is not None, lon_d is not None]) and lat_o != 0.0 and lat_d != 0.0:
-            dist_linha_reta = GeocodingValidationCore.calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
+            dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
+        else:
+            dist_linha_reta = 0.0
 
-        link_google = f"https://www.google.com/maps/dir/?api=1&origin={lat_o},{lon_o}&destination={lat_d},{lon_d}&travelmode=driving"
+        link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={requests.utils.quote(end_oficial_o)}&destination={requests.utils.quote(end_oficial_d)}&travelmode=driving"
 
-        res_meta = None
+        res_mapa = None
         if lat_o != 0.0 and lat_d != 0.0:
-            res_meta = routing_manager.obter_rota(lat_o, lon_o, lat_d, lon_d, dist_linha_reta, perfil_rota)
+            usar_coords = True
+            if dist_linha_reta > 150.0:
+                siglas_originais = re.findall(r'\b(DF|GO|SP|RJ|MG|BA|PR|SC|RS|CE|PE|AM|PA|MT|MS)\b', origem_clean.upper() + " " + destino_clean.upper())
+                if len(set(siglas_originais)) <= 1: usar_coords = False
+                
+            if usar_coords:
+                res_mapa = routing_manager.obter_rota(lat_o, lon_o, lat_d, lon_d, dist_linha_reta, perfil_rota)
 
-        if not res_meta:
-            # Contingência Extrema Matemático-Geodésica
+        if not res_mapa:
             km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
-            min_base = int((km_terrestre / 60.0) * 60)
-            res_meta = RouteMetadata(km_terrestre, min_base, min_base, "Geodésico Fallback", 50, [[lon_o, lat_o], [lon_d, lat_d]], roads=["Não Mapeada"])
+            v_comercial = 45.0 if km_terrestre < 50.0 else 65.0
+            minutos_base = int((km_terrestre / v_comercial) * 60) if km_terrestre > 0 else 0
+            res_mapa = {"km": km_terrestre, "minutos_base": minutos_base, "provider": "Geodésico Adaptativo", "score": 70, "geometry": [[lon_o, lat_o], [lon_d, lat_d]]}
 
-        status_restricao, mot_restricao = RestrictionEngine.validar_restricoes({"km": res_meta.distance_km}, veiculo)
+        # Restrição Frota
+        status_restricao, _ = RestrictionEngine.validar_restricoes(res_mapa, veiculo)
         
-        # 4. Atraso Físico de Trânsito = Tempo Rota Pura - Tempo de Trânsito Livre (Tempo Base)
-        trafego = HereTrafficProvider.obter_trafego_rota(res_meta.geometry)
-        delay_transito_absoluto = max(0, res_meta.duration_traffic - res_meta.duration_base) + trafego["delay_minutes"]
-        
+        # Inteligência Trânsito e Clima (ETA Dinâmico - VOLUME 3)
+        trafego = HereTrafficProvider.obter_trafego_rota(res_mapa["geometry"])
         clima = WeatherProvider.obter_clima_rota(lat_d, lon_d)
         risco_clima, delay_clima = WeatherRiskEngine.avaliar_risco(clima)
-        
-        minutos_finais = res_meta.duration_base + delay_transito_absoluto + delay_clima
+        minutos_finais = res_mapa["minutos_base"] + trafego["delay_minutes"] + delay_clima
         tempo_formatado = f"{minutos_finais} min" if minutos_finais < 60 else f"{minutos_finais // 60} h {minutos_finais % 60} min"
 
         tempo_roteamento = round(time.time() - start_rot, 2)
         tempo_total = round(time.time() - start_total, 2)
         
-        pedagios_info = TollProvider.calcular_pedagios(lat_o, lon_o, lat_d, lon_d)
-        logistica = LogisticsCostEngine.calcular_viabilidade(res_meta.distance_km, minutos_finais, veiculo, 'SP', pedagios_info["valor"], chave_rota_cache)
+        # Financeiro e ESG (VOLUME 3)
+        pedagio = TollProvider.calcular_pedagios(lat_o, lon_o, lat_d, lon_d)
+        logistica = LogisticsCostEngine.calcular_viabilidade(res_mapa["km"], minutos_finais, veiculo, 'SP', pedagio["valor"], chave_rota_cache)
 
-        # 9. Classificação Percentual de Trechos Urbanos e Rurais
-        perc_urbano = 15.0 if res_meta.distance_km > 50 else 100.0
-        perc_rural = 100.0 - perc_urbano
-        km_urbano = round(res_meta.distance_km * (perc_urbano / 100), 2)
-        km_rural = round(res_meta.distance_km * (perc_rural / 100), 2)
-        
-        # 10. e 11. Estados e Municípios Cruzados
-        qtd_municipios = 3 if res_meta.distance_km > 60 else 1
-        qtd_estados = 2 if "DF" in origem_clean.upper() or "DF" in destino_clean.upper() else 1
-        incidentes_reais = IncidentProvider.checar_incidentes(lat_d, lon_d)
-        
-        # 13. Alertas Operacionais TMS Integrados
-        alertas = []
-        if pedagios_info["qtd"] > 0: alertas.append("Pedágio na Via")
-        if res_meta.ferries: alertas.append("Travessia Aquática Detetada")
-        if delay_transito_absoluto > 15: alertas.append("Atraso Operacional Severo")
-        alertas_operacionais = " | ".join(alertas) if alertas else "Sem Restrições"
-        
-        qtd_pts = len(res_meta.geometry)
-        complexidade = "Complexa" if qtd_pts > 1000 else "Moderada" if qtd_pts > 300 else "Simples"
-        
-        # 15. Score Logístico Integrado 
-        score_operacional = round(((res_meta.score / 100.0) * 30) + (((score_num_o + score_num_d) / 200.0) * 20) + ((0.9 if delay_transito_absoluto < 20 else 0.4) * 20) + (15) + (15 if status_restricao == "APROVADA" else 0), 2)
-
-        # 14. O Novo Pipeline Restabelecido: Uma Super Tupla de 55 Atributos Reais
         retorno = (
-            origem_clean, conf_o, score_num_o, mun_o, dist_o, fonte_geo_o, end_oficial_o, lat_o, lon_o,
-            destino_clean, conf_d, score_num_d, mun_d, dist_d, fonte_geo_d, end_oficial_d, lat_d, lon_d,
-            res_meta.distance_km, res_meta.alt_routes[0]["km"] if res_meta.alt_routes else res_meta.distance_km, dist_linha_reta, obter_fator_desvio_rodoviario(dist_linha_reta),
-            tempo_formatado, res_meta.duration_base, res_meta.duration_traffic, delay_clima, minutos_finais,
-            res_meta.roads[0] if res_meta.roads else "N/A", " | ".join(res_meta.roads), len(res_meta.roads),
-            "Sim" if res_meta.ferries else "Não", 1 if res_meta.ferries else 0, "Balsa" if res_meta.ferries else "N/A",
-            pedagios_info["qtd"], pedagios_info["valor"], pedagios_info["media"],
-            status_restricao, mot_restricao, km_urbano, km_rural, perc_urbano, perc_rural, risco_clima,
-            logistica["litros"], logistica["co2"], logistica["combustivel"], logistica["total"],
-            score_operacional, res_meta.score, complexidade, res_meta.provider, link_google, 
-            json.dumps(res_meta.geometry), xai_o, xai_d
+            res_mapa["km"], tempo_formatado, link_fallback, "Não", dist_linha_reta, res_mapa["provider"], res_mapa["score"], 
+            conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, 
+            conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, 
+            lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d,
+            logistica["pedagio"], logistica["co2"], logistica["combustivel"], logistica["total"], json.dumps(res_mapa["geometry"])
         )
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
         return retorno
 
-def worker_paralelo_lote(item):
+def embrulhar_task_paralela(item):
     par_id, orig, dest, veic, perfil = item
     try: return par_id, RouteService.calcular_rota(orig, dest, veic, perfil)
     except Exception as e:
-        ErrorManager.registrar("WorkerParalelo_Execution", e)
+        ErrorManager.registrar("WorkerParalelo", e)
         return par_id, None
 
 # ==============================================================================
@@ -1538,19 +1484,34 @@ class ConsultaHistoryService:
     @staticmethod
     def salvar(origem, destino, distancia):
         hist = cache_historico_consultas.get("historico", [])
-        hist.insert(0, {"ID": hashlib.md5(f"{origem}{destino}{time.time()}".encode()).hexdigest()[:6].upper(), "Origem": origem, "Destino": destino, "Distância (km)": distancia, "Data/Hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S")})
+        hist.insert(0, {
+            "ID": hashlib.md5(f"{origem}{destino}{time.time()}".encode()).hexdigest()[:6].upper(),
+            "Origem": origem,
+            "Destino": destino,
+            "Distância (km)": distancia,
+            "Data/Hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        })
         cache_historico_consultas.set("historico", hist[:10], expire=None)
 
 class RouteMapRenderer:
     @staticmethod
     def render(geometry_json, lat_o, lon_o, lat_d, lon_d):
-        try: coords = json.loads(geometry_json)
-        except Exception: coords = [[lon_o, lat_o], [lon_d, lat_d]]
+        try:
+            coords = json.loads(geometry_json)
+        except Exception:
+            coords = [[lon_o, lat_o], [lon_d, lat_d]]
+
         df_path = pd.DataFrame([{"path": coords, "color": [0, 255, 127, 200]}])
-        df_scatter = pd.DataFrame([{"pos": [lon_o, lat_o], "color": [0, 191, 255], "label": "Origem"}, {"pos": [lon_d, lat_d], "color": [255, 69, 0], "label": "Destino"}])
+        df_scatter = pd.DataFrame([
+            {"pos": [lon_o, lat_o], "color": [0, 191, 255], "label": "Origem"},
+            {"pos": [lon_d, lat_d], "color": [255, 69, 0], "label": "Destino"}
+        ])
+
         layer_path = pdk.Layer("PathLayer", df_path, get_path="path", get_color="color", width_min_pixels=4)
         layer_points = pdk.Layer("ScatterplotLayer", df_scatter, get_position="pos", get_fill_color="color", get_radius=8000, pickable=True)
-        st.pydeck_chart(pdk.Deck(layers=[layer_path, layer_points], initial_view_state=pdk.ViewState(latitude=(lat_o+lat_d)/2, longitude=(lon_o+lon_d)/2, zoom=5, pitch=30), tooltip={"text": "{label}"}))
+
+        view = pdk.ViewState(latitude=(lat_o+lat_d)/2, longitude=(lon_o+lon_d)/2, zoom=5, pitch=30)
+        st.pydeck_chart(pdk.Deck(layers=[layer_path, layer_points], initial_view_state=view, tooltip={"text": "{label}"}))
 
 # ==============================================================================
 # INTERFACE STREAMLIT COM ENGINE DE SIDEBAR MANUAL E ABAS DE AUDITORIA
@@ -1569,10 +1530,25 @@ with st.sidebar:
     evitar_pedagio = st.checkbox("Evitar Pedágio", value=False)
     perfil_rota = st.radio("Perfil", ["Balanceado", "Rápido", "Econômico"]).lower()
     
+    # Construção do Perfil de Veículo (Gestão de Frota)
     peso = 23.0 if "Carreta" in tipo_veiculo else 14.0 if "Toco" in tipo_veiculo else 3.5
     altura = 4.3 if "Carreta" in tipo_veiculo else 3.8 if "Toco" in tipo_veiculo else 2.5
     veiculo_operacional = VehicleProfile(tipo_veiculo, peso, altura, 2.6, eixos=5, valor_hora=60.0, custo_km_dep=0.45, fator_manut=0.25)
     perfil_str = "fastest" if perfil_rota == "rápido" else "shortest"
+
+    st.markdown("---")
+    st.header("📖 Manual do Sistema")
+    with st.expander("🎯 Visão Geral"):
+        st.markdown("""
+        O sistema realiza:
+        1. Interpretação do endereço via Parser Brasileiro.
+        2. Geocodificação multi-API assíncrona.
+        3. Consenso espacial ponderado.
+        4. Avaliação de Restrições (Altura, Peso).
+        5. Injeção de Tráfego e Clima (ETA Dinâmico).
+        6. Roteamento Rodoviário.
+        7. Valoração Financeira e Ambiental (ESG).
+        """)
 
 tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
     "📍 Geocodificação Rápida", "⚙️ Processamento em Lote", "📊 Dashboard Executivo", "🕵️ Aba de Auditoria"
@@ -1586,32 +1562,40 @@ with tab_individual:
     
     if st.button("🚀 Calcular Rota Individual", type="primary"):
         if orig_ind and dest_ind:
-            with st.spinner("Acionando motores de extração Google e Finanças..."):
+            with st.spinner("Acionando motores de geocodificação, trânsito e finanças..."):
                 res_ind = RouteService.calcular_rota(orig_ind, dest_ind, veiculo_operacional, perfil_str)
                 
             if res_ind and res_ind[0] != "QA_REJEITADO" and res_ind[0] != "GEOCODING_FALHOU":
-                st.success("✅ Rota operacional restabelecida e enriquecida com sucesso!")
+                st.success("✅ Rota operacional estabelecida com sucesso!")
                 
+                # Renderizando os 6 Cards solicitados (Volume 2/3)
                 c1, c2, c3, c4, c5, c6 = st.columns(6)
-                c1.metric("Distância Oficial", f"{res_ind[18]} km" if isinstance(res_ind[18], float) else res_ind[18])
-                c2.metric("Tempo (c/ Trânsito)", res_ind[22])
-                c3.metric(f"Pedágios ({res_ind[33]})", f"R$ {res_ind[34]:.2f}")
-                c4.metric("Rodovia Base", f"{res_ind[27]}")
-                c5.metric("Emissão de CO2", f"{res_ind[44]:.1f} kg")
-                c6.metric("Custo Total", f"R$ {res_ind[46]:.2f}")
+                c1.metric("Distância", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0])
+                c2.metric("Tempo (com Trânsito)", res_ind[1])
+                c3.metric("Pedágios", f"R$ {res_ind[28]:.2f}")
+                c4.metric("CO2 Emitido", f"{res_ind[29]:.1f} kg")
+                c5.metric("Combustível", f"R$ {res_ind[30]:.2f}")
+                c6.metric("Custo Total", f"R$ {res_ind[31]:.2f}")
                 
-                RouteMapRenderer.render(res_ind[52], res_ind[7], res_ind[8], res_ind[16], res_ind[17])
-                st.info(f"**Score Logístico Global:** {res_ind[47]} | **Origem:** {res_ind[5]} | **Motor:** {res_ind[50]}")
-                st.markdown(f"[🔗 Abrir Rota no Google Maps]({res_ind[51]})")
+                lat_c, lon_c = (res_ind[19] + res_ind[21]) / 2, (res_ind[20] + res_ind[22]) / 2
                 
-                ConsultaHistoryService.salvar(orig_ind, dest_ind, res_ind[18])
-            else: st.error("Falha na validação de consistência geodésica.")
-        else: st.warning("Preencha origem e destino.")
+                st.markdown("##### Visualização Operacional")
+                RouteMapRenderer.render(res_ind[32], res_ind[19], res_ind[20], res_ind[21], res_ind[22])
+                
+                st.info(f"**Origem fixada por:** {res_ind[11]} | **Destino fixada por:** {res_ind[17]} | **Motor da Rota:** {res_ind[5]}")
+                st.markdown(f"[🔗 Abrir Rota no Google Maps]({res_ind[2]})")
+                
+                ConsultaHistoryService.salvar(orig_ind, dest_ind, res_ind[0])
+            else:
+                st.error("Falha na validação de consistência geodésica.")
+        else:
+            st.warning("Preencha origem e destino.")
 
     st.markdown("---")
     st.markdown("#### Histórico Recente")
     h_data = cache_historico_consultas.get("historico", [])
-    if h_data: st.dataframe(pd.DataFrame(h_data), use_container_width=True)
+    if h_data:
+        st.dataframe(pd.DataFrame(h_data), use_container_width=True)
 
 with tab_processamento:
     st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
@@ -1621,86 +1605,123 @@ with tab_processamento:
         df = pd.read_excel(arquivo_carregado)
         df.columns = df.columns.str.strip().str.title()
         
-        if 'Origem' not in df.columns or 'Destino' not in df.columns: st.error("Erro de Validação: A planilha deve possuir as colunas 'Origem' e 'Destino'.")
+        if 'Origem' not in df.columns or 'Destino' not in df.columns:
+            st.error("Erro de Validação: A planilha deve possuir as colunas 'Origem' e 'Destino'.")
         else:
             MAX_LINHAS = 5000
-            if len(df) > MAX_LINHAS: st.error(f"⚠️ Limite de {MAX_LINHAS} linhas excedido."); st.stop()
-            st.success(f"Tabela com {len(df)} registros mapeada! Pronto para processar a Super-Planilha.")
+            if len(df) > MAX_LINHAS:
+                st.error(f"⚠️ Limite arquitetural de {MAX_LINHAS} linhas excedido. Fracione o arquivo.")
+                st.stop()
+                
+            st.success(f"Tabela com {len(df)} registros mapeada! Pronto para processar.")
+            
             nome_operador = st.text_input("Matrícula / Nome do Operador (Opcional)", max_chars=50)
             
-            if st.button("Iniciar Processamento Logístico Completo em Lote"):
+            if st.button("Iniciar Processamento em Lote"):
                 start_lote_clock = time.time()
-                
-                # O Novo Formato Massivo Exigido na Auditoria
                 novas_colunas = [
-                    'Origem Oficial', 'Confianca Origem', 'Score Num Origem', 'Mun Origem', 'Distrito Origem', 'Fonte Origem', 'End Completo Origem', 'Lat Origem', 'Lon Origem',
-                    'Destino Oficial', 'Confianca Destino', 'Score Num Destino', 'Mun Destino', 'Distrito Destino', 'Fonte Destino', 'End Completo Destino', 'Lat Destino', 'Lon Destino',
-                    'Distancia Rota (km)', 'Distancia Alt (km)', 'Distancia Reta (km)', 'Fator Desvio',
-                    'ETA Formatado', 'Tempo Base (min)', 'Tempo Transito (min)', 'Atraso Clima (min)', 'Tempo Final (min)',
-                    'Rodovia Principal', 'Rodovias Usadas', 'Qtd Rodovias',
-                    'Usa Balsa', 'Qtd Travessias', 'Tipo Travessia',
-                    'Qtd Pedagios', 'Valor Pedagios (R$)', 'Pedagio Medio (R$)',
-                    'Restricao Viatura', 'Motivo Restricao', 'KM Urbano', 'KM Rural', '% Urbano', '% Rural', 'Risco Climatico',
-                    'Consumo (L)', 'CO2 (kg)', 'Combustivel (R$)', 'Custo Total (R$)',
-                    'Score Operacional', 'Score Base Rota', 'Geometria Nivel', 'Provedor Rota', 'Link Google'
+                    'Distancia', 'Tempo (c/ Trânsito)', 'Link da Rota', 'Balsas', 'Linha Reta', 'Fonte da Rota', 'Score da Rota', 
+                    'Confianca Origem', 'Score Num Origem', 'Distrito Origem', 'Municipio Origem', 'Fonte Geocoding Origem', 'Endereco Oficial Origem',
+                    'Confianca Destino', 'Score Num Destino', 'Distrito Destino', 'Municipio Destino', 'Fonte Geocoding Destino', 'Endereco Oficial Destino',
+                    'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Status da Rota'
                 ]
                 for col in novas_colunas: df[col] = None
                     
                 pares_unicos = set()
                 mapeamento_linhas = []
+                
                 for index, linha in df.iterrows():
                     origem = str(getattr(linha, 'Origem', '')).strip() if pd.notna(getattr(linha, 'Origem', '')) else ""
                     destino = str(getattr(linha, 'Destino', '')).strip() if pd.notna(getattr(linha, 'Destino', '')) else ""
                     if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
-                        pares_unicos.add((origem, destino)); mapeamento_linhas.append((index, origem, destino))
+                        par = (origem, destino)
+                        pares_unicos.add(par)
+                        mapeamento_linhas.append((index, origem, destino))
                 
-                if not pares_unicos: st.warning("Nenhuma linha contendo endereços válidos detectada."); st.stop()
+                if not pares_unicos:
+                    st.warning("Nenhuma linha contendo endereços válidos detectada.")
+                    st.stop()
+                    
+                MAPA_PRIORIDADE = {"CEP": 1, "ENDERECO_COMPLETO": 2, "POI": 3, "CONDOMINIO": 3, "MUNICIPIO": 4, "BAIRRO": 5, "RURAL": 6, "LOGRADOURO": 7}
+                tarefas_priorizadas = []
+                for p in pares_unicos:
+                    tipo_o = semantica.classificar_entrada(semantica.normalizar(p[0]))
+                    tarefas_priorizadas.append((MAPA_PRIORIDADE.get(tipo_o, 99), p))
+                tarefas_priorizadas.sort(key=lambda x: x[0])
+                
+                st.info(f"Otimização O(U) com Fila Inteligente Ativa: {len(pares_unicos)} rotas exclusivas na esteira de processamento.")
                     
                 resultados_unicos = {}
-                if "executor_apis" not in st.session_state: st.session_state["executor_apis"] = ThreadPoolExecutor(max_workers=16)
-                
-                tarefas_unicas = list(pares_unicos)
                 executor_lote = st.session_state["executor_global"]
+                tarefas_unicas = [(t[1], t[1][0], t[1][1], veiculo_operacional, perfil_str) for t in tarefas_priorizadas]
+                futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in tarefas_unicas}
                 
                 concluidos = 0
                 barra_progresso = st.progress(0)
                 container_status = st.empty()
+                
                 st.session_state['logs_auditoria'] = []
                 
-                # Prevenção Crítica do Gargalo: Processamento fatiado (Chunking) em lotes
-                batch_size = 50
-                for i in range(0, len(tarefas_unicas), batch_size):
-                    lote_atual = tarefas_unicas[i:i + batch_size]
-                    tarefas_construidas = [(t, t[0], t[1], veiculo_operacional, perfil_str) for t in lote_atual]
-                    futuros = {executor_lote.submit(worker_paralelo_lote, t): t for t in tarefas_construidas}
+                for f in as_completed(futuros):
+                    par_id, res = f.result()
+                    resultados_unicos[par_id] = res
+                        
+                    concluidos += 1
+                    container_status.text(f"🚀 Fila de Prioridade Assíncrona: {concluidos} / {len(pares_unicos)}")
+                    barra_progresso.progress(concluidos / len(pares_unicos))
                     
-                    for f in as_completed(futuros):
-                        par_id, res = f.result()
-                        if res: resultados_unicos[par_id] = res
-                        concluidos += 1
-                        container_status.text(f"🚀 Fila de Prioridade Assíncrona: {concluidos} / {len(pares_unicos)}")
-                        barra_progresso.progress(concluidos / len(pares_unicos))
-                
-                container_status.text("✨ Distribuindo resultados e fundindo as 50+ métricas TMS na planilha...")
+                container_status.text("✨ Distribuindo resultados e gerando logs de auditoria...")
                 
                 for idx, origem, destino in mapeamento_linhas:
                     par = (origem, destino)
                     res = resultados_unicos.get(par)
+                    
                     if res:
-                        # Assinalamento Indexado Otimizado
-                        for c_idx, col_name in enumerate(novas_colunas): df.at[idx, col_name] = res[c_idx]
-                        df.at[idx, 'Status da Rota'] = "Excelente" if res[47] >= 90 else "Boa" if res[47] >= 80 else "Aceitável" if res[47] >= 70 else "Revisar"
+                        df.at[idx, 'Distancia'] = res[0]; df.at[idx, 'Tempo (c/ Trânsito)'] = res[1]
+                        df.at[idx, 'Link da Rota'] = res[2]; df.at[idx, 'Balsas'] = res[3]
+                        df.at[idx, 'Linha Reta'] = res[4]; df.at[idx, 'Fonte da Rota'] = res[5]
+                        df.at[idx, 'Score da Rota'] = res[6]; df.at[idx, 'Confianca Origem'] = res[7]
+                        df.at[idx, 'Score Num Origem'] = res[8]; df.at[idx, 'Distrito Origem'] = res[9]
+                        df.at[idx, 'Municipio Origem'] = res[10]; df.at[idx, 'Fonte Geocoding Origem'] = res[11]
+                        df.at[idx, 'Endereco Oficial Origem'] = res[12]; df.at[idx, 'Confianca Destino'] = res[13]
+                        df.at[idx, 'Score Num Destino'] = res[14]; df.at[idx, 'Distrito Destino'] = res[15]
+                        df.at[idx, 'Municipio Destino'] = res[16]; df.at[idx, 'Fonte Geocoding Destino'] = res[17]
+                        df.at[idx, 'Endereco Oficial Destino'] = res[18]; df.at[idx, 'Lat Origem'] = res[19]
+                        df.at[idx, 'Lon Origem'] = res[20]; df.at[idx, 'Lat Destino'] = res[21]
+                        df.at[idx, 'Lon Destino'] = res[22]; df.at[idx, 'Tempo Geocoding (s)'] = res[23]
+                        df.at[idx, 'Tempo Roteamento (s)'] = res[24]; df.at[idx, 'Tempo Total (s)'] = res[25]
+                        
+                        score_o, score_d, score_r = res[8], res[14], res[6]
+                        score_global = round((0.35 * score_o) + (0.35 * score_d) + (0.30 * score_r), 2)
+                        df.at[idx, 'Score Final Global'] = score_global
+                        df.at[idx, 'Status da Rota'] = "Excelente" if score_global >= 90 else "Boa" if score_global >= 80 else "Aceitável" if score_global >= 70 else "Revisar"
+                        
+                        st.session_state['logs_auditoria'].append({
+                            "Endereco Informado": origem, "Endereco Canonico": res[12],
+                            "Google Lat/Lon": f"{res[19]}, {res[20]}" if "GOOGLE" in str(res[11]) else "Mapeado no Consenso",
+                            "ArcGIS Lat/Lon": f"{res[19]}, {res[20]}" if "ARCGIS" in str(res[11]) else "Mapeado no Consenso",
+                            "Nominatim Lat/Lon": f"{res[19]}, {res[20]}" if "NOMINATIM" in str(res[11]) else "Mapeado no Consenso",
+                            "Photon Lat/Lon": f"{res[19]}, {res[20]}" if "PHOTON" in str(res[11]) else "Mapeado no Consenso",
+                            "TomTom Lat/Lon": f"{res[19]}, {res[20]}" if "TOMTOM" in str(res[11]) else "Mapeado no Consenso",
+                            "Vencedor": res[11], "Score": res[8], "XAI Explicabilidade": " | ".join(res[26]) if len(res) > 26 else "N/A"
+                        })
                     else:
                         df.at[idx, 'Status da Rota'] = "Erro de Processamento"
 
                 tempo_lote_segundos = round(time.time() - start_lote_clock, 2)
-                cache_historico_lotes.set(f"lote_{start_lote_clock}", {"Data/Hora": time.strftime("%Y-%m-%d %H:%M:%S"), "Operador": nome_operador.strip() if nome_operador.strip() else "Operador Automático", "Linhas Validadas": len(pares_unicos), "Tempo Gasto (s)": tempo_lote_segundos, "Tempo Médio/Rota (s)": round(tempo_lote_segundos / max(1, len(pares_unicos)), 2)}, expire=None)
+                cache_historico_lotes.set(f"lote_{start_lote_clock}", {
+                    "Data/Hora": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "Operador": nome_operador.strip() if nome_operador.strip() else "Operador Local / Automático",
+                    "Linhas Validadas": len(pares_unicos),
+                    "Tempo Gasto (s)": tempo_lote_segundos,
+                    "Tempo Médio/Rota (s)": round(tempo_lote_segundos / max(1, len(pares_unicos)), 2)
+                }, expire=None)
 
-                st.session_state['df_processado_v5'] = df
+                st.session_state['df_processado'] = df
                 container_status.empty(); barra_progresso.empty()
-                st.success("✨ Processamento em lote corporativo com Extratores de Rota Real concluído!")
+                st.success("✨ Processamento em lote corporativo concluído!")
                 
-                ordem_finais = ['Origem', 'Destino'] + novas_colunas + ['Status da Rota']
+                ordem_finais = ['Origem', 'Destino'] + novas_colunas
                 df = df.reindex(columns=ordem_finais)
                 
                 output_buffer = io.BytesIO()
@@ -1709,39 +1730,83 @@ with tab_processamento:
 
         if 'planilha_pronta' in st.session_state:
             st.write("---"); st.balloons()
-            st.download_button(label="📥 Baixar Super-Planilha Logística Completa", data=st.session_state['planilha_pronta'], file_name="planilha_rotas_TMS_calculada.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(label="📥 Baixar Planilha Logística Processada", data=st.session_state['planilha_pronta'], file_name="planilha_rotas_calculada.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 with tab_analytics:
-    st.markdown("### 📊 Dashboard Corporativo OLAP")
-    if 'df_processado_v5' in st.session_state:
-        df_an = st.session_state['df_processado_v5']
+    st.markdown("### 📊 Dashboard Corporativo (Analytics)")
+    if 'df_processado' in st.session_state:
+        df_kpi = st.session_state['df_processado']
+        df_sucesso = df_kpi[df_kpi["Status da Rota"].str.contains("Erro") == False]
         
-        # Filtro de Pandas seguro contra strings vazias em série booleana (Tratamento Adequado de Erro)
-        df_sucesso = df_an[~df_an["Status da Rota"].fillna("").str.contains("Erro")]
-        
-        total_validos = len(df_an)
-        alta_conf = len(df_an[df_an['Confianca Destino'].isin(['ALTISSIMA', 'ALTA'])])
+        # KPI 1: Geocoding Accuracy
+        total_validos = len(df_kpi)
+        alta_conf = len(df_kpi[df_kpi['Confianca Destino'].isin(['ALTISSIMA', 'ALTA'])])
         geo_accuracy = (alta_conf / total_validos) * 100 if total_validos > 0 else 0
 
-        p95 = np.percentile(df_sucesso['Distancia Rota (km)'].dropna(), 95) if not df_sucesso.empty else 0
-        p99 = np.percentile(df_sucesso['Distancia Rota (km)'].dropna(), 99) if not df_sucesso.empty else 0
+        # KPI 5: Tempo P95 e P99
+        p95 = np.percentile(df_sucesso['Tempo Roteamento (s)'].dropna(), 95) if not df_sucesso.empty else 0
+        p99 = np.percentile(df_sucesso['Tempo Roteamento (s)'].dropna(), 99) if not df_sucesso.empty else 0
         
         col_k1, col_k2, col_k3, col_k4 = st.columns(4)
-        col_k1.metric("Rotas Processadas", len(df_an))
+        col_k1.metric("Rotas em Lote", len(df_kpi))
         col_k2.metric("Geocoding Accuracy", f"{geo_accuracy:.1f}%")
-        col_k3.metric("Percentil de Dist. P95", f"{p95:.1f} km")
-        col_k4.metric("Percentil de Dist. P99", f"{p99:.1f} km")
+        col_k3.metric("Latência Roteamento P95", f"{p95:.2f} s")
+        col_k4.metric("Latência Roteamento P99", f"{p99:.2f} s")
         
         st.markdown("---")
-        st.markdown("#### 🏆 Fornecedores Externos e Latências")
+        
+        # KPI 2: Provider Ranking
+        st.markdown("#### 🏆 Provider Ranking")
         health_data = []
-        for api in ["GOOGLE_MAPS", "ARCGIS", "TOMTOM", "NOMINATIM", "PHOTON", "OVERPASS", "OSRM", "GOOGLE_ROUTE_SCRAPER"]:
+        for api in ["GOOGLE_MAPS", "ARCGIS", "TOMTOM", "NOMINATIM", "PHOTON", "OVERPASS", "OSRM"]:
             dados = cache_api_health.get(api, {"hits": 0, "calls": 0, "falhas": 0, "tempo_total": 0.0})
             t_med = f"{round((dados['tempo_total'] / max(1, dados['calls'])) * 1000)} ms" if dados['calls'] > 0 else "N/A"
             health_data.append({"Provider": api, "Hits": dados["hits"], "Falhas": dados["falhas"], "Latência Média": t_med})
         st.dataframe(pd.DataFrame(health_data).sort_values(by="Hits", ascending=False), use_container_width=True)
-    else: st.info("Aguardando processamento de matriz em lote para alimentar os KPIs corporativos.")
+
+        col_map, col_erros = st.columns([2, 1])
+        
+        with col_erros:
+            # KPI 3: Municípios Problemáticos
+            st.markdown("#### ⚠️ Municípios Problemáticos")
+            df_erros = df_kpi[df_kpi['Score Final Global'] < 70]
+            if not df_erros.empty:
+                tabela_erros = df_erros['Municipio Destino'].value_counts().reset_index()
+                tabela_erros.columns = ['Cidade', 'Qtd Erros']
+                st.dataframe(tabela_erros, use_container_width=True)
+            else:
+                st.success("Nenhuma inconsistência detectada.")
+
+        with col_map:
+            # KPI 4: Mapa Operacional (DeckGL Scatterplot com Clusters)
+            st.markdown("#### 🗺️ Mapa Operacional Global")
+            df_mapa = df_sucesso.dropna(subset=['Lat Destino', 'Lon Destino'])
+            if not df_mapa.empty:
+                layer_destinos = pdk.Layer(
+                    "ScatterplotLayer",
+                    data=df_mapa,
+                    get_position=['Lon Destino', 'Lat Destino'],
+                    get_radius=5000,
+                    get_fill_color=[255, 140, 0, 150],
+                    pickable=True
+                )
+                view_estado = pdk.ViewState(latitude=-15.78, longitude=-47.92, zoom=3)
+                st.pydeck_chart(pdk.Deck(layers=[layer_destinos], initial_view_state=view_estado, map_style="mapbox://styles/mapbox/dark-v10"))
+    else:
+        st.info("Aguardando processamento de planilha para gerar os KPIs corporativos.")
+        
+    st.markdown("---")
+    st.markdown("#### 📜 Trilha de Auditoria Corporativa (Histórico de Lotes)")
+    historico = [cache_historico_lotes[k] for k in cache_historico_lotes]
+    if historico:
+        st.dataframe(pd.DataFrame(historico).sort_values(by="Data/Hora", ascending=False).reset_index(drop=True), use_container_width=True)
+    else:
+        st.caption("Nenhum registro de lote persistido na base histórica até o momento.")
 
 with tab_auditoria:
     st.markdown("### 🕵️ Dossiê de Auditoria Viária e Espacial")
-    st.info("A aba será refatorada no Volume Analytics.")
+    if 'logs_auditoria' in st.session_state and st.session_state['logs_auditoria']:
+        st.write("Abaixo consta a árvore de decisões explicáveis tomada pelo motor de consenso ponderado:")
+        st.dataframe(pd.DataFrame(st.session_state['logs_auditoria']), use_container_width=True)
+    else:
+        st.info("Nenhum registro de auditoria gerado. Inicie o processamento na primeira aba para popular este painel.")
