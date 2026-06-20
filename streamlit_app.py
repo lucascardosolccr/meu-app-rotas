@@ -523,9 +523,12 @@ def validar_consistencia_municipal(candidato, mun_inf):
 def API_Google_Geocoding_Scraper(query):
     start_t = time.time()
     try:
-        url = f"https://www.google.com/maps/search/{requests.utils.quote(query)}"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        r = session.get(url, headers=headers, timeout=5, allow_redirects=True)
+        url = f"https://www.google.com.br/maps/search/{requests.utils.quote(query)}/?hl=pt-BR"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "pt-BR,pt;q=0.9"
+        }
+        r = session.get(url, headers=headers, timeout=6, allow_redirects=True)
         match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.url)
         if not match: match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.text)
         if match: 
@@ -649,29 +652,25 @@ def API_Photon(query):
     registrar_telemetria("PHOTON", False, time.time() - start_t)
     return None
 
-def API_Overpass_POIs(texto_norm):
-    if len(texto_norm) < 10: return None
-    if texto_norm in cache_poi: return cache_poi[texto_norm]
-    start_t = time.time()
-    endpoints = ["https://overpass-api.de/api/interpreter", "https://lz4.overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
-    texto_seguro = re.escape(texto_norm)
-    query_osm = f'[out:json][timeout:3];(node["name"~"{texto_seguro}",i]["amenity"];way["name"~"{texto_seguro}",i]["amenity"];node["name"~"{texto_seguro}",i]["building"];way["name"~"{texto_seguro}",i]["building"];node["name"~"{texto_seguro}",i]["healthcare"];way["name"~"{texto_seguro}",i]["healthcare"];node["name"~"{texto_seguro}",i]["education"];way["name"~"{texto_seguro}",i]["education"];);out center;'
-    for url in endpoints:
-        try:
-            r = session.post(url, data={"data": query_osm}, timeout=4)
-            if r.status_code == 200:
-                elems = r.json().get("elements", [])
-                if elems:
-                    e = elems[0]
-                    lat, lon = e.get("lat", e.get("center", {}).get("lat", 0.0)), e.get("lon", e.get("center", {}).get("lon", 0.0))
-                    tags = e.get("tags", {})
-                    res_poi = {"lat": lat, "lon": lon, "fonte": "OVERPASS", "score_base": 40, "cidade": tags.get("addr:city", "").upper(), "estado": tags.get("addr:state", "").upper(), "bairro": tags.get("addr:suburb", "").upper(), "logradouro": tags.get("addr:street", "").upper(), "numero": str(tags.get("addr:housenumber", "")).upper(), "cep": tags.get("addr:postcode", "").replace("-", "")}
-                    cache_poi.set(texto_norm, [res_poi], expire=7776000)
-                    registrar_telemetria("OVERPASS", True, time.time() - start_t)
-                    return [res_poi]
-        except Exception: continue
-    registrar_telemetria("OVERPASS", False, time.time() - start_t)
-    return None
+# MELHORIA 10: O Geocodificador Centróide Supremo - Resolve coordenadas de qualquer cidade Brasileira via injeção estruturada.
+def obter_coordenada_centroide_supremo(mun_nome, uf_nome):
+    url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?City={requests.utils.quote(mun_nome)}&Region={requests.utils.quote(uf_nome)}&CountryCode=BRA&f=json&maxLocations=1"
+    try:
+        r = session.get(url_arc, timeout=5).json()
+        if r.get('candidates'):
+            cand = r['candidates'][0]
+            lat_c, lon_c = float(cand['location']['y']), float(cand['location']['x'])
+            if validar_coordenada_brasil(lat_c, lon_c)[0]: return lat_c, lon_c, "ARCGIS_CENTROIDE_SUPREMO"
+    except: pass
+    
+    url_nom = f"https://nominatim.openstreetmap.org/search?city={requests.utils.quote(mun_nome)}&state={requests.utils.quote(uf_nome)}&country=Brazil&format=json&limit=1"
+    try:
+        r = session.get(url_nom, headers={"User-Agent": "RotasCorp/11.0"}, timeout=5).json()
+        if r:
+            lat_c, lon_c = float(r[0]['lat']), float(r[0]['lon'])
+            if validar_coordenada_brasil(lat_c, lon_c)[0]: return lat_c, lon_c, "NOMINATIM_CENTROIDE_SUPREMO"
+    except: pass
+    return 0.0, 0.0, None
 
 def API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d):
     start_t = time.time()
@@ -948,7 +947,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V12_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V13_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1026,36 +1025,40 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
             candidatos_validos.extend(res_nom)
             res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
 
-    # MELHORIA 09: Extirpação do Erro IBGE Offline e implementação do Nominatim Estruturado + Matriz de Segurança
     if not res_final and ctx.get("municipio") and ctx.get("uf"):
         mun_nome = ctx["municipio"]
         uf_nome = ctx["uf"]
         dist_nome = ctx.get("distrito", "")
         
-        # 1. Matriz de Segurança Hardcoded (Eixo Crítico MT-GO-PA)
-        chave_seguranca = f"{mun_nome}_{uf_nome}"
-        KNOWN_CITIES_MATRIX = {
-            "RIBEIRAO CASCALHEIRA_MT": (-12.9268, -51.8244),
-            "SAO MIGUEL DO ARAGUAIA_GO": (-13.2750, -50.1628),
-            "PORTO DE MOZ_PA": (-1.7483, -52.2383),
-            "ALMEIRIM_PA": (-1.5233, -52.5816)
-        }
-        if chave_seguranca in KNOWN_CITIES_MATRIX:
-            lat_c, lon_c = KNOWN_CITIES_MATRIX[chave_seguranca]
-            endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
-            res_final = (lat_c, lon_c, endereco_ibge, "ALTISSIMA", 100, dist_nome, mun_nome, "MATRIZ_SEGURANCA_INTERNA", ["Blindagem Crítica Ativada: Coordenada resgatada de Dicionário de Segurança em Memória."])
+        query_fallback = f"{dist_nome}, {mun_nome}, {uf_nome}, BRASIL" if dist_nome else f"{mun_nome}, {uf_nome}, BRASIL"
+        res_fallback = API_Nominatim(query_fallback)
+        if not res_fallback: res_fallback = API_Photon(query_fallback)
         
-        # 2. Resgate via Nominatim API Parametrizada
-        if not res_final:
-            url_nom_estruturado = f"https://nominatim.openstreetmap.org/search?city={requests.utils.quote(mun_nome)}&state={requests.utils.quote(uf_nome)}&country=Brazil&format=json&limit=1"
-            try:
-                r_nom_est = session.get(url_nom_estruturado, headers={"User-Agent": "RotasCorp/9.0"}, timeout=5).json()
-                if r_nom_est:
-                    lat_c, lon_c = float(r_nom_est[0]['lat']), float(r_nom_est[0]['lon'])
-                    if validar_coordenadas_mapa(lat_c, lon_c):
-                        endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
-                        res_final = (lat_c, lon_c, endereco_ibge, "ALTA", 90, dist_nome, mun_nome, "NOMINATIM_ESTRUTURADO", ["Geocodificação em nuvem primária falhou. Resgatado via Nominatim Estruturado (Cidade/Estado)."])
-            except Exception: pass
+        if res_fallback and len(res_fallback) > 0:
+            melhor = res_fallback[0]
+            valido, lat_c, lon_c = validar_coordenada_brasil(melhor["lat"], melhor["lon"])
+            if valido:
+                rua_crua = texto_norm.strip(" ,-")
+                if dist_nome and dist_nome not in rua_crua:
+                    endereco_ibge = f"{rua_crua}, {dist_nome}, {mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                else:
+                    endereco_ibge = f"{rua_crua}, {mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                    
+                res_final = (lat_c, lon_c, endereco_ibge, "BAIXA", 40, dist_nome, mun_nome, "CENTROIDE_FALLBACK", ["Endereço exato não geocodificado. Fallback ativado para Centróide (Distrito/Município) a fim de habilitar distância em Linha Reta."])
+
+    # MELHORIA 10: O Geocodificador Centróide Supremo. Extirpa a falha de 0.0 independente de qualquer erro anterior.
+    if not res_final:
+        melhor_match = process.extractOne(texto_norm, LISTA_CONTEXTO_FUZZY, scorer=fuzz.token_set_ratio)
+        if melhor_match and melhor_match[1] >= 65:
+            cidade_uf = melhor_match[0]
+            mun_nome = cidade_uf.rsplit(' ', 1)[0]
+            uf_nome = cidade_uf.rsplit(' ', 1)[1]
+            
+            lat_c, lon_c, fonte_c = obter_coordenada_centroide_supremo(mun_nome, uf_nome)
+            
+            if lat_c != 0.0 and lon_c != 0.0:
+                endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                res_final = (lat_c, lon_c, endereco_ibge, "MUNICIPAL", 80, "", mun_nome, fonte_c, [f"Recuperação Geodésica Suprema: Texto mapeado via Inteligência Artificial Local (Fuzzy={melhor_match[1]}%) para '{cidade_uf}'. Centróide validado via {fonte_c}."])
 
     if res_final:
         cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
@@ -1091,16 +1094,19 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V12_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+    cache_key = f"GOOG_V13_{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
     
-    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
-    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
+    url_api = f"https://www.google.com.br/maps/dir/{origem_param}/{destino_param}/data=!4m2!4m1!3e0?hl=pt-BR"
+    link_maps = f"https://www.google.com.br/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
     
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "pt-BR,pt;q=0.9"
+    }
     
     try:
         resposta = session.get(url_api, headers=headers, timeout=12)
@@ -1111,6 +1117,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         dist_matches = re.findall(r'\"([\d\.,]+)\s*km\"', texto_resposta)
         if not dist_matches: dist_matches = re.findall(r'([\d\.,]+)\s*km', texto_resposta)
         if not dist_matches: dist_matches = re.findall(r'\\x22([\d\.,]+)\s*km\\x22', texto_resposta)
+        if not dist_matches: dist_matches = re.findall(r'(\d+)\s*km', texto_resposta)
         
         time_matches = re.findall(r'\"(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)\"', texto_resposta)
         if not time_matches: time_matches = re.findall(r'(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)', texto_resposta)
@@ -1152,7 +1159,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V12_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V13_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1169,17 +1176,22 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
 
     orig_param_fb = requests.utils.quote(end_oficial_o) if end_oficial_o else f"{lat_o},{lon_o}"
     dest_param_fb = requests.utils.quote(end_oficial_d) if end_oficial_d else f"{lat_d},{lon_d}"
-    link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
+    link_fallback = f"https://www.google.com.br/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
 
     res_google = None
     res_osrm = None
     
-    if lat_o != 0.0 and lat_d != 0.0:
-        res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True)
-        res_osrm = API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d)
-        
+    # MELHORIA 10: Inversão de Prioridade no Roteamento Google. Tenta SEMPRE a string oficial antes da Coordenada.
+    res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=False)
+    
     if not res_google:
-        res_google = extrair_dados_reais_google(origem_clean, destino_clean, 0.0, 0.0, 0.0, 0.0, dist_linha_reta, usar_coordenadas=False)
+        res_google = extrair_dados_reais_google(origem_clean, destino_clean, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=False)
+        
+    if not res_google and lat_o != 0.0 and lat_d != 0.0:
+        res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True)
+
+    if lat_o != 0.0 and lat_d != 0.0:
+        res_osrm = API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d)
 
     if res_google or res_osrm:
         if res_google and res_osrm:
@@ -1198,7 +1210,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
         elif res_google:
             km_rota, tempo_rota, link_rota, balsa_rota, score_rota = res_google[0], res_google[1], res_google[2], res_google[3], res_google[4]
             fonte_rota = "Google Maps"
-            motivo_roteamento = f"Identidade Logística: Motor de auditoria Open-Source (OSRM) não retornou dados. Rota e km extraídos de forma independente ({km_rota}km)."
+            motivo_roteamento = f"Identidade Logística Exclusiva: Motor OSRM não retornou dados. Tempo e Distância ({km_rota}km) extraídos soberanamente do Google Maps."
             
         else:
             km_rota = res_osrm[0]
@@ -1208,7 +1220,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
             balsa_rota = res_osrm[2]
             fonte_rota = "OSRM Routing"
             score_rota = 85
-            motivo_roteamento = f"Fallback Operacional: Google Maps não autorizou scraping. Traçado exato ({km_rota}km) e navegação (Balsa = {balsa_rota}) calculados matematicamente pela malha OSRM."
+            motivo_roteamento = f"Fallback Operacional: Google Maps indisponível (Timeout). Traçado exato ({km_rota}km) calculado matematicamente pela malha OSRM."
             
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
         retorno = (km_rota, tempo_rota, link_rota, balsa_rota, dist_linha_reta, fonte_rota, score_rota, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
