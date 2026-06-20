@@ -291,6 +291,8 @@ class MotorEnderecoCanônico:
         uf, municipio, distrito = contexto["uf"], contexto["municipio"], contexto["distrito"]
         nome_estado = IBGE_ESTADOS.get(uf, uf) if uf else ""
         
+        # ATUALIZAÇÃO 1.20: Hierarquia de Bairro vs Cidade.
+        # Remove redundâncias lexicais que confundem as APIs.
         componentes = [texto_fuzzy]
         if distrito and distrito not in texto_fuzzy: componentes.append(distrito)
         if municipio and municipio not in texto_fuzzy: componentes.append(municipio)
@@ -727,9 +729,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         
     candidatos_validos.sort(key=lambda x: x["score_final"], reverse=True)
     
-    # ATUALIZAÇÃO 1.20: A declaração cega que gerava NameError foi destruída. 
-    # O Vencedor agora é eleito via laço e se falhar no crivo da engenharia reversa, 
-    # aciona o Failsafe Bayesiano sem quebrar a sintaxe do Python.
     vencedor = None
     top3_candidatos = candidatos_validos[:3]
     for cand in top3_candidatos:
@@ -749,8 +748,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
             vencedor = cand
             break
 
-    # FAILSAFE DE AÇO: Se o IBGE Reverso rejeitar por instabilidade de borda de mapa, 
-    # honramos a Matemática Bayesiana do motor que o elegeu como melhor candidato, impedindo a rota vazia.
     if not vencedor and len(candidatos_validos) > 0:
         vencedor = candidatos_validos[0]
             
@@ -841,6 +838,17 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     ctx = semantica.resolver_contexto_administrativo(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
+    # ATUALIZAÇÃO 1.20: Interceptação Hierárquica Precoce
+    # Se o texto digitado for apenas o nome exato de um Município ou Distrito
+    # Ele FORÇA o uso do IBGE. Isso previne que o Google ou Photon achem lojas aleatórias ("RS Variedades") e percam o centróide real da cidade.
+    if tipo_entrada in ["MUNICIPIO", "DISTRITO"] and ctx.get("municipio") and ctx.get("uf"):
+        mun_nome, uf_nome = ctx["municipio"], ctx["uf"]
+        if mun_nome in IBGE_MUNICIPIOS:
+            for item in IBGE_MUNICIPIOS[mun_nome]:
+                if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0:
+                    endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                    return item["lat"], item["lon"], endereco_ibge, "ALTISSIMA", 100, "", mun_nome, "BASE_IBGE_LOCAL", ["Centroide Oficial do IBGE resolvido como prioridade máxima (Evitou Desvios de Lojas/POIs)."]
+
     cache_key = hashlib.md5(f"GEO_V7_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
@@ -893,16 +901,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                         cache_geo.set(cache_key, {"lat": lat_corrigida_arc, "lon": lon_corrigida_arc, "endereco": addr_c, "confianca": "ALTISSIMA", "score_num": 100, "distrito": bair, "municipio": loca, "fonte": "ViaCEP/ArcGIS"}, expire=2592000)
                         return res_final
 
-    if tipo_entrada == "MUNICIPIO" and ctx.get("municipio") and ctx.get("uf"):
-        mun_nome, uf_nome = ctx["municipio"], ctx["uf"]
-        if mun_nome in IBGE_MUNICIPIOS:
-            for item in IBGE_MUNICIPIOS[mun_nome]:
-                if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0 and item.get("lon", 0.0) != 0.0:
-                    endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
-                    res_ibge = (item["lat"], item["lon"], endereco_ibge, "ALTISSIMA", 100, "", mun_nome, "BASE_IBGE_LOCAL", ["Centroide IBGE Municipal Resolvido Offline."])
-                    cache_geo.set(cache_key, {"lat": res_ibge[0], "lon": res_ibge[1], "endereco": res_ibge[2], "confianca": res_ibge[3], "score_num": res_ibge[4], "distrito": res_ibge[5], "municipio": res_ibge[6], "fonte": res_ibge[7]}, expire=2592000)
-                    return res_ibge
-
     def disparar_apis_paralelas(tarefas):
         resultados = []
         for f in as_completed([EXECUTOR_APIS.submit(func, *args, **kwargs) for func, args, kwargs in tarefas]):
@@ -914,40 +912,14 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     elif tipo_entrada in ["ENDERECO_COMPLETO", "LOGRADOURO"]:
         candidatos_validos.extend(disparar_apis_paralelas([(API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_TomTom, (endereco_canonico,), {})]))
     elif tipo_entrada in ["BAIRRO", "MUNICIPIO", "DISTRITO"]:
-        candidatos_validos.extend(disparar_apis_paralelas([(API_Photon, (endereco_canonico,), {})]))
+        # Se as travas anteriores falharem, Photon está proibido de ser a API primária de Bairros para evitar Lojas/POIs aleatórios
+        candidatos_validos.extend(disparar_apis_paralelas([(API_Nominatim, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado})]))
     else:
         candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Photon, (endereco_canonico,), {}), (API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_TomTom, (endereco_canonico,), {})]))
             
     res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
-    
-    if not res_final:
-        res_nom = API_Nominatim(endereco_canonico, ctx=contexto_estruturado)
-        if not res_nom: res_nom = API_Photon(endereco_canonico)
-        if res_nom:
-            candidatos_validos.extend(res_nom)
-            res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
 
-    if not res_final and ctx.get("municipio") and ctx.get("uf"):
-        mun_nome = ctx["municipio"]
-        uf_nome = ctx["uf"]
-        dist_nome = ctx.get("distrito", "")
-        
-        query_fallback = f"{dist_nome}, {mun_nome}, {uf_nome}, BRASIL" if dist_nome else f"{mun_nome}, {uf_nome}, BRASIL"
-        res_fallback = API_Nominatim(query_fallback)
-        if not res_fallback: res_fallback = API_Photon(query_fallback)
-        
-        if res_fallback and len(res_fallback) > 0:
-            melhor = res_fallback[0]
-            valido, lat_c, lon_c = validar_coordenada_brasil(melhor["lat"], melhor["lon"])
-            if valido:
-                rua_crua = texto_norm.strip(" ,-")
-                if dist_nome and dist_nome not in rua_crua:
-                    endereco_ibge = f"{rua_crua}, {dist_nome}, {mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
-                else:
-                    endereco_ibge = f"{rua_crua}, {mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
-                    
-                res_final = (lat_c, lon_c, endereco_ibge, "BAIXA", 40, dist_nome, mun_nome, "CENTROIDE_FALLBACK", ["Endereço exato não geocodificado. Fallback ativado para Centróide (Distrito/Município) a fim de habilitar distância em Linha Reta."])
-
+    # A SALVAÇÃO DEFINITIVA (IBGE PURO). A Coordenada NUNCA zera.
     if not res_final and ctx.get("municipio") and ctx.get("uf"):
         mun_nome = ctx["municipio"]
         uf_nome = ctx["uf"]
@@ -965,6 +937,15 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
             res_final = (mun_ibge_match["lat"], mun_ibge_match["lon"], endereco_ibge, "BAIXA", 100, "", mun_nome, "BASE_IBGE_OFFLINE", ["Blindagem Ativada: Coordenada puxada 100% offline da base IBGE via Fuzzy Match."])
 
+    # ABSOLUTE LAST RESORT: Se não houver UF nem IBGE, pede socorro ao Google com texto livre
+    if not res_final:
+        res_google_urgente = API_Google_Geocoding_Scraper(texto_norm)
+        if res_google_urgente:
+            cand = res_google_urgente[0]
+            valido, lat_c, lon_c = validar_coordenada_brasil(cand["lat"], cand["lon"])
+            if valido:
+                res_final = (lat_c, lon_c, texto_norm, "BAIXA", 30, "", "", "GOOGLE_LAST_RESORT", ["Fallback Extremo: Coordenada resgatada diretamente do Google via texto livre."])
+
     if res_final:
         cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
         return res_final
@@ -978,8 +959,9 @@ def extrair_dados_reais_google(origem_text, destino_text, lat_o, lon_o, lat_d, l
     orig_str = f"{lat_o},{lon_o}" 
     dest_str = f"{lat_d},{lon_d}"
     
+    # ATUALIZAÇÃO 1.20: Link Oficial Paritário com a Interface Streamlit (Identidade Visual Absoluta)
     url_api = f"https://www.google.com/maps/dir/{orig_str}/{dest_str}/data=!4m2!4m1!3e0"
-    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={orig_str}&destination={dest_str}&travelmode=driving"
+    link_maps = f"https://www.google.com/maps/dir/...?q={orig_str}&daddr={dest_str}"
     
     cache_key = f"GOOG_V7_{orig_str}|{dest_str}"
     if cache_key in cache_google: return cache_google[cache_key]
@@ -1032,9 +1014,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     else:
         dist_linha_reta = 0.0
 
-    orig_param_fb = f"{lat_o},{lon_o}"
-    dest_param_fb = f"{lat_d},{lon_d}"
-    link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
+    link_fallback = f"https://www.google.com/maps/dir/...?q={lat_o},{lon_o}&daddr={lat_d},{lon_d}"
 
     if lat_o == 0.0 or lat_d == 0.0:
         km_terrestre = 0.0
@@ -1085,7 +1065,7 @@ def embrulhar_task_paralela(item):
             res = tuple(list(res) + ["N/A"] * (29 - len(res)))
         return par_id, res
     except Exception as e: 
-        msg_erro = f"FALHA INTERNA DE CÓDIGO PYTHON: {str(e)}"
+        msg_erro = f"FALHA INTERNA DE CÓDIGO: {str(e)}"
         fallback = (0.0, "0 min", "", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "", "", "N/A", str(orig), "BAIXA", 0, "", "", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], "Erro Crítico e Falha de Exceção Isolada.")
         return par_id, fallback
 
@@ -1191,6 +1171,7 @@ with tab_individual:
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
+                    # Identidade Visual Absoluta: Link universal sem conflitos de parâmetros.
                     url_iframe = f"https://maps.google.com/maps?saddr={lat_o},{lon_o}&daddr={lat_d},{lon_d}&output=embed"
                     components.iframe(url_iframe, height=470, scrolling=True)
                 else:
