@@ -351,7 +351,6 @@ class MotorEnderecoCanônico:
                         resultado.update({"uf": IBGE_DISTRITOS[chunk][0]["uf"], "municipio": IBGE_DISTRITOS[chunk][0]["municipio"], "distrito": chunk})
                         return resultado
 
-        # MELHORIA 12: Fuzzy Assistido Exclusivamente Intra-Estado (Evita que MT seja trocado por PE)
         if uf_explicita and not resultado["municipio"]:
             cidades_do_estado = [m for m, itens in IBGE_MUNICIPIOS.items() if any(i["uf"] == uf_explicita for i in itens)]
             if cidades_do_estado:
@@ -480,6 +479,13 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         m_a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
         return round(6371.0 * 2 * math.atan2(math.sqrt(m_a), math.sqrt(1 - m_a)), 2)
 
+def auditoria_geografica(km_rota, minutos_str, dist_linha_reta, lat_o, lon_o, lat_d, lon_d):
+    for lat, lon, loc in [(lat_o, lon_o, "Origem"), (lat_d, lon_d, "Destino")]:
+        if not (-75.0 <= lon <= -28.0) or not (-35.0 <= lat <= 6.0): return f"AUDITORIA: Coordenada {loc} fora do BR ({lat},{lon})"
+    if km_rota and dist_linha_reta and km_rota > 0 and dist_linha_reta > 0:
+        if km_rota < (dist_linha_reta * 0.9): return f"Violação Geodésica (Rota {km_rota}km < Linha Reta {dist_linha_reta}km)"
+    return None
+
 def cascata_postal_tripla(cep_limpo):
     if cep_limpo in cache_cep:
         d = cache_cep[cep_limpo]
@@ -518,7 +524,6 @@ def cascata_postal_tripla(cep_limpo):
     except Exception: pass
     return "", "", "", "", 0.0, 0.0
 
-# MELHORIA 12: Matriz de Validação Estrita de Estado
 def validar_consistencia_administrativa(candidato, uf_inf):
     est_api = unidecode(candidato.get('estado', '')).upper().strip()
     if uf_inf and est_api:
@@ -667,6 +672,30 @@ def API_Photon(query):
     registrar_telemetria("PHOTON", False, time.time() - start_t)
     return None
 
+def API_Overpass_POIs(texto_norm):
+    if len(texto_norm) < 10: return None
+    if texto_norm in cache_poi: return cache_poi[texto_norm]
+    start_t = time.time()
+    endpoints = ["https://overpass-api.de/api/interpreter", "https://lz4.overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
+    texto_seguro = re.escape(texto_norm)
+    query_osm = f'[out:json][timeout:3];(node["name"~"{texto_seguro}",i]["amenity"];way["name"~"{texto_seguro}",i]["amenity"];node["name"~"{texto_seguro}",i]["building"];way["name"~"{texto_seguro}",i]["building"];node["name"~"{texto_seguro}",i]["healthcare"];way["name"~"{texto_seguro}",i]["healthcare"];node["name"~"{texto_seguro}",i]["education"];way["name"~"{texto_seguro}",i]["education"];);out center;'
+    for url in endpoints:
+        try:
+            r = session.post(url, data={"data": query_osm}, timeout=4)
+            if r.status_code == 200:
+                elems = r.json().get("elements", [])
+                if elems:
+                    e = elems[0]
+                    lat, lon = e.get("lat", e.get("center", {}).get("lat", 0.0)), e.get("lon", e.get("center", {}).get("lon", 0.0))
+                    tags = e.get("tags", {})
+                    res_poi = {"lat": lat, "lon": lon, "fonte": "OVERPASS", "score_base": 40, "cidade": tags.get("addr:city", "").upper(), "estado": tags.get("addr:state", "").upper(), "bairro": tags.get("addr:suburb", "").upper(), "logradouro": tags.get("addr:street", "").upper(), "numero": str(tags.get("addr:housenumber", "")).upper(), "cep": tags.get("addr:postcode", "").replace("-", "")}
+                    cache_poi.set(texto_norm, [res_poi], expire=7776000)
+                    registrar_telemetria("OVERPASS", True, time.time() - start_t)
+                    return [res_poi]
+        except Exception: continue
+    registrar_telemetria("OVERPASS", False, time.time() - start_t)
+    return None
+
 def API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d):
     start_t = time.time()
     try:
@@ -713,7 +742,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
             
     if not candidatos_validos: return None
     
-    # MELHORIA 12: Exclusão Implacável de Resultados de APIs fora do Estado (UF) Requerido
     if uf_inf:
         candidatos_validos = [c for c in candidatos_validos if validar_consistencia_administrativa(c, uf_inf)]
     else:
@@ -900,17 +928,21 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     if xd["num"]: explicacoes_humanas.append("Assinatura de número predial reconhecida na porta do cliente.")
     if xd["fuzz"] >= 80.0: explicacoes_humanas.append(f"Similaridade léxica de logradouro em {xd['fuzz']}% de aprovação.")
 
+    # MELHORIA 13: Ajuste fino da penalidade municipal "Anti-Fantasma"
     match_logr = fuzz.token_set_ratio(texto_norm, m.get("logradouro", "").upper())
     match_bairro = fuzz.token_set_ratio(dist_inf, m.get("bairro", "").upper()) if dist_inf else 100
     match_cep = 100 if input_usuario.get("cep") and m.get("cep") and input_usuario["cep"] in m.get("cep", "").replace("-", "") else 0 if input_usuario.get("cep") else 100
     
-    if (match_logr * 0.5) + (match_bairro * 0.3) + (match_cep * 0.2) < 65.0:
+    if tipo_entrada in ["MUNICIPIO", "BAIRRO", "RURAL"]:
+        confianca = "ALTA"
+        score_limitado = max(score_limitado, 85)
+        explicacoes_humanas.append("Busca por localidade abrangente. Score reajustado para nível de cidade/bairro.")
+    elif (match_logr * 0.5) + (match_bairro * 0.3) + (match_cep * 0.2) < 65.0:
         confianca = "REVISAO_MANUAL"
-        explicacoes_humanas.append("⚠️ Alerta Anti-Fantasma: Integridade semântica final inadequada. Possível interpolação arbitrária.")
+        explicacoes_humanas.append("⚠️ Alerta Anti-Fantasma: Integridade semântica de logradouro inadequada.")
         score_limitado = min(score_limitado, 49)
     else:
-        if tipo_entrada in ["ENDERECO_COMPLETO", "CEP"] and not vencedor.get("logradouro"): confianca = "MUNICIPAL"
-        else: confianca = "ALTISSIMA" if score_limitado >= 85 else "ALTA" if score_limitado >= 75 else "MEDIA" if score_limitado >= 60 else "BAIXA"
+        confianca = "ALTISSIMA" if score_limitado >= 85 else "ALTA" if score_limitado >= 75 else "MEDIA" if score_limitado >= 60 else "BAIXA"
 
     rua_f = m["logradouro"] if m["logradouro"] else texto_norm
     endereco_f = ", ".join([c for c in [rua_f, m["bairro"], m["cidade"], m["estado"]] if c.strip()]) + ", BRASIL"
@@ -949,7 +981,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V15_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V16_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1027,7 +1059,6 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
             candidatos_validos.extend(res_nom)
             res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
 
-    # MELHORIA 12: Ultimate Fallback Estrito com Dados 100% Preenchidos em Caso de Falha de Nuvem
     if not res_final and ctx.get("municipio") and ctx.get("uf"):
         mun_nome = ctx["municipio"]
         uf_nome = ctx["uf"]
@@ -1087,7 +1118,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V15_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+    cache_key = f"GOOG_V16_{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
@@ -1095,6 +1126,8 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
     
     url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
+    # MELHORIA 13: Geração da URL Iframe correspondente aos parâmetros corretos usados.
+    link_embed = f"https://www.google.com/maps/embed/v1/directions?key=YOUR_API_KEY&origin={origem_param}&destination={destino_param}&mode=driving"
     
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
@@ -1137,7 +1170,7 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
                 envolve_balsa = "Não"
 
             score_google = 70 + (10 if km_puro > 0 else 0) + (10 if time_matches[0] else 0) + (10 if km_puro >= dist_linha_reta else 0)
-            res = (km_puro, time_matches[0], link_maps, envolve_balsa, score_google)
+            res = (km_puro, time_matches[0], link_maps, envolve_balsa, score_google, link_embed)
             cache_google.set(cache_key, res, expire=2592000); return res
     except Exception: pass
     return None
@@ -1149,7 +1182,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V15_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V16_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1167,6 +1200,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     orig_param_fb = requests.utils.quote(end_oficial_o) if end_oficial_o else f"{lat_o},{lon_o}"
     dest_param_fb = requests.utils.quote(end_oficial_d) if end_oficial_d else f"{lat_d},{lon_d}"
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
+    link_embed_fallback = f"https://www.google.com/maps/embed/v1/directions?key=YOUR_API_KEY&origin={orig_param_fb}&destination={dest_param_fb}&mode=driving"
 
     res_google = None
     res_osrm = None
@@ -1193,11 +1227,11 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
                 balsa_rota = res_google[3] if res_google[3] == "Sim" else res_osrm[2]
                 motivo_roteamento = f"Identidade Logística Suprema: Rota ({km_g}km) extraída com sucesso absoluto diretamente da nuvem oficial do Google Maps."
             
-            km_rota, tempo_rota, link_rota, score_rota = res_google[0], res_google[1], res_google[2], res_google[4]
+            km_rota, tempo_rota, link_rota, score_rota, link_embed = res_google[0], res_google[1], res_google[2], res_google[4], res_google[5]
             fonte_rota = "Google Maps"
             
         elif res_google:
-            km_rota, tempo_rota, link_rota, balsa_rota, score_rota = res_google[0], res_google[1], res_google[2], res_google[3], res_google[4]
+            km_rota, tempo_rota, link_rota, balsa_rota, score_rota, link_embed = res_google[0], res_google[1], res_google[2], res_google[3], res_google[4], res_google[5]
             fonte_rota = "Google Maps"
             motivo_roteamento = f"Identidade Logística Suprema: Rota ({km_rota}km) extraída com sucesso absoluto diretamente da nuvem oficial do Google Maps."
             
@@ -1206,13 +1240,15 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
             tempo_m = res_osrm[1]
             tempo_rota = f"{tempo_m} min" if tempo_m < 60 else f"{tempo_m // 60} h {tempo_m % 60} min"
             link_rota = link_fallback
+            link_embed = link_embed_fallback
             balsa_rota = res_osrm[2]
             fonte_rota = "OSRM Routing"
             score_rota = 85
             motivo_roteamento = f"Fallback Operacional: Google Maps indisponível (Timeout). Traçado exato ({km_rota}km) calculado matematicamente pela malha OSRM."
             
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-        retorno = (km_rota, tempo_rota, link_rota, balsa_rota, dist_linha_reta, fonte_rota, score_rota, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
+        # MELHORIA 13: Repasse de link_embed direto para o UI (30 items tuple)
+        retorno = (km_rota, tempo_rota, link_rota, balsa_rota, dist_linha_reta, fonte_rota, score_rota, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento, link_embed)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
         return retorno
 
@@ -1223,7 +1259,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
     motivo_fallback = "Alerta Crítico: Motores viários em Nuvem e Open-Source rejeitaram a rota (Timeout ou Coordenadas Inválidas). Projeção Geodésica Adaptativa acionada baseada na Linha Reta."
     
-    retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 50, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback)
+    retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 50, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback, link_embed_fallback)
     cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
     return retorno
 
@@ -1231,19 +1267,19 @@ def executar_pipeline_unificado(origem_cru, destino_cru):
     orig = str(origem_cru).strip() if pd.notna(origem_cru) else ""
     dest = str(destino_cru).strip() if pd.notna(destino_cru) else ""
     if orig.lower() in ['nan', 'none', 'null', ''] or dest.lower() in ['nan', 'none', 'null', '']:
-        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha na leitura da célula (Campo Vazio).")
+        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha na leitura da célula (Campo Vazio).", "N/A")
     return calcular_pipeline_logistico(orig, dest, perfil_rota="shortest")
 
 def embrulhar_task_paralela(item):
     par_id, orig, dest = item
     try: 
         res = executar_pipeline_unificado(orig, dest)
-        if res and isinstance(res, tuple) and len(res) < 29:
-            res = tuple(list(res) + ["N/A/Dado não armazenado"] * (29 - len(res)))
+        if res and isinstance(res, tuple) and len(res) < 30:
+            res = tuple(list(res) + ["N/A/Dado não armazenado"] * (30 - len(res)))
         return par_id, res
     except Exception as e: 
         msg_erro = f"FALHA INTERNA: {str(e)}"
-        fallback = (0.0, "0 min", "Link Indisponível", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], msg_erro)
+        fallback = (0.0, "0 min", "Link Indisponível", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], msg_erro, "N/A")
         return par_id, fallback
 
 # ==============================================================================
@@ -1411,19 +1447,9 @@ with tab_individual:
                         for just in res_ind[27]:
                             st.caption(f"- {just}")
 
-                lat_o, lon_o = res_ind[19], res_ind[20]
-                lat_d, lon_d = res_ind[21], res_ind[22]
-
-                if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    o_param = f"{lat_o},{lon_o}"
-                    d_param = f"{lat_d},{lon_d}"
-                else:
-                    o_param = requests.utils.quote(res_ind[12]) if res_ind[12] and "Não Mapeado" not in res_ind[12] else requests.utils.quote(orig_ind)
-                    d_param = requests.utils.quote(res_ind[18]) if res_ind[18] and "Não Mapeado" not in res_ind[18] else requests.utils.quote(dest_ind)
-
-                url_iframe = f"https://www.google.com/maps/embed/v1/directions?key=YOUR_API_KEY&origin={o_param}&destination={d_param}&mode=driving"
+                # MELHORIA 13: Renderização de Mapa unificada com a variável oficial do motor em nuvem
                 try:
-                    components.iframe(f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed", height=470, scrolling=True)
+                    components.iframe(res_ind[29], height=470, scrolling=True)
                 except Exception:
                     st.warning("Renderização de mapa localmente bloqueada pelas políticas de segurança do navegador.")
 
