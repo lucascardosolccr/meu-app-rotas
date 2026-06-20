@@ -45,11 +45,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-# ATUALIZAÇÃO 1.19: NUKE DE CACHE. Força a formatação do disco local para expurgar Tuplas Corrompidas
-if "cache_limpo_v19" not in st.session_state:
+if "cache_limpo_v20" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v19"] = True
+    st.session_state["cache_limpo_v20"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -727,7 +726,33 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         c1["xai_data"] = {"mun": bool(feat_mun), "uf": bool(feat_uf), "cep": bool(feat_cep), "num": bool(feat_numero), "fuzz": round(fuzz_rua * 100, 1), "apis": list(apis_concordantes)}
         
     candidatos_validos.sort(key=lambda x: x["score_final"], reverse=True)
-    vencedor = top3_candidatos[0] if top3_candidatos else candidatos_validos[0]
+    
+    # ATUALIZAÇÃO 1.20: A declaração cega que gerava NameError foi destruída. 
+    # O Vencedor agora é eleito via laço e se falhar no crivo da engenharia reversa, 
+    # aciona o Failsafe Bayesiano sem quebrar a sintaxe do Python.
+    vencedor = None
+    top3_candidatos = candidatos_validos[:3]
+    for cand in top3_candidatos:
+        m = executar_reverse_geocoding_multimotor(cand["lat"], cand["lon"])
+        estado_reverse = m.get("estado", "").upper().strip()
+        cidade_reverse = m.get("cidade", "").upper().strip()
+        
+        if uf_inf and estado_reverse:
+            if uf_inf != estado_reverse: continue 
+        if mun_inf and cidade_reverse:
+            match_cid = (mun_inf in cidade_reverse) or (cidade_reverse in mun_inf) or (fuzz.token_set_ratio(mun_inf, cidade_reverse) >= 85)
+            if not match_cid: continue
+        
+        end_reverse = ", ".join([c for c in [m.get("logradouro", ""), m.get("bairro", ""), m.get("cidade", ""), estado_reverse] if c.strip()])
+        similaridade = fuzz.token_set_ratio(texto_norm, end_reverse.upper())
+        if similaridade >= 55 or tipo_entrada in ["BAIRRO", "MUNICIPIO", "RURAL"]:
+            vencedor = cand
+            break
+
+    # FAILSAFE DE AÇO: Se o IBGE Reverso rejeitar por instabilidade de borda de mapa, 
+    # honramos a Matemática Bayesiana do motor que o elegeu como melhor candidato, impedindo a rota vazia.
+    if not vencedor and len(candidatos_validos) > 0:
+        vencedor = candidatos_validos[0]
             
     if not vencedor: return None
     
@@ -816,7 +841,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     ctx = semantica.resolver_contexto_administrativo(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    # ATUALIZAÇÃO 1.19: V7 Nuke. Força recálculo limpo ignorando históricos que geraram erro
     cache_key = hashlib.md5(f"GEO_V7_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
@@ -924,7 +948,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                     
                 res_final = (lat_c, lon_c, endereco_ibge, "BAIXA", 40, dist_nome, mun_nome, "CENTROIDE_FALLBACK", ["Endereço exato não geocodificado. Fallback ativado para Centróide (Distrito/Município) a fim de habilitar distância em Linha Reta."])
 
-    # A SALVAÇÃO DEFINITIVA (IBGE PURO). A Coordenada NUNCA zera.
     if not res_final and ctx.get("municipio") and ctx.get("uf"):
         mun_nome = ctx["municipio"]
         uf_nome = ctx["uf"]
@@ -942,31 +965,19 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
             res_final = (mun_ibge_match["lat"], mun_ibge_match["lon"], endereco_ibge, "BAIXA", 100, "", mun_nome, "BASE_IBGE_OFFLINE", ["Blindagem Ativada: Coordenada puxada 100% offline da base IBGE via Fuzzy Match."])
 
-    # ABSOLUTE LAST RESORT: Se não houver UF nem IBGE, pede socorro ao Google com texto livre
-    if not res_final:
-        res_google_urgente = API_Google_Geocoding_Scraper(texto_norm)
-        if res_google_urgente:
-            cand = res_google_urgente[0]
-            valido, lat_c, lon_c = validar_coordenada_brasil(cand["lat"], cand["lon"])
-            if valido:
-                res_final = (lat_c, lon_c, texto_norm, "BAIXA", 30, "", "", "GOOGLE_LAST_RESORT", ["Fallback Extremo: Coordenada resgatada diretamente do Google via texto livre."])
-
     if res_final:
         cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
         return res_final
         
-    # Somente se o Google, Nominatim, Photon, ArcGIS, TomTom E O IBGE LOCAL falharem simultaneamente 
     return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Falha Geográfica Absoluta por falta de candidatos e centróides."]
 
 # ==============================================================================
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_text, destino_text, lat_o, lon_o, lat_d, lon_d, dist_linha_reta):
-    # ATUALIZAÇÃO 1.19: URL Base Universal e Remoção do Bug do Iframe
     orig_str = f"{lat_o},{lon_o}" 
     dest_str = f"{lat_d},{lon_d}"
     
-    # Essa URL "dir/" garante o formato global que funciona em Iframe e Mobile perfeitamente
     url_api = f"https://www.google.com/maps/dir/{orig_str}/{dest_str}/data=!4m2!4m1!3e0"
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={orig_str}&destination={dest_str}&travelmode=driving"
     
@@ -987,9 +998,6 @@ def extrair_dados_reais_google(origem_text, destino_text, lat_o, lon_o, lat_d, l
         if match_km and match_tempo:
             km_puro = float(match_km.group(1).replace('.', '').replace(',', '.'))
             
-            # ATUALIZAÇÃO 1.19: Heurística Anti-Balsa. 
-            # O Scraper só confia na Balsa se a rota for direta (curta). Se o Google retornou a rota terrestre gigante (1.897km),
-            # o sistema não vai setar Balsa como Sim, porque 1.897 é maior que 2x a linha reta.
             balsa_patterns = [r'\"[^\"]*instruções de navegação[^\"]*balsa[^\"]*\"', r'\"[^\"]*utilizar balsa[^\"]*\"', r'\"[^\"]*ferry[^\"]*\"']
             envolve_balsa = "Sim" if any(re.search(p, texto_resposta.lower()) for p in balsa_patterns) else "Não"
             
@@ -1028,13 +1036,11 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     dest_param_fb = f"{lat_d},{lon_d}"
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
 
-    # Se a Coordenada estiver 0.0 (Extrema Falha Geográfica Nacional), o cálculo viário não entra.
     if lat_o == 0.0 or lat_d == 0.0:
         km_terrestre = 0.0
         tempo_geo_str = "0 min"
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
         motivo_fallback = "Falha crítica de geocodificação. O motor foi incapaz de resolver as coordenadas do endereço."
-        # Tupla perfeita de 29 índices garantida
         retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "N/A", 0, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback)
         return retorno
 
@@ -1049,7 +1055,6 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
             motivo_roteamento = f"Soberania Google: Rota oficial de {res_google[0]}km em {res_google[1]}. O algoritmo de contorno detectou rota 100% via Asfalto/Terra."
         
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-        # Tupla 29
         retorno = (*melhor_opcao, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
         return retorno
@@ -1059,7 +1064,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     minutos_est = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0 else 0
     tempo_geo_str = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
     tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-    motivo_fallback = "Provedor viário indisponível (Timeout de Rede). Trajeto matematicamente projetado por aproximação geodésica."
+    motivo_fallback = "Provedor viário indisponível (Timeout de Rede). Trajeto matematicamente projetado por aproximação geodésica baseada na Linha Reta Absoluta."
     
     retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback)
     cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
@@ -1080,7 +1085,7 @@ def embrulhar_task_paralela(item):
             res = tuple(list(res) + ["N/A"] * (29 - len(res)))
         return par_id, res
     except Exception as e: 
-        msg_erro = f"FALHA INTERNA DE CÓDIGO: {str(e)}"
+        msg_erro = f"FALHA INTERNA DE CÓDIGO PYTHON: {str(e)}"
         fallback = (0.0, "0 min", "", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "", "", "N/A", str(orig), "BAIXA", 0, "", "", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], "Erro Crítico e Falha de Exceção Isolada.")
         return par_id, fallback
 
@@ -1186,7 +1191,6 @@ with tab_individual:
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    # Iframe Universal Parametrizado: Usa a mesma sintaxe de Link Maps do Scraper
                     url_iframe = f"https://maps.google.com/maps?saddr={lat_o},{lon_o}&daddr={lat_d},{lon_d}&output=embed"
                     components.iframe(url_iframe, height=470, scrolling=True)
                 else:
@@ -1282,18 +1286,18 @@ with tab_processamento:
                     if res:
                         df.at[idx, 'Distancia'] = res[0]; df.at[idx, 'Tempo'] = res[1]
                         df.at[idx, 'Link da Rota'] = res[2]; df.at[idx, 'Balsas'] = res[3]
-                        df.at[idx, 'Linha Reta'] = res[4]; df.at[idx, 'Fonte da Rota'] = res[5]
-                        df.at[idx, 'Score da Rota'] = res[6]; df.at[idx, 'Confianca Origem'] = res[7]
-                        df.at[idx, 'Score Num Origem'] = res[8]; df.at[idx, 'Distrito Origem'] = res[9]
-                        df.at[idx, 'Municipio Origem'] = res[10]; df.at[idx, 'Fonte Geocoding Origem'] = res[11]
-                        df.at[idx, 'Endereco Oficial Origem'] = res[12]; df.at[idx, 'Confianca Destino'] = res[13]
-                        df.at[idx, 'Score Num Destino'] = res[14]; df.at[idx, 'Distrito Destino'] = res[15]
-                        df.at[idx, 'Municipio Destino'] = res[16]; df.at[idx, 'Fonte Geocoding Destino'] = res[17]
-                        df.at[idx, 'Endereco Oficial Destino'] = res[18]; df.at[idx, 'Lat Origem'] = res[19]
-                        df.at[idx, 'Lon Origem'] = res[20]; df.at[idx, 'Lat Destino'] = res[21]
-                        df.at[idx, 'Lon Destino'] = res[22]; df.at[idx, 'Tempo Geocoding (s)'] = res[23]
-                        df.at[idx, 'Tempo Roteamento (s)'] = res[24]; df.at[idx, 'Tempo Total (s)'] = res[25]
-                        df.at[idx, 'Motivo Roteamento'] = res[28]
+                        df.at[idx, 'Motivo Roteamento'] = res[28]; df.at[idx, 'Linha Reta'] = res[4]
+                        df.at[idx, 'Fonte da Rota'] = res[5]; df.at[idx, 'Score da Rota'] = res[6]
+                        df.at[idx, 'Confianca Origem'] = res[7]; df.at[idx, 'Score Num Origem'] = res[8]
+                        df.at[idx, 'Distrito Origem'] = res[9]; df.at[idx, 'Municipio Origem'] = res[10]
+                        df.at[idx, 'Fonte Geocoding Origem'] = res[11]; df.at[idx, 'Endereco Oficial Origem'] = res[12]
+                        df.at[idx, 'Confianca Destino'] = res[13]; df.at[idx, 'Score Num Destino'] = res[14]
+                        df.at[idx, 'Distrito Destino'] = res[15]; df.at[idx, 'Municipio Destino'] = res[16]
+                        df.at[idx, 'Fonte Geocoding Destino'] = res[17]; df.at[idx, 'Endereco Oficial Destino'] = res[18]
+                        df.at[idx, 'Lat Origem'] = res[19]; df.at[idx, 'Lon Origem'] = res[20]
+                        df.at[idx, 'Lat Destino'] = res[21]; df.at[idx, 'Lon Destino'] = res[22]
+                        df.at[idx, 'Tempo Geocoding (s)'] = res[23]; df.at[idx, 'Tempo Roteamento (s)'] = res[24]
+                        df.at[idx, 'Tempo Total (s)'] = res[25]
                         
                         try:
                             score_o, score_d, score_r = float(res[8]), float(res[14]), float(res[6])
