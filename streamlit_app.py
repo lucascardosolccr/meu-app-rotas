@@ -361,14 +361,19 @@ class MotorEnderecoCanônico:
         
         nome_estado = IBGE_ESTADOS.get(uf, uf) if uf else ""
         
-        componentes = [texto_fuzzy]
-        if distrito and distrito not in texto_fuzzy: componentes.append(distrito)
-        if municipio and municipio not in texto_fuzzy: componentes.append(municipio)
-        if nome_estado and nome_estado not in texto_fuzzy: componentes.append(nome_estado)
-        if "BRASIL" not in texto_fuzzy: componentes.append("BRASIL")
+        # MELHORIA 06: Remoção de duplicidade na string enviada aos motores (Evitando Rate Limits)
+        componentes = []
+        if parsed.get("logradouro") or texto_fuzzy: componentes.append(parsed.get("logradouro") if parsed.get("logradouro") else texto_fuzzy)
+        if distrito: componentes.append(distrito)
+        if municipio: componentes.append(municipio)
+        if nome_estado: componentes.append(nome_estado)
+        componentes.append("BRASIL")
         
-        endereco_canonico = ", ".join(componentes)
-        endereco_canonico = re.sub(r',\s*,', ',', endereco_canonico).strip()
+        clean_comp = []
+        for c in componentes:
+            if c and c not in clean_comp: clean_comp.append(c)
+        
+        endereco_canonico = ", ".join(clean_comp)
         
         return endereco_canonico, tipo, "", 0.0, 0.0
 
@@ -536,6 +541,7 @@ def validar_consistencia_municipal(candidato, mun_inf):
 def API_Google_Geocoding_Scraper(query):
     start_t = time.time()
     try:
+        # MELHORIA 06: Abandono de proxy e uso de URL nativa oficial
         url = f"https://www.google.com/maps/search/{requests.utils.quote(query)}"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         r = session.get(url, headers=headers, timeout=5, allow_redirects=True)
@@ -686,7 +692,6 @@ def API_Overpass_POIs(texto_norm):
     registrar_telemetria("OVERPASS", False, time.time() - start_t)
     return None
 
-# MELHORIA 05: MOTOR OSRM DE ALTA PRECISÃO E ANTI-FALHAS GEODÉSICAS
 def API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d):
     start_t = time.time()
     try:
@@ -1109,7 +1114,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             if not dist or dist.strip() == "":
                 dist = rev.get("bairro", "")
 
-    if not end_f or end_f.strip() == "": end_f = f"Coordenada Resolvida Analiticamente: {lat}, {lon}"
+    if not end_f or end_f.strip() == "": end_f = f"Localidade não mapeável: {localidade}"
     if not mun or mun.strip() == "": mun = "Município Não Mapeado"
     if not dist or dist.strip() == "": dist = "Distrito Não Mapeado"
     if not conf or conf.strip() == "": conf = "BAIXA"
@@ -1123,37 +1128,43 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V5_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+    cache_key = f"GOOG_V6_{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
-    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     
+    # MELHORIA 06: Remoção do dummy proxy. Abordagem HTTP Nativa Google Maps
+    url_api = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/data=!4m2!4m1!3e0"
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     try:
-        resposta = session.get(url_api, headers=headers, timeout=8)
+        # Aumentado o timeout para absorver o load da request direta em nuvem
+        resposta = session.get(url_api, headers=headers, timeout=12)
         texto_resposta = resposta.text
-        if len(texto_resposta) < 500 or "directions" not in texto_resposta.lower(): return None
-        with open(f"logs_google/{hash(cache_key)}.txt", "w", encoding="utf-8") as f: f.write(texto_resposta)
-            
+        if len(texto_resposta) < 500: return None
+        
+        # Regex flexível para capturar o km dentro do APP_INITIALIZATION_STATE ou HTML minificado
         match_km = re.findall(r'\"(\d+[\.,]?\d*)\s*km\"', texto_resposta)
+        if not match_km: match_km = re.findall(r'(\d+[\.,]?\d*)\s*km', texto_resposta)
+        
         match_tempo = re.findall(r'\"(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)\"', texto_resposta)
+        if not match_tempo: match_tempo = re.findall(r'(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)', texto_resposta)
         
         if match_km and match_tempo:
-            km_str = match_km[0]
-            if ',' in km_str and '.' in km_str: km_str = km_str.replace(',', '')
-            elif '.' in km_str and km_str.count('.') == 1 and len(km_str.split('.')[1]) == 3: km_str = km_str.replace('.', '')
-            else: km_str = km_str.replace(',', '.')
+            km_str = match_km[0].replace(',', '.') if ',' in match_km[0] and match_km[0].count('.') == 0 else match_km[0]
+            km_str = km_str.replace('.', '') if km_str.count('.') > 1 else km_str
+            try:
+                km_puro = float(km_str)
+            except ValueError:
+                km_puro = 0.0
             
-            km_puro = float(km_str)
-            
-            balsa_patterns = [r'\"[^\"]*instruções de navegação[^\"]*balsa[^\"]*\"', r'\"[^\"]*utilizar balsa[^\"]*\"', r'\"[^\"]*ferry[^\"]*\"']
+            # MELHORIA 06: Heurística literal anti-falso positivo SVG
+            balsa_patterns = [r'esta rota inclui uma balsa', r'pegar a balsa', r'ferry route', r'travessia de balsa']
             envolve_balsa = "Sim" if any(re.search(p, texto_resposta.lower()) for p in balsa_patterns) else "Não"
             
-            if dist_linha_reta > 0 and km_puro > (dist_linha_reta * 2.0):
+            if dist_linha_reta > 0 and km_puro > (dist_linha_reta * 2.5):
                 envolve_balsa = "Não"
 
             score_google = 70 + (10 if km_puro > 0 else 0) + (10 if match_tempo[0] else 0) + (10 if km_puro >= dist_linha_reta else 0)
@@ -1165,12 +1176,11 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
 def obter_fator_desvio_rodoviario(linha_reta):
     return 1.45 if linha_reta < 5.0 else 1.35 if linha_reta < 20.0 else 1.25 if linha_reta < 100.0 else 1.18
 
-# MELHORIA 05: NOVA ARQUITETURA DE ROTEAMENTO (REDUNDÂNCIA GOOGLE + OSRM)
 def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V5_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V6_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1192,22 +1202,35 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     res_google = None
     res_osrm = None
     
+    # MELHORIA 06: Lógica Blindada - Tenta Coordenada -> Se falhar, Tenta String Direta
     if lat_o != 0.0 and lat_d != 0.0:
         res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True)
-        if not res_google:
-            res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=False)
-            
         res_osrm = API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d)
+        
+    if not res_google:
+        # Recuperação Crítica: Injeção de string pura (Salva o MT -> GO mesmo se geocoding local de Lat/Lon for 0.0)
+        res_google = extrair_dados_reais_google(origem_clean, destino_clean, 0.0, 0.0, 0.0, 0.0, dist_linha_reta, usar_coordenadas=False)
 
     if res_google or res_osrm:
-        if res_google:
-            km_rota = res_google[0]
-            tempo_rota = res_google[1]
-            link_rota = res_google[2]
-            balsa_rota = res_osrm[2] if res_osrm else res_google[3]
+        if res_google and res_osrm:
+            km_g = res_google[0]
+            km_o = res_osrm[0]
+            # Validação anti-falha de malha (OSM frequentemente ignora a balsa do Araguaia e gera desvios de 1000km)
+            if km_o > km_g * 1.5:
+                balsa_rota = res_google[3]
+                motivo_roteamento = f"Identidade Logística (Google Maps). OSRM detectou desvio severo ({km_o}km vs {km_g}km), possivelmente por ausência de balsa na malha OSM. Rota e status de balsa ({balsa_rota}) mantidos via nuvem oficial."
+            else:
+                balsa_rota = res_osrm[2]
+                motivo_roteamento = f"Identidade Logística (Google Maps). Cruzamento fluvial ({balsa_rota}) auditado e consolidado via precisão geométrica do motor de manobras OSRM."
+            
+            km_rota, tempo_rota, link_rota, score_rota = res_google[0], res_google[1], res_google[2], res_google[4]
+            fonte_rota = "Google Maps + OSRM"
+            
+        elif res_google:
+            km_rota, tempo_rota, link_rota, balsa_rota, score_rota = res_google[0], res_google[1], res_google[2], res_google[3], res_google[4]
             fonte_rota = "Google Maps"
-            score_rota = res_google[4]
-            motivo_roteamento = f"Identidade Logística: Distância e tempo extraídos do provedor primário. Validação geográfica de travessia fluvial (Balsa = {balsa_rota}) auditada e garantida {'pela API estruturada OSRM.' if res_osrm else 'pela heurística textual nativa.'}"
+            motivo_roteamento = f"Identidade Logística: Motor secundário inativo. Rota extraída diretamente ({km_rota}km). Status de balsa ({balsa_rota}) capturado via heurística textual."
+            
         else:
             km_rota = res_osrm[0]
             tempo_m = res_osrm[1]
@@ -1216,7 +1239,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
             balsa_rota = res_osrm[2]
             fonte_rota = "OSRM Routing"
             score_rota = 85
-            motivo_roteamento = f"Fallback Geográfico Oficial: Provedor primário falhou devido à complexidade fluvial. Rota {km_rota}km, tempo oficial e detecção de balsa (Balsa = {balsa_rota}) traçados e confirmados via motor OSRM."
+            motivo_roteamento = f"Fallback Geográfico Oficial: Provedor em nuvem falhou. Traçado exato ({km_rota}km) e navegação (Balsa = {balsa_rota}) calculados matematicamente pela malha OSRM."
             
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
         retorno = (km_rota, tempo_rota, link_rota, balsa_rota, dist_linha_reta, fonte_rota, score_rota, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
@@ -1228,9 +1251,9 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     minutos_est = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0 else 0
     tempo_geo_str = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
     tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-    motivo_fallback = "Provedores viários e open-source indisponíveis (Timeout). Trajeto geodésico projetado matematicamente com adaptação rodoviária baseada na malha de reta."
+    motivo_fallback = "Alerta Crítico: Motores viários em Nuvem e Open-Source rejeitaram a rota (Timeout ou Coordenadas Inválidas). Projeção Geodésica Adaptativa acionada baseada na Linha Reta."
     
-    retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback)
+    retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 50, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback)
     cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
     return retorno
 
@@ -1324,7 +1347,7 @@ with st.sidebar:
     with st.expander("7. Cálculo de Rotas Viárias e Balsas (Google + OSRM)"):
         st.write("""
         **A Rota Bimodal:** O sistema extrai a distância e o tempo primariamente do Google Maps para que a planilha corresponda visualmente ao aplicativo do motorista.
-        **O Filtro OSRM (Auditoria de Rios):** Como o Google retorna muito falso-positivo para Balsa devido à estrutura de página variável, o sistema agora chama uma API estruturada oficial aberta (OSRM - Open Source Routing Machine). A Balsa é marcada *apenas* se o OSRM garantir matematicamente nos pacotes de manobra (`steps.maneuver.type = ferry`) que a travessia existe. Se o Google travar em rios como no Araguaia (MT-GO), o OSRM assume e exporta os KMs corretos.
+        **O Filtro OSRM (Auditoria de Rios):** Como o Google retorna muito falso-positivo para Balsa devido à estrutura de página variável, o sistema agora chama uma API estruturada oficial aberta (OSRM - Open Source Routing Machine). A Balsa é marcada *apenas* se o OSRM garantir matematicamente nos pacotes de manobra (`steps.maneuver.type = ferry`) que a travessia existe. Se o Google travar em rios como no Araguaia (MT-GO), o OSRM assume e exporta os KMs corretos. E vice-versa.
         """)
 
     with st.expander("8. Auditoria Logística Total"):
@@ -1399,20 +1422,19 @@ with tab_individual:
                 lat_o, lon_o = res_ind[19], res_ind[20]
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
+                # MELHORIA 06: Nova URL de renderização nativa baseada em Strings ou Coords
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    link_externo = res_ind[2]
-                    match = re.search(r'maps\.google\.com/2([^&]+)&destination=([^&]+)', link_externo)
-                    if match:
-                        o_param = match.group(1)
-                        d_param = match.group(2)
-                    else:
-                        o_param = requests.utils.quote(res_ind[12]) if res_ind[12] else requests.utils.quote(orig_ind)
-                        d_param = requests.utils.quote(res_ind[18]) if res_ind[18] else requests.utils.quote(dest_ind)
-
-                    url_iframe = f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed"
-                    components.iframe(url_iframe, height=470, scrolling=True)
+                    o_param = f"{lat_o},{lon_o}"
+                    d_param = f"{lat_d},{lon_d}"
                 else:
-                    st.warning("Renderização de mapa suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
+                    o_param = requests.utils.quote(res_ind[12]) if res_ind[12] and "Não Mapeado" not in res_ind[12] else requests.utils.quote(orig_ind)
+                    d_param = requests.utils.quote(res_ind[18]) if res_ind[18] and "Não Mapeado" not in res_ind[18] else requests.utils.quote(dest_ind)
+
+                url_iframe = f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed"
+                try:
+                    components.iframe(url_iframe, height=470, scrolling=True)
+                except Exception:
+                    st.warning("Renderização de mapa localmente bloqueada pelas políticas de segurança do navegador.")
 
                 st.info(f"**Origem fixada por:** {res_ind[11]} | **Destino fixada por:** {res_ind[17]} | **Motor da Rota:** {res_ind[5]}")
                 st.markdown(f"[🔗 Abrir Rota Completa no Aplicativo do Google Maps]({res_ind[2]})")
@@ -1719,7 +1741,6 @@ with tab_analytics:
         col_p3.metric("Tempo Global Total / Rota", f"{round(df_filtrado['Tempo Total (s)'].mean(), 2)} s")
         
         health_data = []
-        # MELHORIA 05: Inserção do OSRM no Monitor de APIs da Aba de Análises
         for api in ["GOOGLE_MAPS", "ARCGIS", "TOMTOM", "NOMINATIM", "PHOTON", "OVERPASS", "OSRM"]:
             dados = cache_api_health.get(api, {"hits": 0, "calls": 0, "falhas": 0, "tempo_total": 0.0})
             t_med = f"{round((dados['tempo_total'] / max(1, dados['calls'])) * 1000)} ms" if dados['calls'] > 0 else "N/A"
