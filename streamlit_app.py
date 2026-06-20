@@ -361,7 +361,6 @@ class MotorEnderecoCanônico:
         
         nome_estado = IBGE_ESTADOS.get(uf, uf) if uf else ""
         
-        # MELHORIA 06: Remoção de duplicidade na string enviada aos motores (Evitando Rate Limits)
         componentes = []
         if parsed.get("logradouro") or texto_fuzzy: componentes.append(parsed.get("logradouro") if parsed.get("logradouro") else texto_fuzzy)
         if distrito: componentes.append(distrito)
@@ -541,9 +540,12 @@ def validar_consistencia_municipal(candidato, mun_inf):
 def API_Google_Geocoding_Scraper(query):
     start_t = time.time()
     try:
-        # MELHORIA 06: Abandono de proxy e uso de URL nativa oficial
+        # MELHORIA 07: URL Nativa do Google Search sem proxy fantasma
         url = f"https://www.google.com/maps/search/{requests.utils.quote(query)}"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "pt-BR,pt;q=0.9"
+        }
         r = session.get(url, headers=headers, timeout=5, allow_redirects=True)
         match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.url)
         if not match: match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.text)
@@ -1128,47 +1130,59 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V6_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+    # MELHORIA 07: Atualização do hash para forçar cache limpo nesta nova versão da URL
+    cache_key = f"GOOG_V7_{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
     
-    # MELHORIA 06: Remoção do dummy proxy. Abordagem HTTP Nativa Google Maps
+    # MELHORIA 07: URL nativa do Google sem uso de proxy defeituoso
     url_api = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/data=!4m2!4m1!3e0"
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "pt-BR,pt;q=0.9"
+    }
     
     try:
-        # Aumentado o timeout para absorver o load da request direta em nuvem
         resposta = session.get(url_api, headers=headers, timeout=12)
         texto_resposta = resposta.text
         if len(texto_resposta) < 500: return None
         
-        # Regex flexível para capturar o km dentro do APP_INITIALIZATION_STATE ou HTML minificado
-        match_km = re.findall(r'\"(\d+[\.,]?\d*)\s*km\"', texto_resposta)
-        if not match_km: match_km = re.findall(r'(\d+[\.,]?\d*)\s*km', texto_resposta)
+        # MELHORIA 07: Regex altamente resiliente para capturar o km dentro do State do Google Maps (mesmo com formato brasileiro de milhar)
+        # Exemplo: null,null,"405 km" ou null,null,"1.234 km"
+        dist_matches = re.findall(r'\"(\d{1,3}(?:\.\d{3})*(?:,\d+)?)\s*km\"', texto_resposta)
+        if not dist_matches: dist_matches = re.findall(r'(\d{1,3}(?:\.\d{3})*(?:,\d+)?)\s*km', texto_resposta)
         
-        match_tempo = re.findall(r'\"(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)\"', texto_resposta)
-        if not match_tempo: match_tempo = re.findall(r'(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)', texto_resposta)
+        time_matches = re.findall(r'\"(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)\"', texto_resposta)
+        if not time_matches: time_matches = re.findall(r'(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)', texto_resposta)
         
-        if match_km and match_tempo:
-            km_str = match_km[0].replace(',', '.') if ',' in match_km[0] and match_km[0].count('.') == 0 else match_km[0]
-            km_str = km_str.replace('.', '') if km_str.count('.') > 1 else km_str
+        if dist_matches and time_matches:
+            km_str = dist_matches[0]
+            if km_str.count('.') == 1 and ',' not in km_str:
+                # Trata "1.234" (milhar brasileiro) vs "1.5" (decimal)
+                if len(km_str.split('.')[1]) == 3: km_str = km_str.replace('.', '')
+                else: km_str = km_str.replace('.', '.')
+            elif ',' in km_str:
+                km_str = km_str.replace('.', '').replace(',', '.')
+            else:
+                km_str = km_str.replace('.', '')
+                
             try:
                 km_puro = float(km_str)
             except ValueError:
                 km_puro = 0.0
             
-            # MELHORIA 06: Heurística literal anti-falso positivo SVG
             balsa_patterns = [r'esta rota inclui uma balsa', r'pegar a balsa', r'ferry route', r'travessia de balsa']
             envolve_balsa = "Sim" if any(re.search(p, texto_resposta.lower()) for p in balsa_patterns) else "Não"
             
             if dist_linha_reta > 0 and km_puro > (dist_linha_reta * 2.5):
                 envolve_balsa = "Não"
 
-            score_google = 70 + (10 if km_puro > 0 else 0) + (10 if match_tempo[0] else 0) + (10 if km_puro >= dist_linha_reta else 0)
-            res = (km_puro, match_tempo[0], link_maps, envolve_balsa, score_google)
+            score_google = 70 + (10 if km_puro > 0 else 0) + (10 if time_matches[0] else 0) + (10 if km_puro >= dist_linha_reta else 0)
+            res = (km_puro, time_matches[0], link_maps, envolve_balsa, score_google)
             cache_google.set(cache_key, res, expire=2592000); return res
     except Exception: pass
     return None
@@ -1180,7 +1194,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V6_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V7_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1202,34 +1216,32 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     res_google = None
     res_osrm = None
     
-    # MELHORIA 06: Lógica Blindada - Tenta Coordenada -> Se falhar, Tenta String Direta
     if lat_o != 0.0 and lat_d != 0.0:
         res_google = extrair_dados_reais_google(end_oficial_o, end_oficial_d, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True)
         res_osrm = API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d)
         
     if not res_google:
-        # Recuperação Crítica: Injeção de string pura (Salva o MT -> GO mesmo se geocoding local de Lat/Lon for 0.0)
         res_google = extrair_dados_reais_google(origem_clean, destino_clean, 0.0, 0.0, 0.0, 0.0, dist_linha_reta, usar_coordenadas=False)
 
     if res_google or res_osrm:
         if res_google and res_osrm:
             km_g = res_google[0]
             km_o = res_osrm[0]
-            # Validação anti-falha de malha (OSM frequentemente ignora a balsa do Araguaia e gera desvios de 1000km)
-            if km_o > km_g * 1.5:
+            # MELHORIA 07: Prioridade Total Google Maps. Se a discrepância for grande, OSRM perde a vez pois errou feio o traçado (ex: balsa não mapeada)
+            if km_o > km_g * 1.3:
                 balsa_rota = res_google[3]
-                motivo_roteamento = f"Identidade Logística (Google Maps). OSRM detectou desvio severo ({km_o}km vs {km_g}km), possivelmente por ausência de balsa na malha OSM. Rota e status de balsa ({balsa_rota}) mantidos via nuvem oficial."
+                motivo_roteamento = f"Identidade Logística Google Maps ({km_g}km). OSRM detectou desvio severo ou timeout no traçado alternativo ({km_o}km). Traçado primário validado e imposto pelo Google."
             else:
-                balsa_rota = res_osrm[2]
-                motivo_roteamento = f"Identidade Logística (Google Maps). Cruzamento fluvial ({balsa_rota}) auditado e consolidado via precisão geométrica do motor de manobras OSRM."
+                balsa_rota = res_google[3] if res_google[3] == "Sim" else res_osrm[2]
+                motivo_roteamento = f"Identidade Logística Google Maps ({km_g}km). Traçado auditado com sucesso pela malha OSRM (margem de erro tolerada)."
             
             km_rota, tempo_rota, link_rota, score_rota = res_google[0], res_google[1], res_google[2], res_google[4]
-            fonte_rota = "Google Maps + OSRM"
+            fonte_rota = "Google Maps"
             
         elif res_google:
             km_rota, tempo_rota, link_rota, balsa_rota, score_rota = res_google[0], res_google[1], res_google[2], res_google[3], res_google[4]
             fonte_rota = "Google Maps"
-            motivo_roteamento = f"Identidade Logística: Motor secundário inativo. Rota extraída diretamente ({km_rota}km). Status de balsa ({balsa_rota}) capturado via heurística textual."
+            motivo_roteamento = f"Identidade Logística: Motor de auditoria Open-Source (OSRM) não retornou dados. Rota e km extraídos de forma independente ({km_rota}km)."
             
         else:
             km_rota = res_osrm[0]
@@ -1239,7 +1251,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
             balsa_rota = res_osrm[2]
             fonte_rota = "OSRM Routing"
             score_rota = 85
-            motivo_roteamento = f"Fallback Geográfico Oficial: Provedor em nuvem falhou. Traçado exato ({km_rota}km) e navegação (Balsa = {balsa_rota}) calculados matematicamente pela malha OSRM."
+            motivo_roteamento = f"Fallback Operacional: Google Maps não autorizou scraping. Traçado exato ({km_rota}km) e navegação (Balsa = {balsa_rota}) calculados matematicamente pela malha OSRM."
             
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
         retorno = (km_rota, tempo_rota, link_rota, balsa_rota, dist_linha_reta, fonte_rota, score_rota, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento)
@@ -1419,10 +1431,32 @@ with tab_individual:
                 
                 st.info(f"🧠 **Estratégia de Roteamento (XAI):** {res_ind[28]}")
                 
+                # MELHORIA 07: Bloco expansivo de Auditoria Detalhada Single-Shot
+                with st.expander("🕵️ Auditoria Detalhada da Geocodificação e Consenso", expanded=False):
+                    col_aud1, col_aud2 = st.columns(2)
+                    with col_aud1:
+                        st.markdown("**🏁 Origem (Ponto A)**")
+                        st.write(f"**Endereço Oficial:** {res_ind[12]}")
+                        st.write(f"**Coordenadas:** {res_ind[19]}, {res_ind[20]}")
+                        st.write(f"**Motor Vencedor:** {res_ind[11]}")
+                        st.write(f"**Confiança & Score:** {res_ind[7]} ({res_ind[8]}/100)")
+                        st.write(f"**Justificativa Espacial:**")
+                        for just in res_ind[26]:
+                            st.caption(f"- {just}")
+                    with col_aud2:
+                        st.markdown("**🎯 Destino (Ponto B)**")
+                        st.write(f"**Endereço Oficial:** {res_ind[18]}")
+                        st.write(f"**Coordenadas:** {res_ind[21]}, {res_ind[22]}")
+                        st.write(f"**Motor Vencedor:** {res_ind[17]}")
+                        st.write(f"**Confiança & Score:** {res_ind[13]} ({res_ind[14]}/100)")
+                        st.write(f"**Justificativa Espacial:**")
+                        for just in res_ind[27]:
+                            st.caption(f"- {just}")
+
                 lat_o, lon_o = res_ind[19], res_ind[20]
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
-                # MELHORIA 06: Nova URL de renderização nativa baseada em Strings ou Coords
+                # MELHORIA 07: URL nativa de Embed (Maps iFrame)
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
                     o_param = f"{lat_o},{lon_o}"
                     d_param = f"{lat_d},{lon_d}"
@@ -1436,7 +1470,6 @@ with tab_individual:
                 except Exception:
                     st.warning("Renderização de mapa localmente bloqueada pelas políticas de segurança do navegador.")
 
-                st.info(f"**Origem fixada por:** {res_ind[11]} | **Destino fixada por:** {res_ind[17]} | **Motor da Rota:** {res_ind[5]}")
                 st.markdown(f"[🔗 Abrir Rota Completa no Aplicativo do Google Maps]({res_ind[2]})")
             else:
                 st.error("Falha na validação de consistência geodésica unificada.")
