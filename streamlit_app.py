@@ -928,11 +928,11 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     if xd["num"]: explicacoes_humanas.append("Assinatura de número predial reconhecida na porta do cliente.")
     if xd["fuzz"] >= 80.0: explicacoes_humanas.append(f"Similaridade léxica de logradouro em {xd['fuzz']}% de aprovação.")
 
-    # MELHORIA 13: Ajuste fino da penalidade municipal "Anti-Fantasma"
     match_logr = fuzz.token_set_ratio(texto_norm, m.get("logradouro", "").upper())
     match_bairro = fuzz.token_set_ratio(dist_inf, m.get("bairro", "").upper()) if dist_inf else 100
     match_cep = 100 if input_usuario.get("cep") and m.get("cep") and input_usuario["cep"] in m.get("cep", "").replace("-", "") else 0 if input_usuario.get("cep") else 100
     
+    # MELHORIA 13: Desativação do Falso Alarme para Buscas Municipais Exclusivas.
     if tipo_entrada in ["MUNICIPIO", "BAIRRO", "RURAL"]:
         confianca = "ALTA"
         score_limitado = max(score_limitado, 85)
@@ -1118,7 +1118,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V16_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+    cache_key = f"GOOG_V17_{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
@@ -1126,8 +1126,9 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
     
     url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
-    # MELHORIA 13: Geração da URL Iframe correspondente aos parâmetros corretos usados.
-    link_embed = f"https://www.google.com/maps/embed/v1/directions?key=YOUR_API_KEY&origin={origem_param}&destination={destino_param}&mode=driving"
+    
+    # MELHORIA 14: Restauração da URL Embed oficial que não requer Chave API do Google (maps?saddr...)
+    link_embed = f"https://maps.google.com/maps?saddr={origem_param}&daddr={destino_param}&output=embed"
     
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
@@ -1182,7 +1183,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V16_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V17_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1200,7 +1201,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     orig_param_fb = requests.utils.quote(end_oficial_o) if end_oficial_o else f"{lat_o},{lon_o}"
     dest_param_fb = requests.utils.quote(end_oficial_d) if end_oficial_d else f"{lat_d},{lon_d}"
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
-    link_embed_fallback = f"https://www.google.com/maps/embed/v1/directions?key=YOUR_API_KEY&origin={orig_param_fb}&destination={dest_param_fb}&mode=driving"
+    link_embed_fallback = f"https://maps.google.com/maps?saddr={orig_param_fb}&daddr={dest_param_fb}&output=embed"
 
     res_google = None
     res_osrm = None
@@ -1247,7 +1248,6 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
             motivo_roteamento = f"Fallback Operacional: Google Maps indisponível (Timeout). Traçado exato ({km_rota}km) calculado matematicamente pela malha OSRM."
             
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-        # MELHORIA 13: Repasse de link_embed direto para o UI (30 items tuple)
         retorno = (km_rota, tempo_rota, link_rota, balsa_rota, dist_linha_reta, fonte_rota, score_rota, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento, link_embed)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
         return retorno
@@ -1447,9 +1447,10 @@ with tab_individual:
                         for just in res_ind[27]:
                             st.caption(f"- {just}")
 
-                # MELHORIA 13: Renderização de Mapa unificada com a variável oficial do motor em nuvem
+                # MELHORIA 14: URL Classic Map Embed Unificada e Ilimitada
+                url_iframe = res_ind[29]
                 try:
-                    components.iframe(res_ind[29], height=470, scrolling=True)
+                    components.iframe(url_iframe, height=470, scrolling=True)
                 except Exception:
                     st.warning("Renderização de mapa localmente bloqueada pelas políticas de segurança do navegador.")
 
