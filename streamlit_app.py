@@ -69,6 +69,10 @@ adapter = HTTPAdapter(max_retries=retry_strategy)
 session.mount("https://", adapter)
 session.mount("http://", adapter)
 
+# MELHORIA 08: Bypass robusto de Consentimento para garantir que o Google Maps retorne os KMs e não a página de privacidade.
+session.cookies.set("CONSENT", "YES+cb.20230101-00-p0.pt-BR+FX+902", domain=".google.com.br")
+session.cookies.set("CONSENT", "YES+cb.20230101-00-p0.pt-BR+FX+902", domain=".google.com")
+
 CACHE_IBGE_PATH = "municipios_ibge.pkl"
 
 # ==============================================================================
@@ -114,7 +118,8 @@ def carregar_dados_ibge():
             try:
                 with open(CACHE_IBGE_PATH, "rb") as f:
                     d = pickle.load(f)
-                    return d.get("municipios", {}), d.get("estados", {}), d.get("distritos", {}), list(d.get("municipios", {}).keys()) + list(d.get("distritos", {}).keys())
+                    if len(d.get("municipios", {})) > 1000:
+                        return d.get("municipios", {}), d.get("estados", {}), d.get("distritos", {}), list(d.get("municipios", {}).keys()) + list(d.get("distritos", {}).keys())
             except Exception: pass
 
     base_mun, base_est, base_dist = {}, {}, {}
@@ -153,8 +158,10 @@ def carregar_dados_ibge():
                     "lon": dist.get("lon", 0.0)
                 })
 
-                with open(CACHE_IBGE_PATH, "wb") as f:
-                    pickle.dump({"municipios": base_mun, "estados": base_est, "distritos": base_dist}, f)
+                # MELHORIA 08: Prevenção de corrupção do arquivo Pickle em caso de falha da API
+                if len(base_mun) > 5000:
+                    with open(CACHE_IBGE_PATH, "wb") as f:
+                        pickle.dump({"municipios": base_mun, "estados": base_est, "distritos": base_dist}, f)
     except Exception: pass
     
     lista_completa = list(base_mun.keys()) + list(base_dist.keys())
@@ -362,22 +369,8 @@ class MotorEnderecoCanônico:
             contexto = contexto_pre
 
         tipo = self.classificar_entrada(texto_fuzzy)
-        uf, municipio, distrito = contexto["uf"], contexto["municipio"], contexto["distrito"]
         
-        nome_estado = IBGE_ESTADOS.get(uf, uf) if uf else ""
-        
-        componentes = []
-        if parsed.get("logradouro") or texto_fuzzy: componentes.append(parsed.get("logradouro") if parsed.get("logradouro") else texto_fuzzy)
-        if distrito: componentes.append(distrito)
-        if municipio: componentes.append(municipio)
-        if nome_estado: componentes.append(nome_estado)
-        componentes.append("BRASIL")
-        
-        clean_comp = []
-        for c in componentes:
-            if c and c not in clean_comp: clean_comp.append(c)
-        
-        endereco_canonico = ", ".join(clean_comp)
+        endereco_canonico = texto_fuzzy if texto_fuzzy else texto_norm
         
         return endereco_canonico, tipo, "", 0.0, 0.0
 
@@ -419,12 +412,6 @@ def validar_json_mapa(dados):
         return True
     except (TypeError, OverflowError):
         return False
-
-def auditoria_pre_geocoding(texto_cru, contexto, tipo_entrada):
-    if len(texto_cru) < 4: return "INSUFICIENTE"
-    if tipo_entrada in ["BAIRRO", "RURAL"] and not contexto.get("municipio"): return "INSUFICIENTE"
-    if tipo_entrada in ["ENDERECO_COMPLETO", "LOGRADOURO", "CONDOMINIO"] and not contexto.get("municipio") and not contexto.get("uf"): return "PARCIAL"
-    return "COMPLETO"
 
 def obedience_base_local(contexto_estruturado):
     if contexto_estruturado["logradouro"] and contexto_estruturado["municipio"] and contexto_estruturado["uf"]:
@@ -479,13 +466,6 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         m_a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
         return round(6371.0 * 2 * math.atan2(math.sqrt(m_a), math.sqrt(1 - m_a)), 2)
 
-def auditoria_geografica(km_rota, minutos_str, dist_linha_reta, lat_o, lon_o, lat_d, lon_d):
-    for lat, lon, loc in [(lat_o, lon_o, "Origem"), (lat_d, lon_d, "Destino")]:
-        if not (-75.0 <= lon <= -28.0) or not (-35.0 <= lat <= 6.0): return f"AUDITORIA: Coordenada {loc} fora do BR ({lat},{lon})"
-    if km_rota and dist_linha_reta and km_rota > 0 and dist_linha_reta > 0:
-        if km_rota < (dist_linha_reta * 0.9): return f"Violação Geodésica (Rota {km_rota}km < Linha Reta {dist_linha_reta}km)"
-    return None
-
 def cascata_postal_tripla(cep_limpo):
     if cep_limpo in cache_cep:
         d = cache_cep[cep_limpo]
@@ -531,10 +511,11 @@ def validar_consistencia_administrativa(candidato, uf_inf):
             return False
     return True
 
+# MELHORIA 08: Prevenção de Falsos Negativos. Não descartar se a API omitir o nome da cidade.
 def validar_consistencia_municipal(candidato, mun_inf):
     if not mun_inf: return True
     cid_api = unidecode(candidato.get('cidade', '')).upper().strip()
-    if not cid_api: return False
+    if not cid_api: return True
     if mun_inf == cid_api or mun_inf in cid_api or cid_api in mun_inf: return True
     if fuzz.token_set_ratio(mun_inf, cid_api) >= 95: return True
     return False
@@ -908,13 +889,16 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     if m.get("cep") and score_limitado < 100: score_limitado = min(score_limitado + 10, 100 if tipo_entrada == "CEP" else 95)
 
     explicacoes_humanas = []
+    
+    # MELHORIA 08: Diagnóstico de Carga no XAI para Auditoria
+    explicacoes_humanas.append(f"Análise inicial baseada em {len(candidatos_validos)} candidato(s) da Nuvem.")
+    
     xd = vencedor["xai_data"]
     if len(xd["apis"]) >= 2:
         explicacoes_humanas.append(f"Consenso espacial estabelecido via Ensemble Multi-API ({' + '.join(xd['apis'])}).")
     else:
         explicacoes_humanas.append(f"Inferência baseada unicamente na resposta isolada da fonte {vencedor['fonte']}.")
         
-    if not ctx_inf.get("municipio"): explicacoes_humanas.append("Aviso: Validação IBGE local substituída por inteligência e preenchimento em Nuvem.")
     if xd["mun"]: explicacoes_humanas.append("Município validado na malha de referência oficial IBGE.")
     if xd["uf"]: explicacoes_humanas.append("Correspondência administrativa de Estado confirmada.")
     if xd["cep"]: explicacoes_humanas.append("Código Postal cruzado e confirmado por cascades.")
@@ -970,7 +954,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V9_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V10_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -993,9 +977,6 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
         "uf": ctx.get("uf", ""),
         "cep": parsed_comp.get("cep", "")
     }
-
-    if auditoria_pre_geocoding(texto_norm, contexto_estruturado, tipo_entrada) == "INSUFICIENTE":
-        return 0.0, 0.0, texto_norm, "INSUFICIENTE", 0, "", "", "PRE_FLIGHT", ["Abortado pelo validador pré-geocoding: informações insuficientes."]
 
     if match_offline := obedience_base_local(contexto_estruturado):
         return match_offline["lat"], match_offline["lon"], match_offline["endereco"], "ALTISSIMA", 100, match_offline.get("distrito", ""), match_offline.get("municipio", ""), "BASE_NACIONAL_OFFLINE", ["Ponto resolvido via CNEFE/Bases Locais Estáticas."]
@@ -1133,7 +1114,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V9_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+    cache_key = f"GOOG_V10_{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
@@ -1149,10 +1130,11 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
     
     try:
         resposta = session.get(url_api, headers=headers, timeout=12)
+        
+        # MELHORIA 08: Limpeza de Lixo UTF-8 Invisível que quebrava o Match na resposta JS
         texto_resposta = resposta.text.replace('\u202f', ' ').replace('\u200b', '')
         if len(texto_resposta) < 500: return None
         
-        # MELHORIA 08: Regex com 3 camadas de Fallback para milhar e scape strings JS
         dist_matches = re.findall(r'\"([\d\.,]+)\s*km\"', texto_resposta)
         if not dist_matches: dist_matches = re.findall(r'([\d\.,]+)\s*km', texto_resposta)
         if not dist_matches: dist_matches = re.findall(r'\\x22([\d\.,]+)\s*km\\x22', texto_resposta)
@@ -1197,7 +1179,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V9_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V10_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1434,6 +1416,7 @@ with tab_individual:
                 st.info(f"🧠 **Estratégia de Roteamento (XAI):** {res_ind[28]}")
                 
                 with st.expander("🕵️ Auditoria Detalhada da Geocodificação e Consenso", expanded=False):
+                    st.caption(f"Status da Base IBGE Local: {'Ativa e Carregada' if len(IBGE_MUNICIPIOS) > 1000 else '⚠️ CORROMPIDA/FALHA DE API'}")
                     col_aud1, col_aud2 = st.columns(2)
                     with col_aud1:
                         st.markdown("**🏁 Origem (Ponto A)**")
