@@ -396,10 +396,10 @@ def parse_tempo_minutos(t_str):
 def validar_coordenadas_mapa(lat, lon):
     try:
         if pd.isna(lat) or pd.isna(lon): return False
-        lat_f, lon_f = float(lat), float(lon)
-        if math.isnan(lat_f) or math.isnan(lon_f) or math.isinf(lat_f) or math.isinf(lon_f): return False
-        if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= lon_f <= 180.0): return False
-        if lat_f == 0.0 and lon_f == 0.0: return False
+        lat_f, float(lon)
+        if math.isnan(lat_f) or math.isnan(float(lon)) or math.isinf(lat_f) or math.isinf(float(lon)): return False
+        if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= float(lon) <= 180.0): return False
+        if lat_f == 0.0 and float(lon) == 0.0: return False
         return True
     except Exception:
         return False
@@ -1075,7 +1075,6 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
 def obter_coordenadas_e_endereco_oficial(localidade):
     lat, lon, end_f, conf, score, dist, mun, fonte, xai = _obter_coordenadas_e_endereco_oficial_core(localidade)
     
-    # Se temos coordenada válida, mas faltam dados estruturados (Endereço, Município, Distrito)
     if lat != 0.0 and lon != 0.0:
         if not end_f or not mun or not dist or end_f.strip() == "" or mun.strip() == "" or dist.strip() == "":
             rev = executar_reverse_geocoding_multimotor(lat, lon)
@@ -1087,7 +1086,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             if not dist or dist.strip() == "":
                 dist = rev.get("bairro", "")
 
-    # Última linha de defesa: Derivação Hardcoded para impedir campos vazios na planilha
     if not end_f or end_f.strip() == "": end_f = f"Coordenada Resolvida Analiticamente: {lat}, {lon}"
     if not mun or mun.strip() == "": mun = "Município Não Mapeado"
     if not dist or dist.strip() == "": dist = "Distrito Não Mapeado"
@@ -1193,11 +1191,12 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
     return retorno
 
+# MELHORIA 04: Retorno 0.0 puro garantido no pipeline unificado para blindar o Pandas/PyArrow
 def executar_pipeline_unificado(origem_cru, destino_cru):
     orig = str(origem_cru).strip() if pd.notna(origem_cru) else ""
     dest = str(destino_cru).strip() if pd.notna(destino_cru) else ""
     if orig.lower() in ['nan', 'none', 'null', ''] or dest.lower() in ['nan', 'none', 'null', '']:
-        return ("GEOCODING_FALHOU", "0 min", "", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha na leitura da célula (Campo Vazio).")
+        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha na leitura da célula (Campo Vazio).")
     return calcular_pipeline_logistico(orig, dest, perfil_rota="shortest")
 
 def embrulhar_task_paralela(item):
@@ -1209,7 +1208,7 @@ def embrulhar_task_paralela(item):
         return par_id, res
     except Exception as e: 
         msg_erro = f"FALHA INTERNA: {str(e)}"
-        fallback = (0.0, "0 min", "", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], "Erro Crítico e Falha de Exceção de Código.")
+        fallback = (0.0, "0 min", "Link Indisponível", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], msg_erro)
         return par_id, fallback
 
 # ==============================================================================
@@ -1226,7 +1225,6 @@ with st.sidebar:
     st.header("📖 Manual do Sistema Completo")
     st.caption("Documentação Técnica e Operacional Detalhada")
     
-    # MELHORIA 01: DOCUMENTAÇÃO 100% EXPANDIDA E DETALHADA
     with st.expander("1. Fluxo Completo da Aplicação"):
         st.write("""
         **O que acontece:** O sistema recebe strings brutas (origem e destino) e as transforma em uma rota viária perfeitamente roteirizável, com tempo, distância e auditoria explicável.
@@ -1343,7 +1341,7 @@ with tab_individual:
             with st.spinner("Acionando motores de geocodificação e consenso unificado..."):
                 res_ind = executar_pipeline_unificado(orig_ind, dest_ind)
                 
-            if res_ind and res_ind[0] != "QA_REJEITADO" and res_ind[0] != "GEOCODING_FALHOU":
+            if res_ind and res_ind[28] != "Falha na leitura da célula (Campo Vazio)." and "FALHA INTERNA" not in res_ind[28]:
                 st.success("✅ Rota estabelecida com sucesso!")
                 
                 m_dist_via, m_dist_reta, m_time, m_balsa, m_score = st.columns(5)
@@ -1410,8 +1408,15 @@ with tab_processamento:
                     'Confianca Destino', 'Score Num Destino', 'Distrito Destino', 'Municipio Destino', 'Fonte Geocoding Destino', 'Endereco Oficial Destino',
                     'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Status da Rota'
                 ]
-                # Preenchimento Padrão para evitar NaNs em caso de falha grave na extração
-                for col in novas_colunas: df[col] = "Não Informado"
+                
+                # MELHORIA 04: Inicialização explicitamente tipada do DataFrame para evitar restrições string[pyarrow]
+                colunas_numericas = ['Distancia', 'Linha Reta', 'Score da Rota', 'Score Num Origem', 'Score Num Destino', 'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global']
+                
+                for col in novas_colunas:
+                    if col in colunas_numericas:
+                        df[col] = pd.Series(0.0, index=df.index, dtype=float)
+                    else:
+                        df[col] = pd.Series("Não Informado", index=df.index, dtype=object)
                     
                 pares_unicos = set()
                 mapeamento_linhas = []
@@ -1463,33 +1468,38 @@ with tab_processamento:
                     res = resultados_unicos.get(par)
                     
                     if res:
-                        # MELHORIA 03: Validação em nível de Df
-                        df.at[idx, 'Distancia'] = res[0] if res[0] is not None else 0.0
+                        # MELHORIA 04: Cast absoluto de Float nas colunas numéricas
+                        try:
+                            df.at[idx, 'Distancia'] = float(res[0]) if res[0] is not None else 0.0
+                            df.at[idx, 'Linha Reta'] = float(res[4]) if res[4] is not None else 0.0
+                            df.at[idx, 'Score da Rota'] = float(res[6]) if res[6] is not None else 0.0
+                            df.at[idx, 'Score Num Origem'] = float(res[8]) if res[8] is not None else 0.0
+                            df.at[idx, 'Score Num Destino'] = float(res[14]) if res[14] is not None else 0.0
+                            df.at[idx, 'Lat Origem'] = float(res[19]) if res[19] is not None else 0.0
+                            df.at[idx, 'Lon Origem'] = float(res[20]) if res[20] is not None else 0.0
+                            df.at[idx, 'Lat Destino'] = float(res[21]) if res[21] is not None else 0.0
+                            df.at[idx, 'Lon Destino'] = float(res[22]) if res[22] is not None else 0.0
+                            df.at[idx, 'Tempo Geocoding (s)'] = float(res[23]) if res[23] is not None else 0.0
+                            df.at[idx, 'Tempo Roteamento (s)'] = float(res[24]) if res[24] is not None else 0.0
+                            df.at[idx, 'Tempo Total (s)'] = float(res[25]) if res[25] is not None else 0.0
+                        except (ValueError, TypeError):
+                            pass
+
+                        # Campos Texto Object
                         df.at[idx, 'Tempo'] = res[1] if res[1] is not None else "0 min"
                         df.at[idx, 'Link da Rota'] = res[2] if res[2] is not None else "Link Indisponível"
                         df.at[idx, 'Balsas'] = res[3] if res[3] is not None else "Não Informado"
-                        df.at[idx, 'Linha Reta'] = res[4] if res[4] is not None else 0.0
                         df.at[idx, 'Fonte da Rota'] = res[5] if res[5] is not None else "Desconhecida"
-                        df.at[idx, 'Score da Rota'] = res[6] if res[6] is not None else 0
                         df.at[idx, 'Confianca Origem'] = res[7] if res[7] is not None else "BAIXA"
-                        df.at[idx, 'Score Num Origem'] = res[8] if res[8] is not None else 0
                         df.at[idx, 'Distrito Origem'] = res[9] if res[9] is not None else "Não Identificado"
                         df.at[idx, 'Municipio Origem'] = res[10] if res[10] is not None else "Não Identificado"
                         df.at[idx, 'Fonte Geocoding Origem'] = res[11] if res[11] is not None else "Desconhecida"
                         df.at[idx, 'Endereco Oficial Origem'] = res[12] if res[12] is not None else "Endereço Não Identificado"
                         df.at[idx, 'Confianca Destino'] = res[13] if res[13] is not None else "BAIXA"
-                        df.at[idx, 'Score Num Destino'] = res[14] if res[14] is not None else 0
                         df.at[idx, 'Distrito Destino'] = res[15] if res[15] is not None else "Não Identificado"
                         df.at[idx, 'Municipio Destino'] = res[16] if res[16] is not None else "Não Identificado"
                         df.at[idx, 'Fonte Geocoding Destino'] = res[17] if res[17] is not None else "Desconhecida"
                         df.at[idx, 'Endereco Oficial Destino'] = res[18] if res[18] is not None else "Endereço Não Identificado"
-                        df.at[idx, 'Lat Origem'] = res[19] if res[19] is not None else 0.0
-                        df.at[idx, 'Lon Origem'] = res[20] if res[20] is not None else 0.0
-                        df.at[idx, 'Lat Destino'] = res[21] if res[21] is not None else 0.0
-                        df.at[idx, 'Lon Destino'] = res[22] if res[22] is not None else 0.0
-                        df.at[idx, 'Tempo Geocoding (s)'] = res[23] if res[23] is not None else 0.0
-                        df.at[idx, 'Tempo Roteamento (s)'] = res[24] if res[24] is not None else 0.0
-                        df.at[idx, 'Tempo Total (s)'] = res[25] if res[25] is not None else 0.0
                         df.at[idx, 'Motivo Roteamento'] = res[28] if len(res) > 28 and res[28] is not None else "Sem Justificativa"
                         
                         try:
@@ -1554,21 +1564,17 @@ with tab_processamento:
                 )
                 st.caption("Dica: Baixe a planilha no botão ao lado, clique em 'Abrir Google Sheets' e arraste o arquivo baixado para dentro da tela (Arquivo > Importar).")
 
-# MELHORIA 02: DASHBOARD ANALÍTICO INTERATIVO CORPORATIVO
 with tab_analytics:
     st.markdown("### 📊 Dashboard Analítico Interativo Corporativo")
     if 'df_processado' in st.session_state:
         df_kpi = st.session_state['df_processado'].copy()
         
-        # Pré-processamento e normalização para o Dashboard
         df_kpi['Distancia'] = pd.to_numeric(df_kpi['Distancia'], errors='coerce').fillna(0)
         df_kpi['Linha Reta'] = pd.to_numeric(df_kpi['Linha Reta'], errors='coerce').fillna(0)
         df_kpi['Tempo_Minutos'] = df_kpi['Tempo'].apply(parse_tempo_minutos)
         
-        # Extrator Sintético de UF
         df_kpi['UF_Sintetica_Origem'] = df_kpi['Endereco Oficial Origem'].str.extract(r',\s*([A-Z]{2})\s*,')[0].fillna("Indefinido")
         
-        # Filtros Dinâmicos
         st.markdown("#### 🎛️ Filtros Avançados")
         with st.container():
             col_f1, col_f2, col_f3, col_f4 = st.columns(4)
@@ -1585,7 +1591,6 @@ with tab_analytics:
             lista_fontes = ["Todas"] + sorted(list(df_kpi['Fonte Geocoding Origem'].astype(str).unique()))
             fonte_selecionada = col_f4.selectbox("Fonte de Geocoding (Origem)", lista_fontes)
             
-        # Aplicação de Filtros
         df_filtrado = df_kpi.copy()
         if uf_selecionada != "Todas": df_filtrado = df_filtrado[df_filtrado['UF_Sintetica_Origem'] == uf_selecionada]
         if mun_selecionado != "Todos": df_filtrado = df_filtrado[df_filtrado['Municipio Origem'] == mun_selecionado]
@@ -1599,7 +1604,6 @@ with tab_analytics:
         else:
             df_sucesso = df_filtrado[df_filtrado["Status da Rota"].str.contains("Erro") == False]
             
-            # BLOCO 1: KPIs Principais
             st.markdown("#### 📈 KPIs de Execução")
             col_k1, col_k2, col_k3, col_k4 = st.columns(4)
             
@@ -1612,7 +1616,6 @@ with tab_analytics:
             col_k3.metric("Tempo Viário Acumulado", f"{tempo_total_str}")
             col_k4.metric("Score Global Médio", f"{round(df_sucesso['Score Final Global'].mean(), 1) if not df_sucesso.empty else 0} / 100")
             
-            # BLOCO 2: Rankings Top 10
             st.markdown("#### 🏆 Rankings Top 10")
             tab_dist_max, tab_dist_min, tab_tempo, tab_municipio = st.tabs(["Maiores Distâncias", "Menores Distâncias", "Maiores Tempos", "Volume Geográfico"])
             
@@ -1633,7 +1636,6 @@ with tab_analytics:
                 
             st.markdown("---")
             
-            # BLOCO 3: Qualidade de Dados (Suspeitos)
             st.markdown("#### 🚨 Análise de Qualidade de Dados (Rotas Críticas)")
             df_suspeitas = df_filtrado[(df_filtrado['Score Final Global'] < 70) | (df_filtrado['Status da Rota'] == "Erro") | (df_filtrado['Confianca Origem'] == "BAIXA")]
             
@@ -1643,7 +1645,6 @@ with tab_analytics:
             else:
                 st.success("🎉 Todas as rotas neste recorte passaram no controle de qualidade (Score >= 70 e Confiança > Baixa).")
             
-            # BLOCO 4: Geodata e Heatmap
             st.markdown("#### 🗺️ Distribuição de Destinos Espaciais")
             df_geo = df_filtrado.copy()
             df_geo['Lat Destino'] = pd.to_numeric(df_geo['Lat Destino'], errors='coerce')
