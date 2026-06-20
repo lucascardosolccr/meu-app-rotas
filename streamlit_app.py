@@ -353,10 +353,16 @@ class MotorEnderecoCanônico:
                 nome_estado_cep = IBGE_ESTADOS.get(uf, uf) if uf else ""
                 return f"{logr}{num_str}{comp_str}, {bair}, {loca}, {nome_estado_cep}, BRASIL", "CEP", parsed["cep"], lat_cep, lon_cep
 
-        texto_fuzzy = self.aplicar_fuzzy_multidimensional(texto_norm)
+        # MELHORIA 08: Resolução de Contexto Antes do Fuzzy para Blindar Nomes Compostos
+        contexto_pre = self.resolver_contexto_administrativo(texto_norm)
+        if not contexto_pre.get("municipio"):
+            texto_fuzzy = self.aplicar_fuzzy_multidimensional(texto_norm)
+            contexto = self.resolver_contexto_administrativo(texto_fuzzy)
+        else:
+            texto_fuzzy = texto_norm
+            contexto = contexto_pre
+
         tipo = self.classificar_entrada(texto_fuzzy)
-        
-        contexto = self.resolver_contexto_administrativo(texto_fuzzy)
         uf, municipio, distrito = contexto["uf"], contexto["municipio"], contexto["distrito"]
         
         nome_estado = IBGE_ESTADOS.get(uf, uf) if uf else ""
@@ -540,13 +546,13 @@ def validar_consistencia_municipal(candidato, mun_inf):
 def API_Google_Geocoding_Scraper(query):
     start_t = time.time()
     try:
-        # MELHORIA 07: URL Nativa do Google Search sem proxy fantasma
-        url = f"https://www.google.com/maps/search/{requests.utils.quote(query)}"
+        # MELHORIA 08: Uso estrito do Endereço Nativo Google sem proxies
+        url = f"https://www.google.com.br/maps/search/{requests.utils.quote(query)}/?hl=pt-BR"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "pt-BR,pt;q=0.9"
         }
-        r = session.get(url, headers=headers, timeout=5, allow_redirects=True)
+        r = session.get(url, headers=headers, timeout=6, allow_redirects=True)
         match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.url)
         if not match: match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.text)
         if match: 
@@ -963,15 +969,17 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
             return dado_salvo["lat"], dado_salvo["lon"], dado_salvo.get("endereco", texto_norm), "ALTISSIMA", 100, dado_salvo.get("distrito", ""), dado_salvo.get("municipio", ""), "APRENDIZADO_LOCAL", ["Ponto quente extraído do cache local enriquecido."]
 
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
-    ctx = semantica.resolver_contexto_administrativo(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V5_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V8_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
         if c.get("lat", 0.0) != 0.0 and c.get("lon", 0.0) != 0.0:
             return c["lat"], c["lon"], c["endereco"], c["confianca"], c["score_num"], c["distrito"], c["municipio"], c["fonte"], ["Cache L2 Hit."]
+
+    # MELHORIA 08: Resolver Contexto Administrativo ANTES da corrupção Fuzzy
+    ctx = semantica.resolver_contexto_administrativo(texto_norm)
 
     rua_suja = parsed_comp["resto"]
     for loc in [ctx.get("municipio", ""), ctx.get("distrito", ""), ctx.get("uf", ""), "BRASIL", "DF"]:
@@ -1130,16 +1138,15 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    # MELHORIA 07: Atualização do hash para forçar cache limpo nesta nova versão da URL
-    cache_key = f"GOOG_V7_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+    cache_key = f"GOOG_V8_{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
     
-    # MELHORIA 07: URL nativa do Google sem uso de proxy defeituoso
-    url_api = f"https://www.google.com/maps/dir/{origem_param}/{destino_param}/data=!4m2!4m1!3e0"
-    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
+    # MELHORIA 08: Endpoints Nativos da Google para varredura de KMs reais.
+    url_api = f"https://www.google.com.br/maps/dir/{origem_param}/{destino_param}/?hl=pt-BR"
+    link_maps = f"https://www.google.com.br/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -1151,10 +1158,9 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         texto_resposta = resposta.text
         if len(texto_resposta) < 500: return None
         
-        # MELHORIA 07: Regex altamente resiliente para capturar o km dentro do State do Google Maps (mesmo com formato brasileiro de milhar)
-        # Exemplo: null,null,"405 km" ou null,null,"1.234 km"
-        dist_matches = re.findall(r'\"(\d{1,3}(?:\.\d{3})*(?:,\d+)?)\s*km\"', texto_resposta)
-        if not dist_matches: dist_matches = re.findall(r'(\d{1,3}(?:\.\d{3})*(?:,\d+)?)\s*km', texto_resposta)
+        # Regex blindada para array strings do Google Maps HTML 
+        dist_matches = re.findall(r'\"([\d\.,]+)\s*km\"', texto_resposta)
+        if not dist_matches: dist_matches = re.findall(r'([\d\.,]+)\s*km', texto_resposta)
         
         time_matches = re.findall(r'\"(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)\"', texto_resposta)
         if not time_matches: time_matches = re.findall(r'(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)', texto_resposta)
@@ -1162,11 +1168,12 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
         if dist_matches and time_matches:
             km_str = dist_matches[0]
             if km_str.count('.') == 1 and ',' not in km_str:
-                # Trata "1.234" (milhar brasileiro) vs "1.5" (decimal)
                 if len(km_str.split('.')[1]) == 3: km_str = km_str.replace('.', '')
                 else: km_str = km_str.replace('.', '.')
-            elif ',' in km_str:
+            elif ',' in km_str and '.' in km_str:
                 km_str = km_str.replace('.', '').replace(',', '.')
+            elif ',' in km_str:
+                km_str = km_str.replace(',', '.')
             else:
                 km_str = km_str.replace('.', '')
                 
@@ -1194,7 +1201,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V7_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V8_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1211,7 +1218,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
 
     orig_param_fb = requests.utils.quote(end_oficial_o) if end_oficial_o else f"{lat_o},{lon_o}"
     dest_param_fb = requests.utils.quote(end_oficial_d) if end_oficial_d else f"{lat_d},{lon_d}"
-    link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
+    link_fallback = f"https://www.google.com.br/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
 
     res_google = None
     res_osrm = None
@@ -1227,7 +1234,6 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
         if res_google and res_osrm:
             km_g = res_google[0]
             km_o = res_osrm[0]
-            # MELHORIA 07: Prioridade Total Google Maps. Se a discrepância for grande, OSRM perde a vez pois errou feio o traçado (ex: balsa não mapeada)
             if km_o > km_g * 1.3:
                 balsa_rota = res_google[3]
                 motivo_roteamento = f"Identidade Logística Google Maps ({km_g}km). OSRM detectou desvio severo ou timeout no traçado alternativo ({km_o}km). Traçado primário validado e imposto pelo Google."
@@ -1431,7 +1437,6 @@ with tab_individual:
                 
                 st.info(f"🧠 **Estratégia de Roteamento (XAI):** {res_ind[28]}")
                 
-                # MELHORIA 07: Bloco expansivo de Auditoria Detalhada Single-Shot
                 with st.expander("🕵️ Auditoria Detalhada da Geocodificação e Consenso", expanded=False):
                     col_aud1, col_aud2 = st.columns(2)
                     with col_aud1:
@@ -1456,7 +1461,6 @@ with tab_individual:
                 lat_o, lon_o = res_ind[19], res_ind[20]
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
-                # MELHORIA 07: URL nativa de Embed (Maps iFrame)
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
                     o_param = f"{lat_o},{lon_o}"
                     d_param = f"{lat_d},{lon_d}"
@@ -1464,9 +1468,9 @@ with tab_individual:
                     o_param = requests.utils.quote(res_ind[12]) if res_ind[12] and "Não Mapeado" not in res_ind[12] else requests.utils.quote(orig_ind)
                     d_param = requests.utils.quote(res_ind[18]) if res_ind[18] and "Não Mapeado" not in res_ind[18] else requests.utils.quote(dest_ind)
 
-                url_iframe = f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed"
+                url_iframe = f"https://www.google.com/maps/embed/v1/directions?key=YOUR_API_KEY&origin={o_param}&destination={d_param}&mode=driving"
                 try:
-                    components.iframe(url_iframe, height=470, scrolling=True)
+                    components.iframe(f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed", height=470, scrolling=True)
                 except Exception:
                     st.warning("Renderização de mapa localmente bloqueada pelas políticas de segurança do navegador.")
 
