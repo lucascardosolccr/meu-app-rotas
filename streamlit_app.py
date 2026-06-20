@@ -353,7 +353,6 @@ class MotorEnderecoCanônico:
                 nome_estado_cep = IBGE_ESTADOS.get(uf, uf) if uf else ""
                 return f"{logr}{num_str}{comp_str}, {bair}, {loca}, {nome_estado_cep}, BRASIL", "CEP", parsed["cep"], lat_cep, lon_cep
 
-        # MELHORIA 08: Resolução de Contexto Antes do Fuzzy para Blindar Nomes Compostos
         contexto_pre = self.resolver_contexto_administrativo(texto_norm)
         if not contexto_pre.get("municipio"):
             texto_fuzzy = self.aplicar_fuzzy_multidimensional(texto_norm)
@@ -546,7 +545,6 @@ def validar_consistencia_municipal(candidato, mun_inf):
 def API_Google_Geocoding_Scraper(query):
     start_t = time.time()
     try:
-        # MELHORIA 08: Uso estrito do Endereço Nativo Google sem proxies
         url = f"https://www.google.com.br/maps/search/{requests.utils.quote(query)}/?hl=pt-BR"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -916,6 +914,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     else:
         explicacoes_humanas.append(f"Inferência baseada unicamente na resposta isolada da fonte {vencedor['fonte']}.")
         
+    if not ctx_inf.get("municipio"): explicacoes_humanas.append("Aviso: Validação IBGE local substituída por inteligência e preenchimento em Nuvem.")
     if xd["mun"]: explicacoes_humanas.append("Município validado na malha de referência oficial IBGE.")
     if xd["uf"]: explicacoes_humanas.append("Correspondência administrativa de Estado confirmada.")
     if xd["cep"]: explicacoes_humanas.append("Código Postal cruzado e confirmado por cascades.")
@@ -971,14 +970,13 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V8_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V9_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
         if c.get("lat", 0.0) != 0.0 and c.get("lon", 0.0) != 0.0:
             return c["lat"], c["lon"], c["endereco"], c["confianca"], c["score_num"], c["distrito"], c["municipio"], c["fonte"], ["Cache L2 Hit."]
 
-    # MELHORIA 08: Resolver Contexto Administrativo ANTES da corrupção Fuzzy
     ctx = semantica.resolver_contexto_administrativo(texto_norm)
 
     rua_suja = parsed_comp["resto"]
@@ -1001,9 +999,6 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
 
     if match_offline := obedience_base_local(contexto_estruturado):
         return match_offline["lat"], match_offline["lon"], match_offline["endereco"], "ALTISSIMA", 100, match_offline.get("distrito", ""), match_offline.get("municipio", ""), "BASE_NACIONAL_OFFLINE", ["Ponto resolvido via CNEFE/Bases Locais Estáticas."]
-
-    if not ctx.get("municipio") and tipo_entrada not in ["POI", "CEP"]:
-        return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Inviável determinar contexto municipal estruturado."]
 
     candidatos_validos = []
 
@@ -1108,7 +1103,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
         cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
         return res_final
         
-    return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Falha Geográfica Absoluta por falta de candidatos e centróides."]
+    return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Falha Geográfica Absoluta por falta de candidatos e centróides na nuvem."]
 
 def obter_coordenadas_e_endereco_oficial(localidade):
     lat, lon, end_f, conf, score, dist, mun, fonte, xai = _obter_coordenadas_e_endereco_oficial_core(localidade)
@@ -1138,13 +1133,12 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V8_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+    cache_key = f"GOOG_V9_{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
     
-    # MELHORIA 08: Endpoints Nativos da Google para varredura de KMs reais.
     url_api = f"https://www.google.com.br/maps/dir/{origem_param}/{destino_param}/?hl=pt-BR"
     link_maps = f"https://www.google.com.br/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
     
@@ -1155,15 +1149,17 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
     
     try:
         resposta = session.get(url_api, headers=headers, timeout=12)
-        texto_resposta = resposta.text
+        texto_resposta = resposta.text.replace('\u202f', ' ').replace('\u200b', '')
         if len(texto_resposta) < 500: return None
         
-        # Regex blindada para array strings do Google Maps HTML 
+        # MELHORIA 08: Regex com 3 camadas de Fallback para milhar e scape strings JS
         dist_matches = re.findall(r'\"([\d\.,]+)\s*km\"', texto_resposta)
         if not dist_matches: dist_matches = re.findall(r'([\d\.,]+)\s*km', texto_resposta)
+        if not dist_matches: dist_matches = re.findall(r'\\x22([\d\.,]+)\s*km\\x22', texto_resposta)
         
         time_matches = re.findall(r'\"(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)\"', texto_resposta)
         if not time_matches: time_matches = re.findall(r'(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)', texto_resposta)
+        if not time_matches: time_matches = re.findall(r'\\x22(\d+\s*h\s*\d+\s*min|\d+\s*h|\d+\s*min)\\x22', texto_resposta)
         
         if dist_matches and time_matches:
             km_str = dist_matches[0]
@@ -1201,7 +1197,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V8_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V9_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
