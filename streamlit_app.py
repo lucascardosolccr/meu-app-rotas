@@ -69,10 +69,6 @@ adapter = HTTPAdapter(max_retries=retry_strategy)
 session.mount("https://", adapter)
 session.mount("http://", adapter)
 
-# MELHORIA 08: Bypass robusto de Consentimento para garantir que o Google Maps retorne os KMs e não a página de privacidade.
-session.cookies.set("CONSENT", "YES+cb.20230101-00-p0.pt-BR+FX+902", domain=".google.com.br")
-session.cookies.set("CONSENT", "YES+cb.20230101-00-p0.pt-BR+FX+902", domain=".google.com")
-
 CACHE_IBGE_PATH = "municipios_ibge.pkl"
 
 # ==============================================================================
@@ -158,8 +154,7 @@ def carregar_dados_ibge():
                     "lon": dist.get("lon", 0.0)
                 })
 
-                # MELHORIA 08: Prevenção de corrupção do arquivo Pickle em caso de falha da API
-                if len(base_mun) > 5000:
+                if len(base_mun) > 1000:
                     with open(CACHE_IBGE_PATH, "wb") as f:
                         pickle.dump({"municipios": base_mun, "estados": base_est, "distritos": base_dist}, f)
     except Exception: pass
@@ -511,7 +506,6 @@ def validar_consistencia_administrativa(candidato, uf_inf):
             return False
     return True
 
-# MELHORIA 08: Prevenção de Falsos Negativos. Não descartar se a API omitir o nome da cidade.
 def validar_consistencia_municipal(candidato, mun_inf):
     if not mun_inf: return True
     cid_api = unidecode(candidato.get('cidade', '')).upper().strip()
@@ -526,12 +520,10 @@ def validar_consistencia_municipal(candidato, mun_inf):
 def API_Google_Geocoding_Scraper(query):
     start_t = time.time()
     try:
-        url = f"https://www.google.com.br/maps/search/{requests.utils.quote(query)}/?hl=pt-BR"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "pt-BR,pt;q=0.9"
-        }
-        r = session.get(url, headers=headers, timeout=6, allow_redirects=True)
+        # MELHORIA 08: Retorno para a base de scraping leve e nativa da V1.0 para anular Timeouts.
+        url = f"https://www.google.com/maps/search/{requests.utils.quote(query)}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        r = session.get(url, headers=headers, timeout=5, allow_redirects=True)
         match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.url)
         if not match: match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.text)
         if match: 
@@ -890,7 +882,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
 
     explicacoes_humanas = []
     
-    # MELHORIA 08: Diagnóstico de Carga no XAI para Auditoria
     explicacoes_humanas.append(f"Análise inicial baseada em {len(candidatos_validos)} candidato(s) da Nuvem.")
     
     xd = vencedor["xai_data"]
@@ -899,6 +890,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     else:
         explicacoes_humanas.append(f"Inferência baseada unicamente na resposta isolada da fonte {vencedor['fonte']}.")
         
+    if not ctx_inf.get("municipio"): explicacoes_humanas.append("Aviso: Validação IBGE local substituída por inteligência e preenchimento em Nuvem.")
     if xd["mun"]: explicacoes_humanas.append("Município validado na malha de referência oficial IBGE.")
     if xd["uf"]: explicacoes_humanas.append("Correspondência administrativa de Estado confirmada.")
     if xd["cep"]: explicacoes_humanas.append("Código Postal cruzado e confirmado por cascades.")
@@ -954,7 +946,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V10_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V11_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1063,22 +1055,19 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
                     
                 res_final = (lat_c, lon_c, endereco_ibge, "BAIXA", 40, dist_nome, mun_nome, "CENTROIDE_FALLBACK", ["Endereço exato não geocodificado. Fallback ativado para Centróide (Distrito/Município) a fim de habilitar distância em Linha Reta."])
 
-    if not res_final and ctx.get("municipio") and ctx.get("uf"):
-        mun_nome = ctx["municipio"]
-        uf_nome = ctx["uf"]
-        
-        matches = process.extract(mun_nome, list(IBGE_MUNICIPIOS.keys()), scorer=fuzz.WRatio, limit=3)
-        mun_ibge_match = None
-        if matches and matches[0][1] >= 85:
-            for item in IBGE_MUNICIPIOS[matches[0][0]]:
-                if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0:
-                    mun_ibge_match = item
-                    mun_nome = matches[0][0]
-                    break
-                    
-        if mun_ibge_match:
-            endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
-            res_final = (mun_ibge_match["lat"], mun_ibge_match["lon"], endereco_ibge, "BAIXA", 100, "", mun_nome, "BASE_IBGE_OFFLINE", ["Blindagem Ativada: Coordenada puxada 100% offline da base IBGE via Fuzzy Match."])
+    # MELHORIA 08: IBGE Ultimate Fallback - Busca Extrema na Base Nacional em caso de falha da Nuvem
+    if not res_final:
+        melhor_match = process.extractOne(texto_norm, LISTA_CONTEXTO_FUZZY, scorer=fuzz.token_set_ratio)
+        if melhor_match and melhor_match[1] >= 80:
+            cidade_uf = melhor_match[0] 
+            cid = cidade_uf.rsplit(' ', 1)[0]
+            uf = cidade_uf.rsplit(' ', 1)[1]
+            if cid in IBGE_MUNICIPIOS:
+                for item in IBGE_MUNICIPIOS[cid]:
+                    if item["uf"] == uf and item.get("lat", 0.0) != 0.0:
+                        endereco_ibge = f"{cid}, {IBGE_ESTADOS.get(uf, uf)}, BRASIL"
+                        res_final = (item["lat"], item["lon"], endereco_ibge, "BAIXA", 100, "", cid, "BASE_IBGE_OFFLINE_EXTREMA", ["Geocodificação em nuvem falhou. Resgatado via Fuzzy Match extremo na base IBGE local."])
+                        break
 
     if res_final:
         cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
@@ -1114,24 +1103,21 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V10_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+    cache_key = f"GOOG_V11_{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
     destino_param = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_raw)
     
-    url_api = f"https://www.google.com.br/maps/dir/{origem_param}/{destino_param}/?hl=pt-BR"
-    link_maps = f"https://www.google.com.br/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
+    # MELHORIA 08: Retorno à estrutura V1.0 oficial do Scraper que garante KMs em vez da página de Consentimento.
+    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
+    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "pt-BR,pt;q=0.9"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     try:
         resposta = session.get(url_api, headers=headers, timeout=12)
         
-        # MELHORIA 08: Limpeza de Lixo UTF-8 Invisível que quebrava o Match na resposta JS
         texto_resposta = resposta.text.replace('\u202f', ' ').replace('\u200b', '')
         if len(texto_resposta) < 500: return None
         
@@ -1179,7 +1165,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V10_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V11_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1196,7 +1182,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
 
     orig_param_fb = requests.utils.quote(end_oficial_o) if end_oficial_o else f"{lat_o},{lon_o}"
     dest_param_fb = requests.utils.quote(end_oficial_d) if end_oficial_d else f"{lat_d},{lon_d}"
-    link_fallback = f"https://www.google.com.br/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
+    link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
 
     res_google = None
     res_osrm = None
