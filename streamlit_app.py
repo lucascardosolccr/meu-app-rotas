@@ -45,10 +45,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v20" not in st.session_state:
+if "cache_limpo_v21" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v20"] = True
+    st.session_state["cache_limpo_v21"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -291,8 +291,6 @@ class MotorEnderecoCanônico:
         uf, municipio, distrito = contexto["uf"], contexto["municipio"], contexto["distrito"]
         nome_estado = IBGE_ESTADOS.get(uf, uf) if uf else ""
         
-        # ATUALIZAÇÃO 1.20: Hierarquia de Bairro vs Cidade.
-        # Remove redundâncias lexicais que confundem as APIs.
         componentes = [texto_fuzzy]
         if distrito and distrito not in texto_fuzzy: componentes.append(distrito)
         if municipio and municipio not in texto_fuzzy: componentes.append(municipio)
@@ -493,7 +491,7 @@ def API_TomTom(query):
     return None
 
 def executar_reverse_geocoding_multimotor(lat, lon):
-    rev_key = f"V7_{round(lat,5)}|{round(lon,5)}"
+    rev_key = f"V21_{round(lat,5)}|{round(lon,5)}"
     if rev_key in cache_reverse: return cache_reverse[rev_key]
     res = {"logradouro": "", "bairro": "", "cidade": "", "municipio": "", "distrito": "", "estado": "", "cep": ""}
     try:
@@ -816,7 +814,30 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     if not texto_cru or texto_cru.lower() == 'nan': return 0.0, 0.0, "", "BAIXA", 0, "", "", "N/A", ["String Vazia"]
     
     texto_norm = semantica.normalizar(texto_cru)
+    ctx = semantica.resolver_contexto_administrativo(texto_norm)
+    parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
+    # ATUALIZAÇÃO 1.21: A Blindagem "Pure City".
+    # Se o usuário digitou apenas a Cidade e a UF (Sem número, sem CEP, sem nome de rua detectável),
+    # o sistema aborta qualquer busca difusa que inventaria o POI "RS Variedades" e crava o IBGE imediatamente.
+    is_pure_city = False
+    if ctx.get("municipio") and ctx.get("uf") and not parsed_comp.get("numero") and not parsed_comp.get("cep"):
+        test_str = texto_norm
+        for w in [ctx["municipio"], ctx["uf"], "BRASIL", "BR"]:
+            test_str = test_str.replace(w, "")
+        test_str = re.sub(r'[^A-Z]', '', test_str)
+        if len(test_str) <= 3:
+            is_pure_city = True
+            
+    if is_pure_city:
+        mun_nome = ctx["municipio"]
+        uf_nome = ctx["uf"]
+        if mun_nome in IBGE_MUNICIPIOS:
+            for item in IBGE_MUNICIPIOS[mun_nome]:
+                if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0:
+                    endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                    return item["lat"], item["lon"], endereco_ibge, "ALTISSIMA", 100, "", mun_nome, "BASE_IBGE_LOCAL", ["Identificado como Município Genérico (Pure City). Centróide Oficial do IBGE cravado (Prevenção de Falso POI)."]
+
     if match_coords := re.match(r'^\s*(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$', texto_cru):
         lat_in, lon_in = float(match_coords.group(1)), float(match_coords.group(2))
         valido, lat_in, lon_in = validar_coordenada_brasil(lat_in, lon_in)
@@ -835,21 +856,8 @@ def obter_coordenadas_e_endereco_oficial(localidade):
             return dado_salvo["lat"], dado_salvo["lon"], dado_salvo.get("endereco", texto_norm), "ALTISSIMA", 100, dado_salvo.get("distrito", ""), dado_salvo.get("municipio", ""), "APRENDIZADO_LOCAL", ["Ponto quente extraído do cache local enriquecido."]
 
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
-    ctx = semantica.resolver_contexto_administrativo(texto_norm)
-    parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    # ATUALIZAÇÃO 1.20: Interceptação Hierárquica Precoce
-    # Se o texto digitado for apenas o nome exato de um Município ou Distrito
-    # Ele FORÇA o uso do IBGE. Isso previne que o Google ou Photon achem lojas aleatórias ("RS Variedades") e percam o centróide real da cidade.
-    if tipo_entrada in ["MUNICIPIO", "DISTRITO"] and ctx.get("municipio") and ctx.get("uf"):
-        mun_nome, uf_nome = ctx["municipio"], ctx["uf"]
-        if mun_nome in IBGE_MUNICIPIOS:
-            for item in IBGE_MUNICIPIOS[mun_nome]:
-                if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0:
-                    endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
-                    return item["lat"], item["lon"], endereco_ibge, "ALTISSIMA", 100, "", mun_nome, "BASE_IBGE_LOCAL", ["Centroide Oficial do IBGE resolvido como prioridade máxima (Evitou Desvios de Lojas/POIs)."]
-
-    cache_key = hashlib.md5(f"GEO_V7_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V21_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -912,7 +920,6 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     elif tipo_entrada in ["ENDERECO_COMPLETO", "LOGRADOURO"]:
         candidatos_validos.extend(disparar_apis_paralelas([(API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_TomTom, (endereco_canonico,), {})]))
     elif tipo_entrada in ["BAIRRO", "MUNICIPIO", "DISTRITO"]:
-        # Se as travas anteriores falharem, Photon está proibido de ser a API primária de Bairros para evitar Lojas/POIs aleatórios
         candidatos_validos.extend(disparar_apis_paralelas([(API_Nominatim, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado})]))
     else:
         candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Photon, (endereco_canonico,), {}), (API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_TomTom, (endereco_canonico,), {})]))
@@ -956,14 +963,16 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_text, destino_text, lat_o, lon_o, lat_d, lon_d, dist_linha_reta):
-    orig_str = f"{lat_o},{lon_o}" 
-    dest_str = f"{lat_d},{lon_d}"
+    # ATUALIZAÇÃO 1.21: Restauração Textual para Paridade com Google Maps.
+    # Em vez de mandar a coordenada crua (que forçava o Google a inventar o nome da loja), 
+    # enviamos o Texto Final Oficial consolidado.
+    orig_str = requests.utils.quote(origem_text) if origem_text else f"{lat_o},{lon_o}"
+    dest_str = requests.utils.quote(destino_text) if destino_text else f"{lat_d},{lon_d}"
     
-    # ATUALIZAÇÃO 1.20: Link Oficial Paritário com a Interface Streamlit (Identidade Visual Absoluta)
     url_api = f"https://www.google.com/maps/dir/{orig_str}/{dest_str}/data=!4m2!4m1!3e0"
-    link_maps = f"https://www.google.com/maps/dir/...?q={orig_str}&daddr={dest_str}"
+    link_maps = f"https://www.google.com/maps/dir/?api=1&origin={orig_str}&destination={dest_str}&travelmode=driving"
     
-    cache_key = f"GOOG_V7_{orig_str}|{dest_str}"
+    cache_key = f"GOOG_V21_{orig_str}|{dest_str}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -999,7 +1008,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V7_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V21_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1014,13 +1023,15 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     else:
         dist_linha_reta = 0.0
 
-    link_fallback = f"https://www.google.com/maps/dir/...?q={lat_o},{lon_o}&daddr={lat_d},{lon_d}"
+    orig_param_fb = requests.utils.quote(end_oficial_o) if end_oficial_o else f"{lat_o},{lon_o}"
+    dest_param_fb = requests.utils.quote(end_oficial_d) if end_oficial_d else f"{lat_d},{lon_d}"
+    link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
 
     if lat_o == 0.0 or lat_d == 0.0:
         km_terrestre = 0.0
         tempo_geo_str = "0 min"
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-        motivo_fallback = "Falha crítica de geocodificação. O motor foi incapaz de resolver as coordenadas do endereço."
+        motivo_fallback = "Falha crítica de geocodificação. O motor foi incapaz de resolver o Endereço/IBGE da localidade."
         retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "N/A", 0, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback)
         return retorno
 
@@ -1039,12 +1050,13 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
         return retorno
 
+    # ATUALIZAÇÃO 1.21: Se o Google falhar por total inexistência de vias (Ex: Meio do rio Amazonas), a explicação deixará isso explícito.
     km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
     v_comercial = 45.0 if km_terrestre < 50.0 else 65.0
     minutos_est = round((km_terrestre / v_comercial) * 60) if km_terrestre > 0 else 0
     tempo_geo_str = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
     tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-    motivo_fallback = "Provedor viário indisponível (Timeout de Rede). Trajeto matematicamente projetado por aproximação geodésica baseada na Linha Reta Absoluta."
+    motivo_fallback = "Sem Rota Viária Viável no Google (Trecho hidroviário ou selva). Trajeto projetado matematicamente por aproximação geodésica baseada na Linha Reta."
     
     retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 70, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback)
     cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
@@ -1065,7 +1077,7 @@ def embrulhar_task_paralela(item):
             res = tuple(list(res) + ["N/A"] * (29 - len(res)))
         return par_id, res
     except Exception as e: 
-        msg_erro = f"FALHA INTERNA DE CÓDIGO: {str(e)}"
+        msg_erro = f"FALHA INTERNA DE CÓDIGO PYTHON: {str(e)}"
         fallback = (0.0, "0 min", "", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "", "", "N/A", str(orig), "BAIXA", 0, "", "", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], "Erro Crítico e Falha de Exceção Isolada.")
         return par_id, fallback
 
@@ -1171,8 +1183,10 @@ with tab_individual:
                 lat_d, lon_d = res_ind[21], res_ind[22]
 
                 if validar_coordenadas_mapa(lat_o, lon_o) and validar_coordenadas_mapa(lat_d, lon_d):
-                    # Identidade Visual Absoluta: Link universal sem conflitos de parâmetros.
-                    url_iframe = f"https://maps.google.com/maps?saddr={lat_o},{lon_o}&daddr={lat_d},{lon_d}&output=embed"
+                    # Identidade Visual Absoluta Restaurada: Passando Endereços Oficiais, Não Coordenadas
+                    o_param = requests.utils.quote(res_ind[12]) if res_ind[12] else requests.utils.quote(orig_ind)
+                    d_param = requests.utils.quote(res_ind[18]) if res_ind[18] else requests.utils.quote(dest_ind)
+                    url_iframe = f"https://maps.google.com/maps?saddr={o_param}&daddr={d_param}&output=embed"
                     components.iframe(url_iframe, height=470, scrolling=True)
                 else:
                     st.warning("Renderização de mapa suprimida: as coordenadas mapeadas não possuem topologia válida para exibição visual.")
