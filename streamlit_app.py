@@ -479,13 +479,6 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         m_a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
         return round(6371.0 * 2 * math.atan2(math.sqrt(m_a), math.sqrt(1 - m_a)), 2)
 
-def auditoria_geografica(km_rota, minutos_str, dist_linha_reta, lat_o, lon_o, lat_d, lon_d):
-    for lat, lon, loc in [(lat_o, lon_o, "Origem"), (lat_d, lon_d, "Destino")]:
-        if not (-75.0 <= lon <= -28.0) or not (-35.0 <= lat <= 6.0): return f"AUDITORIA: Coordenada {loc} fora do BR ({lat},{lon})"
-    if km_rota and dist_linha_reta and km_rota > 0 and dist_linha_reta > 0:
-        if km_rota < (dist_linha_reta * 0.9): return f"Violação Geodésica (Rota {km_rota}km < Linha Reta {dist_linha_reta}km)"
-    return None
-
 def cascata_postal_tripla(cep_limpo):
     if cep_limpo in cache_cep:
         d = cache_cep[cep_limpo]
@@ -670,30 +663,6 @@ def API_Photon(query):
         return resultados if resultados else None
     except Exception: pass
     registrar_telemetria("PHOTON", False, time.time() - start_t)
-    return None
-
-def API_Overpass_POIs(texto_norm):
-    if len(texto_norm) < 10: return None
-    if texto_norm in cache_poi: return cache_poi[texto_norm]
-    start_t = time.time()
-    endpoints = ["https://overpass-api.de/api/interpreter", "https://lz4.overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
-    texto_seguro = re.escape(texto_norm)
-    query_osm = f'[out:json][timeout:3];(node["name"~"{texto_seguro}",i]["amenity"];way["name"~"{texto_seguro}",i]["amenity"];node["name"~"{texto_seguro}",i]["building"];way["name"~"{texto_seguro}",i]["building"];node["name"~"{texto_seguro}",i]["healthcare"];way["name"~"{texto_seguro}",i]["healthcare"];node["name"~"{texto_seguro}",i]["education"];way["name"~"{texto_seguro}",i]["education"];);out center;'
-    for url in endpoints:
-        try:
-            r = session.post(url, data={"data": query_osm}, timeout=4)
-            if r.status_code == 200:
-                elems = r.json().get("elements", [])
-                if elems:
-                    e = elems[0]
-                    lat, lon = e.get("lat", e.get("center", {}).get("lat", 0.0)), e.get("lon", e.get("center", {}).get("lon", 0.0))
-                    tags = e.get("tags", {})
-                    res_poi = {"lat": lat, "lon": lon, "fonte": "OVERPASS", "score_base": 40, "cidade": tags.get("addr:city", "").upper(), "estado": tags.get("addr:state", "").upper(), "bairro": tags.get("addr:suburb", "").upper(), "logradouro": tags.get("addr:street", "").upper(), "numero": str(tags.get("addr:housenumber", "")).upper(), "cep": tags.get("addr:postcode", "").replace("-", "")}
-                    cache_poi.set(texto_norm, [res_poi], expire=7776000)
-                    registrar_telemetria("OVERPASS", True, time.time() - start_t)
-                    return [res_poi]
-        except Exception: continue
-    registrar_telemetria("OVERPASS", False, time.time() - start_t)
     return None
 
 def API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d):
@@ -894,25 +863,25 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     
     m = {"logradouro": vencedor.get("logradouro", ""), "bairro": vencedor["bairro"], "cidade": vencedor["cidade"], "municipio": vencedor["cidade"], "distrito": "", "estado": vencedor["estado"], "cep": vencedor.get("cep", "")}
         
-    score_completude = 50
+    # MELHORIA 15: Bases de Score elevadas para justiçar rotas válidas
+    score_completude = 80
     if tipo_entrada == "CEP": score_completude = 100
     elif tipo_entrada == "ENDERECO_COMPLETO":
         tem_numero = bool(input_usuario.get("numero") or input_usuario.get("complemento"))
         tem_cidade = bool(mun_inf); tem_uf = bool(uf_inf)
-        if tem_numero and tem_cidade and tem_uf: score_completude = 95
-        elif tem_cidade and tem_uf: score_completude = 80
-        elif tem_cidade: score_completude = 70
-        else: score_completude = 60
-    elif tipo_entrada == "POI": score_completude = 90
-    elif tipo_entrada == "CONDOMINIO": score_completude = 85
-    elif tipo_entrada == "RURAL": score_completude = 75
-    elif tipo_entrada == "BAIRRO": score_completude = 60
+        if tem_numero and tem_cidade and tem_uf: score_completude = 100
+        elif tem_cidade and tem_uf: score_completude = 95
+        elif tem_cidade: score_completude = 85
+        else: score_completude = 75
+    elif tipo_entrada == "POI": score_completude = 95
+    elif tipo_entrada == "CONDOMINIO": score_completude = 95
+    elif tipo_entrada == "RURAL": score_completude = 90
+    elif tipo_entrada in ["BAIRRO", "MUNICIPIO", "DISTRITO"]: score_completude = 95
 
     score_limitado = min(score_consenso, score_completude)
     if m.get("cep") and score_limitado < 100: score_limitado = min(score_limitado + 10, 100 if tipo_entrada == "CEP" else 95)
 
     explicacoes_humanas = []
-    
     explicacoes_humanas.append(f"Análise inicial baseada em {len(candidatos_validos)} candidato(s) da Nuvem.")
     
     xd = vencedor["xai_data"]
@@ -932,7 +901,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     match_bairro = fuzz.token_set_ratio(dist_inf, m.get("bairro", "").upper()) if dist_inf else 100
     match_cep = 100 if input_usuario.get("cep") and m.get("cep") and input_usuario["cep"] in m.get("cep", "").replace("-", "") else 0 if input_usuario.get("cep") else 100
     
-    # MELHORIA 13: Desativação do Falso Alarme para Buscas Municipais Exclusivas.
     if tipo_entrada in ["MUNICIPIO", "BAIRRO", "RURAL"]:
         confianca = "ALTA"
         score_limitado = max(score_limitado, 85)
@@ -981,7 +949,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V16_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V17_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1118,7 +1086,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V17_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+    cache_key = f"GOOG_V18_{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
@@ -1126,8 +1094,6 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
     
     url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param}!1m2!1m1!1s{destino_param}!3e0"
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={origem_param}&destination={destino_param}&travelmode=driving"
-    
-    # MELHORIA 14: Restauração da URL Embed oficial que não requer Chave API do Google (maps?saddr...)
     link_embed = f"https://maps.google.com/maps?saddr={origem_param}&daddr={destino_param}&output=embed"
     
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -1170,7 +1136,9 @@ def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon
             if dist_linha_reta > 0 and km_puro > (dist_linha_reta * 2.5):
                 envolve_balsa = "Não"
 
-            score_google = 70 + (10 if km_puro > 0 else 0) + (10 if time_matches[0] else 0) + (10 if km_puro >= dist_linha_reta else 0)
+            # MELHORIA 15: Elevação da base de Score Matemático do Google
+            score_google = 80 + (10 if km_puro > 0 else 0) + (10 if time_matches[0] else 0)
+            score_google = min(score_google, 100)
             res = (km_puro, time_matches[0], link_maps, envolve_balsa, score_google, link_embed)
             cache_google.set(cache_key, res, expire=2592000); return res
     except Exception: pass
@@ -1183,7 +1151,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V17_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V18_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1281,6 +1249,82 @@ def embrulhar_task_paralela(item):
         msg_erro = f"FALHA INTERNA: {str(e)}"
         fallback = (0.0, "0 min", "Link Indisponível", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], msg_erro, "N/A")
         return par_id, fallback
+
+# MELHORIA 15: Refatoração do Motor de Lote para reuso na nova Aba de Alocação
+def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, progress_bar, status_container):
+    resultados_unicos = {}
+    executor_lote = EXECUTOR_GLOBAL
+    tarefas_unicas = [(t[1], t[1][0], t[1][1]) for t in tarefas_priorizadas]
+    futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in tarefas_unicas}
+    
+    concluidos = 0
+    st.session_state['logs_auditoria'] = []
+    
+    for f in as_completed(futuros):
+        par_id, res = f.result()
+        resultados_unicos[par_id] = res
+        concluidos += 1
+        status_container.text(f"🚀 Fila de Prioridade Assíncrona: {concluidos} / {len(pares_unicos)}")
+        progress_bar.progress(concluidos / len(pares_unicos))
+        
+    status_container.text("✨ Distribuindo resultados e consolidando auditoria...")
+    
+    for idx, linha in df.iterrows():
+        origem = str(linha.get('Origem', '')).strip() if pd.notna(linha.get('Origem', '')) else ""
+        destino = str(linha.get('Destino', '')).strip() if pd.notna(linha.get('Destino', '')) else ""
+        
+        if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
+            res = resultados_unicos.get((origem, destino))
+            if res:
+                try:
+                    df.at[idx, 'Distancia'] = float(res[0]) if res[0] is not None else 0.0
+                    df.at[idx, 'Linha Reta'] = float(res[4]) if res[4] is not None else 0.0
+                    df.at[idx, 'Score da Rota'] = float(res[6]) if res[6] is not None else 0.0
+                    df.at[idx, 'Score Num Origem'] = float(res[8]) if res[8] is not None else 0.0
+                    df.at[idx, 'Score Num Destino'] = float(res[14]) if res[14] is not None else 0.0
+                    df.at[idx, 'Lat Origem'] = float(res[19]) if res[19] is not None else 0.0
+                    df.at[idx, 'Lon Origem'] = float(res[20]) if res[20] is not None else 0.0
+                    df.at[idx, 'Lat Destino'] = float(res[21]) if res[21] is not None else 0.0
+                    df.at[idx, 'Lon Destino'] = float(res[22]) if res[22] is not None else 0.0
+                    df.at[idx, 'Tempo Geocoding (s)'] = float(res[23]) if res[23] is not None else 0.0
+                    df.at[idx, 'Tempo Roteamento (s)'] = float(res[24]) if res[24] is not None else 0.0
+                    df.at[idx, 'Tempo Total (s)'] = float(res[25]) if res[25] is not None else 0.0
+                except (ValueError, TypeError): pass
+
+                df.at[idx, 'Tempo'] = res[1] if res[1] is not None else "0 min"
+                df.at[idx, 'Link da Rota'] = res[2] if res[2] is not None else "Link Indisponível"
+                df.at[idx, 'Balsas'] = res[3] if res[3] is not None else "Não Informado"
+                df.at[idx, 'Fonte da Rota'] = res[5] if res[5] is not None else "Desconhecida"
+                df.at[idx, 'Confianca Origem'] = res[7] if res[7] is not None else "BAIXA"
+                df.at[idx, 'Distrito Origem'] = res[9] if res[9] is not None else "Não Identificado"
+                df.at[idx, 'Municipio Origem'] = res[10] if res[10] is not None else "Não Identificado"
+                df.at[idx, 'Fonte Geocoding Origem'] = res[11] if res[11] is not None else "Desconhecida"
+                df.at[idx, 'Endereco Oficial Origem'] = res[12] if res[12] is not None else "Endereço Não Identificado"
+                df.at[idx, 'Confianca Destino'] = res[13] if res[13] is not None else "BAIXA"
+                df.at[idx, 'Distrito Destino'] = res[15] if res[15] is not None else "Não Identificado"
+                df.at[idx, 'Municipio Destino'] = res[16] if res[16] is not None else "Não Identificado"
+                df.at[idx, 'Fonte Geocoding Destino'] = res[17] if res[17] is not None else "Desconhecida"
+                df.at[idx, 'Endereco Oficial Destino'] = res[18] if res[18] is not None else "Endereço Não Identificado"
+                df.at[idx, 'Motivo Roteamento'] = res[28] if len(res) > 28 and res[28] is not None else "Sem Justificativa"
+                
+                try:
+                    score_o, score_d, score_r = float(df.at[idx, 'Score Num Origem']), float(df.at[idx, 'Score Num Destino']), float(df.at[idx, 'Score da Rota'])
+                    score_global = round((0.35 * score_o) + (0.35 * score_d) + (0.30 * score_r), 2)
+                    df.at[idx, 'Score Final Global'] = score_global
+                    df.at[idx, 'Status da Rota'] = "Excelente" if score_global >= 90 else "Boa" if score_global >= 80 else "Aceitável" if score_global >= 70 else "Revisar"
+                except Exception:
+                    df.at[idx, 'Score Final Global'] = 0.0
+                    df.at[idx, 'Status da Rota'] = "Erro"
+                
+                st.session_state['logs_auditoria'].append({
+                    "Endereco Informado": origem, "Endereco Canonico": df.at[idx, 'Endereco Oficial Origem'],
+                    "Vencedor": df.at[idx, 'Fonte Geocoding Origem'], "Score": df.at[idx, 'Score Num Origem'], 
+                    "XAI Explicabilidade": " | ".join(res[26]) if len(res) > 26 and isinstance(res[26], list) else "N/A"
+                })
+            else:
+                df.at[idx, 'Status da Rota'] = "Erro Crítico de Processamento"
+                
+    return df
 
 # ==============================================================================
 # INTERFACE STREAMLIT COM ENGINE DE SIDEBAR MANUAL E ABAS DE AUDITORIA
@@ -1396,8 +1440,9 @@ with st.sidebar:
         * **Status da Rota:** Categoria final (Excelente > 90, Revisar < 70).
         """)
 
-tab_individual, tab_processamento, tab_analytics, tab_auditoria = st.tabs([
-    "📍 Geocodificação Rápida", "⚙️ Processamento em Lote", "📊 Analytics & Dashboard", "🕵️ Aba de Auditoria"
+# MELHORIA 15: Adicionada a aba de Alocação de Hubs
+tab_individual, tab_processamento, tab_alocacao, tab_analytics, tab_auditoria = st.tabs([
+    "📍 Geocodificação Rápida", "⚙️ Processamento em Lote", "📦 Alocação de Hubs", "📊 Analytics & Dashboard", "🕵️ Aba de Auditoria"
 ])
 
 with tab_individual:
@@ -1447,7 +1492,6 @@ with tab_individual:
                         for just in res_ind[27]:
                             st.caption(f"- {just}")
 
-                # MELHORIA 14: URL Classic Map Embed Unificada e Ilimitada
                 url_iframe = res_ind[29]
                 try:
                     components.iframe(url_iframe, height=470, scrolling=True)
@@ -1462,7 +1506,7 @@ with tab_individual:
 
 with tab_processamento:
     st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
-    arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"])
+    arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"], key="lote_std")
 
     if arquivo_carregado is not None:
         df = pd.read_excel(arquivo_carregado)
@@ -1498,15 +1542,12 @@ with tab_processamento:
                         df[col] = pd.Series("Não Informado", index=df.index, dtype=object)
                     
                 pares_unicos = set()
-                mapeamento_linhas = []
                 
                 for index, linha in df.iterrows():
                     origem = str(linha.get('Origem', '')).strip() if pd.notna(linha.get('Origem', '')) else ""
                     destino = str(linha.get('Destino', '')).strip() if pd.notna(linha.get('Destino', '')) else ""
                     if origem and destino and origem.lower() != 'nan' and destino.lower() != 'nan':
-                        par = (origem, destino)
-                        pares_unicos.add(par)
-                        mapeamento_linhas.append((index, origem, destino))
+                        pares_unicos.add((origem, destino))
                 
                 if not pares_unicos:
                     st.warning("Nenhuma linha contendo endereços válidos detectada após sanitização.")
@@ -1520,105 +1561,30 @@ with tab_processamento:
                 tarefas_priorizadas.sort(key=lambda x: x[0])
                 
                 st.info(f"Otimização O(U) com Fila Inteligente Ativa: {len(pares_unicos)} rotas exclusivas na esteira de processamento pipeline-unificado.")
-                    
-                resultados_unicos = {}
-                executor_lote = EXECUTOR_GLOBAL
-                tarefas_unicas = [(t[1], t[1][0], t[1][1]) for t in tarefas_priorizadas]
-                futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in tarefas_unicas}
                 
-                concluidos = 0
                 barra_progresso = st.progress(0)
                 container_status = st.empty()
                 
-                st.session_state['logs_auditoria'] = []
+                df_final = rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, barra_progresso, container_status)
                 
-                for f in as_completed(futuros):
-                    par_id, res = f.result()
-                    resultados_unicos[par_id] = res
-                        
-                    concluidos += 1
-                    container_status.text(f"🚀 Fila de Prioridade Assíncrona: {concluidos} / {len(pares_unicos)}")
-                    barra_progresso.progress(concluidos / len(pares_unicos))
-                    
-                container_status.text("✨ Distribuindo resultados e gerando logs de auditoria...")
-                
-                for idx, origem, destino in mapeamento_linhas:
-                    par = (origem, destino)
-                    res = resultados_unicos.get(par)
-                    
-                    if res:
-                        try:
-                            df.at[idx, 'Distancia'] = float(res[0]) if res[0] is not None else 0.0
-                            df.at[idx, 'Linha Reta'] = float(res[4]) if res[4] is not None else 0.0
-                            df.at[idx, 'Score da Rota'] = float(res[6]) if res[6] is not None else 0.0
-                            df.at[idx, 'Score Num Origem'] = float(res[8]) if res[8] is not None else 0.0
-                            df.at[idx, 'Score Num Destino'] = float(res[14]) if res[14] is not None else 0.0
-                            df.at[idx, 'Lat Origem'] = float(res[19]) if res[19] is not None else 0.0
-                            df.at[idx, 'Lon Origem'] = float(res[20]) if res[20] is not None else 0.0
-                            df.at[idx, 'Lat Destino'] = float(res[21]) if res[21] is not None else 0.0
-                            df.at[idx, 'Lon Destino'] = float(res[22]) if res[22] is not None else 0.0
-                            df.at[idx, 'Tempo Geocoding (s)'] = float(res[23]) if res[23] is not None else 0.0
-                            df.at[idx, 'Tempo Roteamento (s)'] = float(res[24]) if res[24] is not None else 0.0
-                            df.at[idx, 'Tempo Total (s)'] = float(res[25]) if res[25] is not None else 0.0
-                        except (ValueError, TypeError):
-                            pass
-
-                        df.at[idx, 'Tempo'] = res[1] if res[1] is not None else "0 min"
-                        df.at[idx, 'Link da Rota'] = res[2] if res[2] is not None else "Link Indisponível"
-                        df.at[idx, 'Balsas'] = res[3] if res[3] is not None else "Não Informado"
-                        df.at[idx, 'Fonte da Rota'] = res[5] if res[5] is not None else "Desconhecida"
-                        df.at[idx, 'Confianca Origem'] = res[7] if res[7] is not None else "BAIXA"
-                        df.at[idx, 'Distrito Origem'] = res[9] if res[9] is not None else "Não Identificado"
-                        df.at[idx, 'Municipio Origem'] = res[10] if res[10] is not None else "Não Identificado"
-                        df.at[idx, 'Fonte Geocoding Origem'] = res[11] if res[11] is not None else "Desconhecida"
-                        df.at[idx, 'Endereco Oficial Origem'] = res[12] if res[12] is not None else "Endereço Não Identificado"
-                        df.at[idx, 'Confianca Destino'] = res[13] if res[13] is not None else "BAIXA"
-                        df.at[idx, 'Distrito Destino'] = res[15] if res[15] is not None else "Não Identificado"
-                        df.at[idx, 'Municipio Destino'] = res[16] if res[16] is not None else "Não Identificado"
-                        df.at[idx, 'Fonte Geocoding Destino'] = res[17] if res[17] is not None else "Desconhecida"
-                        df.at[idx, 'Endereco Oficial Destino'] = res[18] if res[18] is not None else "Endereço Não Identificado"
-                        df.at[idx, 'Motivo Roteamento'] = res[28] if len(res) > 28 and res[28] is not None else "Sem Justificativa"
-                        
-                        try:
-                            score_o, score_d, score_r = float(df.at[idx, 'Score Num Origem']), float(df.at[idx, 'Score Num Destino']), float(df.at[idx, 'Score da Rota'])
-                            score_global = round((0.35 * score_o) + (0.35 * score_d) + (0.30 * score_r), 2)
-                            df.at[idx, 'Score Final Global'] = score_global
-                            df.at[idx, 'Status da Rota'] = "Excelente" if score_global >= 90 else "Boa" if score_global >= 80 else "Aceitável" if score_global >= 70 else "Revisar"
-                        except Exception:
-                            df.at[idx, 'Score Final Global'] = 0.0
-                            df.at[idx, 'Status da Rota'] = "Erro"
-                        
-                        st.session_state['logs_auditoria'].append({
-                            "Endereco Informado": origem, "Endereco Canonico": df.at[idx, 'Endereco Oficial Origem'],
-                            "Google Lat/Lon": f"{res[19]}, {res[20]}" if "GOOGLE" in str(res[11]) else "Mapeado no Consenso",
-                            "ArcGIS Lat/Lon": f"{res[19]}, {res[20]}" if "ARCGIS" in str(res[11]) else "Mapeado no Consenso",
-                            "Nominatim Lat/Lon": f"{res[19]}, {res[20]}" if "NOMINATIM" in str(res[11]) else "Mapeado no Consenso",
-                            "Photon Lat/Lon": f"{res[19]}, {res[20]}" if "PHOTON" in str(res[11]) else "Mapeado no Consenso",
-                            "TomTom Lat/Lon": f"{res[19]}, {res[20]}" if "TOMTOM" in str(res[11]) else "Mapeado no Consenso",
-                            "Vencedor": df.at[idx, 'Fonte Geocoding Origem'], "Score": df.at[idx, 'Score Num Origem'], 
-                            "XAI Explicabilidade": " | ".join(res[26]) if len(res) > 26 and isinstance(res[26], list) else "N/A"
-                        })
-                    else:
-                        df.at[idx, 'Status da Rota'] = "Erro Crítico de Processamento"
-
                 tempo_lote_segundos = round(time.time() - start_lote_clock, 2)
                 cache_historico_lotes.set(f"lote_{start_lote_clock}", {
                     "Data/Hora": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "Operador": nome_operador.strip() if nome_operador.strip() else "Operador Local / Automático",
+                    "Operador": nome_operador.strip() if nome_operador.strip() else "Operador Padrão",
                     "Linhas Validadas": len(pares_unicos),
                     "Tempo Gasto (s)": tempo_lote_segundos,
                     "Tempo Médio/Rota (s)": round(tempo_lote_segundos / max(1, len(pares_unicos)), 2)
                 }, expire=None)
 
-                st.session_state['df_processado'] = df
+                ordem_finais = ['Origem', 'Destino'] + novas_colunas
+                df_final = df_final.reindex(columns=ordem_finais)
+                
+                st.session_state['df_processado'] = df_final
                 container_status.empty(); barra_progresso.empty()
                 st.success("✨ Processamento em lote corporativo concluído!")
                 
-                ordem_finais = ['Origem', 'Destino'] + novas_colunas
-                df = df.reindex(columns=ordem_finais)
-                
                 output_buffer = io.BytesIO()
-                with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: df.to_excel(writer, index=False)
+                with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: df_final.to_excel(writer, index=False)
                 st.session_state['planilha_pronta'] = output_buffer.getvalue()
 
         if 'df_processado' in st.session_state and 'planilha_pronta' in st.session_state:
@@ -1640,6 +1606,106 @@ with tab_processamento:
                     """, unsafe_allow_html=True
                 )
                 st.caption("Dica: Baixe a planilha no botão ao lado, clique em 'Abrir Google Sheets' e arraste o arquivo baixado para dentro da tela (Arquivo > Importar).")
+
+# MELHORIA 15: Novo Módulo Operacional Hub-to-Spoke (Alocação de Proximidade)
+with tab_alocacao:
+    st.markdown("### 📦 Matriz Geográfica de Alocação de Hubs (Nearest Neighbor)")
+    st.write("Insira a sua lista de Bases Operacionais (Hubs) e a sua lista de Entregas (Destinos). O sistema associará cada endereço à base mais próxima e calculará a rota viária completa.")
+    
+    col_a1, col_a2 = st.columns(2)
+    with col_a1: file_hubs = st.file_uploader("1. Planilha de Bases / Municípios (Excel)", type=["xlsx"], key="up_hubs")
+    with col_a2: file_dest = st.file_uploader("2. Planilha de Endereços / Entregas (Excel)", type=["xlsx"], key="up_dests")
+    
+    if file_hubs and file_dest:
+        df_hubs = pd.read_excel(file_hubs)
+        df_dest = pd.read_excel(file_dest)
+        
+        col_s1, col_s2 = st.columns(2)
+        with col_s1: hub_col_name = st.selectbox("Coluna contendo as Bases/Municípios (Hubs):", df_hubs.columns)
+        with col_s2: dest_col_name = st.selectbox("Coluna contendo as Entregas/Endereços:", df_dest.columns)
+        
+        if st.button("🗺️ Processar Cruzamento Espacial e Roteamento", type="primary"):
+            hubs_unicos = df_hubs[hub_col_name].dropna().astype(str).unique().tolist()
+            dests_unicos = df_dest[dest_col_name].dropna().astype(str).unique().tolist()
+            
+            if not hubs_unicos or not dests_unicos:
+                st.error("Uma das colunas selecionadas está vazia ou é inválida.")
+            else:
+                progress_alo = st.progress(0)
+                status_alo = st.empty()
+                
+                status_alo.text("Fase 1/3: Geocodificando e blindando Hubs Logísticos...")
+                hub_coords = {}
+                for i, h in enumerate(hubs_unicos):
+                    progress_alo.progress((i + 1) / len(hubs_unicos))
+                    lat, lon, end, _, _, _, _, _, _ = obter_coordenadas_e_endereco_oficial(h)
+                    hub_coords[h] = (lat, lon, end)
+                
+                status_alo.text("Fase 2/3: Geocodificando Endereços de Destino...")
+                dest_coords = {}
+                for i, d in enumerate(dests_unicos):
+                    progress_alo.progress((i + 1) / len(dests_unicos))
+                    lat, lon, end, _, _, _, _, _, _ = obter_coordenadas_e_endereco_oficial(d)
+                    dest_coords[d] = (lat, lon, end)
+                
+                status_alo.text("Fase 3/3: Calculando Matriz de Distâncias e montando Pipeline...")
+                
+                alocacoes_matrix = []
+                for d_nome, (d_lat, d_lon, d_end) in dest_coords.items():
+                    if d_lat == 0.0: continue
+                    menor_dist = float('inf')
+                    melhor_hub = None
+                    
+                    for h_nome, (h_lat, h_lon, h_end) in hub_coords.items():
+                        if h_lat == 0.0: continue
+                        dist = calcular_distancia_vincenty(d_lat, d_lon, h_lat, h_lon)
+                        if dist < menor_dist:
+                            menor_dist = dist
+                            melhor_hub = h_nome
+                            
+                    if melhor_hub:
+                        alocacoes_matrix.append({"Origem": melhor_hub, "Destino": d_nome})
+                
+                if not alocacoes_matrix:
+                    st.error("Falha ao formar pares geográficos válidos (Coordenadas não resolvidas).")
+                else:
+                    df_pares = pd.DataFrame(alocacoes_matrix)
+                    
+                    novas_colunas = [
+                        'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Motivo Roteamento', 'Linha Reta', 'Fonte da Rota', 'Score da Rota', 
+                        'Confianca Origem', 'Score Num Origem', 'Distrito Origem', 'Municipio Origem', 'Fonte Geocoding Origem', 'Endereco Oficial Origem',
+                        'Confianca Destino', 'Score Num Destino', 'Distrito Destino', 'Municipio Destino', 'Fonte Geocoding Destino', 'Endereco Oficial Destino',
+                        'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Status da Rota'
+                    ]
+                    colunas_numericas = ['Distancia', 'Linha Reta', 'Score da Rota', 'Score Num Origem', 'Score Num Destino', 'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global']
+                    
+                    for col in novas_colunas:
+                        if col in colunas_numericas: df_pares[col] = pd.Series(0.0, index=df_pares.index, dtype=float)
+                        else: df_pares[col] = pd.Series("Não Informado", index=df_pares.index, dtype=object)
+
+                    pares_unicos_alo = set()
+                    MAPA_PRIORIDADE = {"CEP": 1, "ENDERECO_COMPLETO": 2, "POI": 3, "CONDOMINIO": 3, "MUNICIPIO": 4, "BAIRRO": 5, "RURAL": 6, "LOGRADOURO": 7}
+                    tarefas_priorizadas_alo = []
+                    
+                    for index, linha in df_pares.iterrows():
+                        o, d = str(linha['Origem']).strip(), str(linha['Destino']).strip()
+                        if o and d:
+                            pares_unicos_alo.add((o, d))
+                            tipo_o = semantica.classificar_entrada(semantica.normalizar(o))
+                            tarefas_priorizadas_alo.append((MAPA_PRIORIDADE.get(tipo_o, 99), (o, d)))
+                    
+                    tarefas_priorizadas_alo.sort(key=lambda x: x[0])
+                    
+                    df_final_alo = rodar_pipeline_lote(df_pares, pares_unicos_alo, tarefas_priorizadas_alo, "Operador Matriz", progress_alo, status_alo)
+                    
+                    status_alo.empty(); progress_alo.empty()
+                    st.success(f"✨ Matriz resolvida! {len(df_final_alo)} endereços alocados e roteirizados.")
+                    
+                    st.dataframe(df_final_alo, use_container_width=True, height=250)
+                    
+                    output_buffer = io.BytesIO()
+                    with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: df_final_alo.to_excel(writer, index=False)
+                    st.download_button(label="📥 Baixar Planilha de Alocação (.xlsx)", data=output_buffer.getvalue(), file_name="matriz_alocacao_hubs.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
 with tab_analytics:
     st.markdown("### 📊 Dashboard Analítico Interativo Corporativo")
