@@ -45,10 +45,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v19" not in st.session_state:
+if "cache_limpo_v20" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v19"] = True
+    st.session_state["cache_limpo_v20"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -358,7 +358,6 @@ class MotorEnderecoCanônico:
                 if melhor_match and melhor_match[1] >= 65:
                     resultado.update({"municipio": melhor_match[0]})
         
-        # MELHORIA 16: Limiar reduzido de 92 para 85 para capturar erros severos de sigla de estado ("DP" = "SP")
         if not resultado["municipio"] and len(texto_norm) > 4:
             melhor_match_global = process.extractOne(texto_norm, LISTA_CONTEXTO_FUZZY, scorer=fuzz.WRatio)
             if melhor_match_global and melhor_match_global[1] >= 85:
@@ -485,6 +484,13 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         m_a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
         return round(6371.0 * 2 * math.atan2(math.sqrt(m_a), math.sqrt(1 - m_a)), 2)
 
+def auditoria_geografica(km_rota, minutos_str, dist_linha_reta, lat_o, lon_o, lat_d, lon_d):
+    for lat, lon, loc in [(lat_o, lon_o, "Origem"), (lat_d, lon_d, "Destino")]:
+        if not (-75.0 <= lon <= -28.0) or not (-35.0 <= lat <= 6.0): return f"AUDITORIA: Coordenada {loc} fora do BR ({lat},{lon})"
+    if km_rota and dist_linha_reta and km_rota > 0 and dist_linha_reta > 0:
+        if km_rota < (dist_linha_reta * 0.9): return f"Violação Geodésica (Rota {km_rota}km < Linha Reta {dist_linha_reta}km)"
+    return None
+
 def cascata_postal_tripla(cep_limpo):
     if cep_limpo in cache_cep:
         d = cache_cep[cep_limpo]
@@ -538,6 +544,26 @@ def validar_consistencia_municipal(candidato, mun_inf):
     if mun_inf == cid_api or mun_inf in cid_api or cid_api in mun_inf: return True
     if fuzz.token_set_ratio(mun_inf, cid_api) >= 95: return True
     return False
+
+# MELHORIA 17: Função Suprema Restaurada e Isolada
+def obter_coordenada_centroide_supremo(mun_nome, uf_nome):
+    url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?City={requests.utils.quote(mun_nome)}&Region={requests.utils.quote(uf_nome)}&CountryCode=BRA&f=json&maxLocations=1"
+    try:
+        r = session.get(url_arc, timeout=5).json()
+        if r.get('candidates'):
+            cand = r['candidates'][0]
+            lat_c, lon_c = float(cand['location']['y']), float(cand['location']['x'])
+            if validar_coordenada_brasil(lat_c, lon_c)[0]: return lat_c, lon_c, "ARCGIS_CENTROIDE_SUPREMO"
+    except: pass
+    
+    url_nom = f"https://nominatim.openstreetmap.org/search?city={requests.utils.quote(mun_nome)}&state={requests.utils.quote(uf_nome)}&country=Brazil&format=json&limit=1"
+    try:
+        r = session.get(url_nom, headers={"User-Agent": "RotasCorp/11.0"}, timeout=5).json()
+        if r:
+            lat_c, lon_c = float(r[0]['lat']), float(r[0]['lon'])
+            if validar_coordenada_brasil(lat_c, lon_c)[0]: return lat_c, lon_c, "NOMINATIM_CENTROIDE_SUPREMO"
+    except: pass
+    return 0.0, 0.0, None
 
 # ==============================================================================
 # 🗺️ MÓDULOS DE GEOCODIFICAÇÃO COM TELEMETRIA (CONTRATO LISTA TOP-K)
@@ -671,30 +697,6 @@ def API_Photon(query):
     registrar_telemetria("PHOTON", False, time.time() - start_t)
     return None
 
-def API_Overpass_POIs(texto_norm):
-    if len(texto_norm) < 10: return None
-    if texto_norm in cache_poi: return cache_poi[texto_norm]
-    start_t = time.time()
-    endpoints = ["https://overpass-api.de/api/interpreter", "https://lz4.overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
-    texto_seguro = re.escape(texto_norm)
-    query_osm = f'[out:json][timeout:3];(node["name"~"{texto_seguro}",i]["amenity"];way["name"~"{texto_seguro}",i]["amenity"];node["name"~"{texto_seguro}",i]["building"];way["name"~"{texto_seguro}",i]["building"];node["name"~"{texto_seguro}",i]["healthcare"];way["name"~"{texto_seguro}",i]["healthcare"];node["name"~"{texto_seguro}",i]["education"];way["name"~"{texto_seguro}",i]["education"];);out center;'
-    for url in endpoints:
-        try:
-            r = session.post(url, data={"data": query_osm}, timeout=4)
-            if r.status_code == 200:
-                elems = r.json().get("elements", [])
-                if elems:
-                    e = elems[0]
-                    lat, lon = e.get("lat", e.get("center", {}).get("lat", 0.0)), e.get("lon", e.get("center", {}).get("lon", 0.0))
-                    tags = e.get("tags", {})
-                    res_poi = {"lat": lat, "lon": lon, "fonte": "OVERPASS", "score_base": 40, "cidade": tags.get("addr:city", "").upper(), "estado": tags.get("addr:state", "").upper(), "bairro": tags.get("addr:suburb", "").upper(), "logradouro": tags.get("addr:street", "").upper(), "numero": str(tags.get("addr:housenumber", "")).upper(), "cep": tags.get("addr:postcode", "").replace("-", "")}
-                    cache_poi.set(texto_norm, [res_poi], expire=7776000)
-                    registrar_telemetria("OVERPASS", True, time.time() - start_t)
-                    return [res_poi]
-        except Exception: continue
-    registrar_telemetria("OVERPASS", False, time.time() - start_t)
-    return None
-
 def API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d):
     start_t = time.time()
     try:
@@ -776,16 +778,13 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         db_model = DBSCAN(eps=eps_angular, min_samples=2, metric='haversine').fit(coords_rad)
         labels = db_model.labels_
         valid_labels = [l for l in labels if l != -1]
+        
+        # MELHORIA 17: Fim do "AMBÍGUO" travando coordenadas
         if valid_labels:
             contagem_clusters = collections.Counter(valid_labels).most_common(2)
-            if len(contagem_clusters) > 1 and contagem_clusters[0][1] == contagem_clusters[1][1]:
-                c1_amb = candidatos_validos[labels.tolist().index(contagem_clusters[0][0])]
-                c2_amb = candidatos_validos[labels.tolist().index(contagem_clusters[1][0])]
-                motivo_amb = f"AMBÍGUO: Empate de consenso entre {c1_amb.get('cidade','')}/{c1_amb.get('estado','')} e {c2_amb.get('cidade','')}/{c2_amb.get('estado','')}"
-                return 0.0, 0.0, texto_norm, "AMBIGUA", 0, "", "", "N/A", [motivo_amb]
-                
             maior_cluster_label = contagem_clusters[0][0]
             candidatos_validos = [candidatos_validos[idx] for idx, label in enumerate(labels) if label == maior_cluster_label]
+            
     if not candidatos_validos: return None
 
     tolerancia_km = raio_cluster_km
@@ -861,8 +860,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     top3_candidatos = candidatos_validos[:3]
     for cand in top3_candidatos:
         m = executar_reverse_geocoding_multimotor(cand["lat"], cand["lon"])
-        
-        # MELHORIA 16: Bypass de Rate Limits. Se Reverse Geo falhar, herda os atributos do candidato validado!
         estado_comp = m.get("estado", cand.get("estado", "")).upper().strip()
         cidade_comp = m.get("cidade", cand.get("cidade", "")).upper().strip()
         
@@ -880,7 +877,8 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         end_reverse = ", ".join([c for c in [logr_comp, bairro_comp, cidade_comp, estado_comp] if c.strip()])
         similaridade = fuzz.token_set_ratio(texto_norm, end_reverse.upper())
         
-        if similaridade >= 55 or tipo_entrada in ["BAIRRO", "MUNICIPIO", "RURAL"]:
+        # MELHORIA 17: Relaxamento para strings curtas para evitar o Anti-Fantasma
+        if similaridade >= 30 or tipo_entrada in ["BAIRRO", "MUNICIPIO", "RURAL"] or len(texto_norm.split()) <= 4:
             vencedor = cand
             break
             
@@ -983,7 +981,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V19_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V20_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1061,6 +1059,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
             candidatos_validos.extend(res_nom)
             res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
 
+    # MELHORIA 17: Restauração da injeção do Centróide Supremo no final da esteira.
     if not res_final and ctx.get("municipio") and ctx.get("uf"):
         mun_nome = ctx["municipio"]
         uf_nome = ctx["uf"]
@@ -1079,12 +1078,10 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
             res_final = (lat_c, lon_c, endereco_ibge, "ALTA", 100, ctx.get("distrito", ""), mun_nome, "MATRIZ_SEGURANCA_INTERNA", ["Blindagem Crítica Acionada: Coordenada rodoviária exata injetada do Dicionário de Segurança em Memória."])
         
         if not res_final:
-            if mun_nome in IBGE_MUNICIPIOS:
-                for item in IBGE_MUNICIPIOS[mun_nome]:
-                    if item["uf"] == uf_nome and item.get("lat", 0.0) != 0.0:
-                        endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
-                        res_final = (item["lat"], item["lon"], endereco_ibge, "MUNICIPAL", 90, ctx.get("distrito", ""), mun_nome, "BASE_IBGE_OFFLINE", ["Geocodificação em nuvem falhou. Resgatado via Centróide Exato offline da base IBGE (Correspondência Estrita)."])
-                        break
+            lat_c, lon_c, fonte_c = obter_coordenada_centroide_supremo(mun_nome, uf_nome)
+            if lat_c != 0.0 and lon_c != 0.0:
+                endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
+                res_final = (lat_c, lon_c, endereco_ibge, "MUNICIPAL", 90, ctx.get("distrito", ""), mun_nome, fonte_c, [f"Geocodificação em nuvem falhou. Resgatado via Centróide Supremo ({fonte_c})."])
 
     if res_final:
         cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
@@ -1271,7 +1268,6 @@ def executar_pipeline_unificado(origem_cru, destino_cru):
     orig = str(origem_cru).strip() if pd.notna(origem_cru) else ""
     dest = str(destino_cru).strip() if pd.notna(destino_cru) else ""
     
-    # MELHORIA 16: Retorno estrutural tolerante a falhas geográficas da aba de Hubs
     if orig == "FALHA_GEO_DESTINO" or orig == "NENHUM_HUB_VALIDO":
         return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ["Falha Espacial Origem"], ["Falha Espacial Destino"], "Falha de Roteamento: Hub Base ou Endereço Destino foi incapaz de resolver latitude/longitude em nuvem.", "N/A")
         
@@ -1691,7 +1687,7 @@ with tab_alocacao:
                         "Categoria": "Base/Hub", "Nome Original": h, "Coordenada": f"{lat}, {lon}", 
                         "Endereço Oficializado": end, "Score": score, "Validação XAI": " | ".join(xai)
                     })
-                    time.sleep(0.05) # Pausa micro para não colapsar APIs Reverse Geo
+                    time.sleep(0.05)
                 
                 hubs_validos = {k: v for k, v in hub_coords.items() if v[0] != 0.0}
                 
@@ -1757,7 +1753,7 @@ with tab_alocacao:
                         
                         for index, linha in df_pares.iterrows():
                             o, d = str(linha['Origem']).strip(), str(linha['Destino']).strip()
-                            if o and d:
+                            if o and d and o != "FALHA_GEO_DESTINO" and o != "NENHUM_HUB_VALIDO":
                                 pares_unicos_alo.add((o, d))
                                 tipo_o = semantica.classificar_entrada(semantica.normalizar(o))
                                 tarefas_priorizadas_alo.append((MAPA_PRIORIDADE.get(tipo_o, 99), (o, d)))
@@ -1913,7 +1909,6 @@ with tab_analytics:
 with tab_auditoria:
     st.markdown("### 🕵️ Dossiê de Auditoria Viária e Espacial")
     
-    # MELHORIA 16: Bipartição da aba de Auditoria para separar Lote e Matriz
     tab_aud_lote, tab_aud_hub = st.tabs(["⚙️ Logs do Lote de Roteamento Padrão", "📦 Logs do Motor de Alocação (Hubs)"])
     
     with tab_aud_lote:
