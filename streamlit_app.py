@@ -45,10 +45,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v26" not in st.session_state:
+if "cache_limpo_v27" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v26"] = True
+    st.session_state["cache_limpo_v27"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -303,61 +303,67 @@ class MotorEnderecoCanônico:
         cache_fuzzy.set(texto_norm, texto_norm, expire=2592000)
         return texto_norm
 
+    # MELHORIA 23: Bloqueio Rigoroso de Estado baseado em Regex Extrativo. Fim da Confusão DF/TO.
     def resolver_contexto_administrativo(self, texto_norm):
-        tokens = texto_norm.split()
-        
         uf_explicita = None
-        for token in reversed(tokens):
-            token_limpo = re.sub(r'[^A-Z]', '', token)
-            if token_limpo in IBGE_ESTADOS:
-                uf_explicita = token_limpo
+        
+        # 1. Procura exata por siglas isoladas (ex: " TO ", ", TO,", "MT")
+        for sigla in IBGE_ESTADOS.keys():
+            if re.search(rf'\b{sigla}\b', texto_norm):
+                uf_explicita = sigla
                 break
+        
+        # 2. Procura exata pelo nome completo do Estado (ex: "TOCANTINS")
+        if not uf_explicita:
+            for sigla, nome in IBGE_ESTADOS.items():
+                if re.search(rf'\b{nome}\b', texto_norm):
+                    uf_explicita = sigla
+                    break
 
         resultado = {"uf": uf_explicita if uf_explicita else "", "municipio": "", "distrito": ""}
 
+        # 3. Contexto Específico de Brasília (APENAS se o Estado for DF ou estiver vazio)
         if not uf_explicita or uf_explicita == "DF":
-            for token in tokens:
+            for token in texto_norm.split():
                 sigla_limpa = re.sub(r'[^A-Z]', '', token)
                 if sigla_limpa in self.mapa_siglas_df and len(sigla_limpa) >= 2:
                     resultado.update({"uf": "DF", "municipio": "BRASILIA", "distrito": self.mapa_siglas_df[sigla_limpa]})
                     return resultado
                     
             for chave, ra_oficial in self.mapa_contexto_df.items():
-                if chave in texto_norm:
+                if re.search(rf'\b{chave}\b', texto_norm):
                     resultado.update({"uf": "DF", "municipio": "BRASILIA", "distrito": ra_oficial})
                     return resultado
-                
+
+        # 4. Restrição de Busca (O Segredo para não alucinar Taguatinga-TO como Taguatinga-DF)
+        cidades_para_busca = IBGE_MUNICIPIOS
+        if uf_explicita:
+            cidades_filtradas = {}
+            for mun, lista_itens in IBGE_MUNICIPIOS.items():
+                itens_uf = [i for i in lista_itens if i["uf"] == uf_explicita]
+                if itens_uf:
+                    cidades_filtradas[mun] = itens_uf
+            cidades_para_busca = cidades_filtradas
+
+        # 5. Mapeamento direto de chunk para as cidades restritas
+        tokens = texto_norm.split()
         for i in range(len(tokens)):
             for j in range(i + 1, len(tokens) + 1):
                 chunk = " ".join(tokens[i:j])
-                
-                if chunk in IBGE_MUNICIPIOS:
-                    if uf_explicita:
-                        for item in IBGE_MUNICIPIOS[chunk]:
-                            if item["uf"] == uf_explicita:
-                                resultado.update({"municipio": chunk})
-                                return resultado
-                    else:
-                        resultado.update({"uf": IBGE_MUNICIPIOS[chunk][0]["uf"], "municipio": chunk})
-                        return resultado
-                        
-                if chunk in IBGE_DISTRITOS:
-                    if uf_explicita:
-                        for item in IBGE_DISTRITOS[chunk]:
-                            if item["uf"] == uf_explicita:
-                                resultado.update({"municipio": item["municipio"], "distrito": chunk})
-                                return resultado
-                    else:
-                        resultado.update({"uf": IBGE_DISTRITOS[chunk][0]["uf"], "municipio": IBGE_DISTRITOS[chunk][0]["municipio"], "distrito": chunk})
-                        return resultado
+                if chunk in cidades_para_busca:
+                    resultado.update({"uf": cidades_para_busca[chunk][0]["uf"], "municipio": chunk})
+                    return resultado
 
+        # 6. Fuzzy Match Fechado (Se a sigla foi dada, mas a cidade foi escrita errada, tenta aproximar DENTRO do Estado)
         if uf_explicita and not resultado["municipio"]:
-            cidades_do_estado = [m for m, itens in IBGE_MUNICIPIOS.items() if any(i["uf"] == uf_explicita for i in itens)]
-            if cidades_do_estado:
-                melhor_match = process.extractOne(texto_norm, cidades_do_estado, scorer=fuzz.token_set_ratio)
+            chaves = list(cidades_para_busca.keys())
+            if chaves:
+                melhor_match = process.extractOne(texto_norm, chaves, scorer=fuzz.token_set_ratio)
                 if melhor_match and melhor_match[1] >= 65:
                     resultado.update({"municipio": melhor_match[0]})
+                    return resultado
         
+        # 7. Válvula de Escape Global (Apenas se NENHUM Estado foi digitado)
         if not resultado["municipio"] and not uf_explicita and len(texto_norm) > 4:
             melhor_match_global = process.extractOne(texto_norm, LISTA_CONTEXTO_FUZZY, scorer=fuzz.WRatio)
             if melhor_match_global and melhor_match_global[1] >= 85:
@@ -975,7 +981,6 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
 
     ctx = semantica.resolver_contexto_administrativo(texto_norm)
 
-    # MELHORIA 21: Matriz de Segurança transferida para o TOPO para interceptação Pre-Flight de Erros Continentais
     if ctx.get("municipio") and ctx.get("uf"):
         mun_nome = ctx["municipio"]
         uf_nome = ctx["uf"]
@@ -1424,107 +1429,73 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("📖 Manual do Sistema Completo")
+    # MELHORIA 23: Expansão do Manual Didático com Fórmulas e Processos
+    st.header("📖 Manual do Sistema Completo", help="Acesse toda a documentação técnica, fluxogramas e detalhes operacionais do motor.")
     st.caption("Documentação Técnica e Operacional Detalhada")
     
-    with st.expander("1. Fluxo Completo da Aplicação"):
-        st.write("""
-        **O que acontece:** O sistema recebe strings brutas (origem e destino) e as transforma em uma rota viária perfeitamente roteirizável, com tempo, distância e auditoria explicável.
-        **Quando acontece:** Ao clicar em 'Iniciar Processamento' (Lote) ou 'Calcular Rota' (Individual).
-        **Como acontece (Fluxograma Lógico):**
-        1. **Entrada:** Recebe `Ribeirão Cascalheira MT`
-        2. **NLP & Limpeza:** Remove lixos, pontuações, formata.
-        3. **Extração de Contexto:** Cruza dados contra a malha oficial do IBGE para identificar Estado e Município.
-        4. **Geocodificação Simultânea:** Dispara requisições paralelas para múltiplas APIs (Google, ArcGIS, OSM, etc).
-        5. **Consenso Espacial:** O algoritmo DBSCAN agrupa os resultados. O Teorema de Bayes calcula a probabilidade matemática do cluster estar correto.
-        6. **Roteamento Bimodal:** A coordenada vencedora é enviada ao Google Maps Directions e simultaneamente validada em OSRM (Motor Especializado) para impedir falsos negativos em rios.
-        7. **Saída Final:** Tupla contendo todas as variáveis populadas.
+    with st.expander("1. O que o sistema faz e como funciona?"):
+        st.markdown("""
+        O **Gerenciador de Rotas Inteligentes** é um motor logístico corporativo desenhado para processar geocodificação extrema (transformar texto em coordenadas) e cálculo de rotas precisas.
+        
+        **Fluxo de Operação:**
+        1. **Entrada de Dados:** Você insere um endereço (ex: *Taguatinga, TO*) no modo Single-Shot ou via planilha.
+        2. **Análise de Linguagem Natural (NLP):** O sistema limpa caracteres sujos e extrai a Unidade Federativa (UF) rigorosamente para isolar a busca georreferenciada.
+        3. **Geocodificação Simultânea:** Dispara buscas paralelas em várias APIs globais (ArcGIS, OSM, Photon, TomTom).
+        4. **Consenso Espacial (DBSCAN):** Agrupa os pontos encontrados em um mapa e usa probabilidade Bayesiana para definir o centroide exato.
+        5. **Roteamento Híbrido:** Extrai a distância viária (em asfalto) e tempo do **Google Maps** (Text-First), validando a presença de balsas através da malha OSRM.
         """)
 
     with st.expander("2. Geocodificação (Normalização e Correção)"):
-        st.write("""
+        st.markdown("""
         **Parser de Endereço:** Utiliza Expressões Regulares (`regex`) para extrair Número Predial, Complementos e CEPs (ex: isolar "Nº 42" do resto do texto).
-        **Enriquecimento Semântico:** Traduz siglas logísticas. Ex: Transforma "HUB" em "CENTRO LOGISTICO", "BR 153" em "BR-153".
-        **Correção Automática (Fuzzy):** Aplica distância de Levenshtein (`rapidfuzz`) contra o banco do IBGE. Se o usuário digitar "RIB CASCALH MT", corrige silenciosamente para "RIBEIRAO CASCALHEIRA".
-        **Cache em Disco:** Antes de disparar APIs, procura se aquele endereço exato (`MD5Hash`) já foi processado nos últimos 30 dias na base local (`diskcache`).
+        **Enriquecimento Semântico:** Traduz siglas logísticas em tempo real. Ex: Transforma "HUB" em "CENTRO LOGISTICO", "BR 153" em "BR-153".
+        **Correção Automática Assistida (Fuzzy):** Aplica distância de Levenshtein (`rapidfuzz`) contra o banco de dados do IBGE. Se o usuário digitar "RIB CASCALH MT", corrige silenciosamente para "RIBEIRAO CASCALHEIRA".
+        **Cache em Disco (Desempenho):** Antes de disparar APIs consumindo rede, procura se aquele endereço exato (`MD5Hash`) já foi processado nos últimos 30 dias na base local (`diskcache`).
         """)
 
-    with st.expander("3. Cascata de APIs (Provedores)"):
-        st.write("""
-        O sistema nunca depende de um único provedor. Ele usa concorrência assíncrona (`ThreadPoolExecutor`) para atacar:
-        * **Google Maps (Scraper):** Otimizado para POIs (Pontos de Interesse) e Comércio. Vantagem: Inteligência de Busca. Limitação: Bloqueia IPs em alto volume de abusos.
-        * **ArcGIS (ESRI):** Motor oficial de geocodificação em nuvem. Vantagem: Malha urbana predial perfeita. Limitação: Dificuldade com áreas rurais não mapeadas.
-        * **Nominatim & Photon (OSM):** Motores OpenStreetMap. Vantagem: Toponímia interiorana e estradas de terra. Limitação: Ruim com formatação fora do padrão.
-        * **TomTom:** Geocodificação puramente logística B2B. Vantagem: Foco rodoviário.
-        * **Overpass:** Consulta direta de infraestruturas (Hospitais, Centros de Distribuição).
+    with st.expander("3. Cascata de APIs e Motores"):
+        st.markdown("""
+        O sistema atua com concorrência assíncrona (`ThreadPoolExecutor`) para garantir redundância:
+        * **Google Maps (Scraper):** Otimizado para cálculo de trânsito em tempo real, tempo de deslocamento e Quilometragem Asfaltada final.
+        * **ArcGIS (ESRI):** Motor oficial de geocodificação em nuvem. Vantagem: Malha urbana predial perfeita e alta taxa de resposta no Brasil.
+        * **Nominatim & Photon (OSM):** Motores baseados no OpenStreetMap. Excelentes para toponímia interiorana, assentamentos e estradas de terra não mapeadas pelo Google.
+        * **TomTom:** Geocodificação puramente logística (B2B), com foco rodoviário.
+        * **OSRM (Open Source Routing Machine):** Atua como "Árbitro de Balsas". Analisa manobras fluviais (`ferry`) para identificar se um rio corta a estrada informada pelo Google.
         """)
 
-    with st.expander("4. Consenso Espacial (DBSCAN & Bayes)"):
-        st.write("""
-        **Formação de Candidatos:** Todas as APIs retornam coordenadas. Se a API X diz Lat -10 e a API Y diz Lat -15, quem está certo?
-        **DBSCAN:** Agrupa candidatos que estejam em um raio < 500 metros (ou 2km para áreas rurais) uns dos outros. Se 3 APIs apontam para o mesmo cluster, ele ganha peso.
-        **Inferência Bayesiana:** Multiplica as probabilidades (Score).
-        * *Pesos Positivos:* Município bateu com IBGE? (+Score). CEP bateu? (+Score). O número do prédio bateu? (+Score).
-        * *Critério de Desempate:* O candidato que obteve confirmação redundante de mais APIs e tem maior similaridade léxica no Reverse Geocoding, vence.
+    with st.expander("4. Consenso Espacial Bayesiano"):
+        st.markdown("""
+        **O Algoritmo de Decisão:** Se a API X diz Lat -10 e a API Y diz Lat -15, quem está certo?
+        O sistema usa **DBSCAN** para agrupar as coordenadas que estejam em um raio < 500 metros umas das outras.
+        Em seguida, aplica a **Inferência Bayesiana** multiplicando probabilidades (Score).
+        * Município bateu com IBGE? (+Score)
+        * CEP é idêntico? (+Score)
+        * O candidato vencedor é aquele com as coordenadas mais redundantes entre diferentes provedores e maior similaridade semântica.
         """)
 
-    with st.expander("5. Reverse Geocoding e Fallback Cascade"):
-        st.write("""
-        **Quando é executado:** Após a coordenada vencer o Consenso.
-        **Por quê:** Para traduzir o `Lat, Lon` vencedor de volta para um formato de Endereço Oficial, padronizando a saída (Rua, Bairro, Cidade, Estado).
-        **O Fallback Rigoroso (Cascata):** Se, por acaso, a coordenada for achada, mas a API não retornar o Município, o sistema não deixa em branco. Ele ativa um *Reverse Geocoding Multimotor* para extrair o dado bruto da coordenada e preencher as colunas que ficariam vazias na planilha, garantindo 100% de completude.
+    with st.expander("5. Fórmulas e Cálculos Geodésicos"):
+        st.markdown("""
+        **Distância em Linha Reta (Geodésica):**
+        Para auditar desvios e calcular proximidade na Aba de Alocação, o sistema aplica a **Fórmula de Haversine** (Navegação Esférica de Precisão):
+        
+        $$d = 2r \\arcsin\\left(\\sqrt{\\sin^2\\left(\\frac{\\Delta\\phi}{2}\\right) + \\cos(\\phi_1)\\cos(\\phi_2)\\sin^2\\left(\\frac{\\Delta\\lambda}{2}\\right)}\\right)$$
+        
+        Isso mitiga qualquer erro estrutural do Google Maps, fornecendo a distância real "aérea" entre a Origem e o Destino.
         """)
 
-    with st.expander("6. Distância em Linha Reta (Geodésica)"):
-        st.write("""
-        **Fórmula:** O sistema utiliza primariamente a **Fórmula de Vincenty**, que modela a Terra como um elipsoide oblato (WGS-84), oferecendo precisão milimétrica. Em caso de falha matemática, recua para a fórmula de **Haversine** (esfera perfeita).
-        **Por que importa:** É usada para auditar o Google. Se a Rota Asfaltada for *menor* que a Linha Reta, é fisicamente impossível e o sistema levanta um Alerta Crítico.
+    with st.expander("6. Funcionalidades de Processamento (Lote e Alocação)"):
+        st.markdown("""
+        * **Motor de Lote Padrão:** Lê planilhas Excel (Origem -> Destino). Deduzplica origens e destinos repetidos em uma Fila de Prioridade O(U) e devolve a planilha processada com as distâncias.
+        * **Motor de Alocação de Hubs:** Você anexa duas planilhas separadas (uma com seus clientes/destinos e outra com suas filiais/bases). O sistema converte tudo em coordenadas, calcula a proximidade de todos contra todos via Haversine, e **descobre sozinho** qual é a sua Filial mais próxima de cada cliente. Em seguida, aciona o Google Maps para medir o asfalto exato, entregando uma planilha pronta.
         """)
 
-    with st.expander("7. Cálculo de Rotas Viárias e Balsas (Google + OSRM)"):
-        st.write("""
-        **A Rota Bimodal:** O sistema extrai a distância e o tempo primariamente do Google Maps para que a planilha corresponda visualmente ao aplicativo do motorista.
-        **O Filtro OSRM (Auditoria de Rios):** Como o Google retorna muito falso-positivo para Balsa devido à estrutura de página variável, o sistema agora chama uma API estruturada oficial aberta (OSRM - Open Source Routing Machine). A Balsa é marcada *apenas* se o OSRM garantir matematicamente nos pacotes de manobra (`steps.maneuver.type = ferry`) que a travessia existe. Se o Google travar em rios como no Araguaia (MT-GO), o OSRM assume e exporta os KMs corretos. E vice-versa.
-        """)
-
-    with st.expander("8. Auditoria Logística Total"):
-        st.write("""
-        **Score Global:** Composição ponderada -> (35% Geocoding Origem + 35% Geocoding Destino + 30% Score de Roteamento). Determina a saúde da operação.
-        **XAI (Explainable AI):** A coluna *Motivo Roteamento* dita textualmente qual caminho lógico levou o sistema a aceitar (ou rejeitar) o resultado (ex: "Consenso espacial estabelecido via Ensemble Multi-API").
-        """)
-
-    with st.expander("9. Sistema de Caching"):
-        st.write("""
-        Existem 10 camadas de banco de dados nativos SQLite em disco (DiskCache).
-        * **Cache Geo:** Salva Lat/Lon final para o endereço normalizado. Impede pagar chamadas repetidas de API (Válido por 30 dias).
-        * **Cache Rotas:** Salva o pacote completo logístico.
-        * **Benefícios:** Performance brutal em lotes repetitivos e blindagem contra *Rate Limits* (Error 429).
-        """)
-
-    with st.expander("10. Processamento em Lote (Motor de Fila)"):
-        st.write("""
-        1. **Upload:** Lê arquivo `.xlsx`.
-        2. **Deduplicação (O(U)):** Se o caminhão faz 50 entregas do "CD A" para a "Loja B", o sistema calcula apenas 1 vez (Fila de Prioridade) e replica para as outras 49 linhas.
-        3. **Processamento:** Aciona os 8 núcleos do processador usando `ThreadPoolExecutor`.
-        4. **Merge:** Consolida tudo, limpa Nulos e gera arquivo Excel turbinado para download.
-        """)
-
-    with st.expander("11. Validador Rápido (Single-Shot)"):
-        st.write("""
-        Ambiente interativo na primeira aba. Executa o *Pipeline Unificado* em tempo real. Além de cuspir os números, exibe o Score, um mapa embutido (`iframe` via `st.components.v1`) com o traçado viário desenhado e um diagnóstico humano do algoritmo (XAI). Ideal para testes manuais.
-        """)
-
-    with st.expander("12. Dicionário Completo de Colunas"):
-        st.write("""
-        * **Origem/Destino:** O texto bruto que o cliente enviou.
-        * **Distância / Tempo:** Tempo de deslocamento real via asfalto.
-        * **Link da Rota:** URL clicável embutida para abrir o Google Maps no traçado exato.
-        * **Balsas:** Flag Sim/Não se a travessia de rio foi fisicamente confirmada.
-        * **Linha Reta:** Distância elipsoidal entre as coordenadas.
-        * **Score da Rota:** Quão sólida foi a extração do Google Maps.
-        * **Lat/Lon:** Coordenadas finais unificadas.
-        * **Endereço Oficial / Município:** Normalização administrativa do lugar.
-        * **Status da Rota:** Categoria final (Excelente > 90, Revisar < 70).
+    with st.expander("7. Score Global e Auditoria (Confiança)"):
+        st.markdown("""
+        **O Grau de Confiança:**
+        O Score (0 a 100) é composto por 35% do Geocoding da Origem, 35% do Geocoding do Destino e 30% da Integridade da Rota.
+        * **ALTÍSSIMA (>85):** O endereço existe, o número bate e as APIs concordaram.
+        * **ALTA (>75):** O nível de município e bairro bateram, ideal para viagens longas.
+        * **REVISÃO MANUAL (<65):** Indica "Alerta Anti-Fantasma". A API encontrou uma coordenada, mas o nome do lugar retornado é muito diferente do que você digitou.
         """)
 
 tab_individual, tab_processamento, tab_alocacao, tab_analytics, tab_auditoria = st.tabs([
@@ -1534,10 +1505,11 @@ tab_individual, tab_processamento, tab_alocacao, tab_analytics, tab_auditoria = 
 with tab_individual:
     st.markdown("### 🔍 Validador Rápido de Rota (Single-Shot)")
     col_ind1, col_ind2 = st.columns(2)
-    with col_ind1: orig_ind = st.text_input("Origem (Endereço, POI ou Coordenadas)", "Ribeirão Cascalheira , MT, Brasil")
-    with col_ind2: dest_ind = st.text_input("Destino (Endereço, POI ou Coordenadas)", "SAO MIGUEL DO ARAGUAIA , GO, Brasil")
+    # MELHORIA 23: Tooltips de Ajuda nos Inputs
+    with col_ind1: orig_ind = st.text_input("Origem (Endereço, POI ou Coordenadas)", "Ribeirão Cascalheira , MT, Brasil", help="Insira o local de partida. O sistema bloqueará a busca apenas para o Estado cuja sigla for identificada.")
+    with col_ind2: dest_ind = st.text_input("Destino (Endereço, POI ou Coordenadas)", "SAO MIGUEL DO ARAGUAIA , GO, Brasil", help="Insira o destino final. O uso de UF (Ex: GO) assegura máxima precisão contra localidades homônimas em outros estados.")
     
-    if st.button("🚀 Calcular Rota Individual", type="primary"):
+    if st.button("🚀 Calcular Rota Individual", type="primary", help="Inicia o pipeline Bayesiano para geocodificação e aciona os motores do Google Maps e OSRM para o trajeto."):
         if orig_ind and dest_ind:
             with st.spinner("Acionando motores de geocodificação e consenso unificado..."):
                 res_ind = executar_pipeline_unificado(orig_ind, dest_ind)
@@ -1546,13 +1518,13 @@ with tab_individual:
                 st.success("✅ Rota estabelecida com sucesso!")
                 
                 m_dist_via, m_dist_reta, m_time, m_balsa, m_score = st.columns(5)
-                m_dist_via.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0])
-                m_dist_reta.metric("Distância Linha Reta", f"{res_ind[4]} km" if isinstance(res_ind[4], float) else res_ind[4])
-                m_time.metric("Tempo Estimado", res_ind[1])
-                m_balsa.metric("Uso de Balsas", res_ind[3])
+                m_dist_via.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0], help="Quilometragem oficial em asfalto extraída da nuvem Google Maps.")
+                m_dist_reta.metric("Distância Linha Reta", f"{res_ind[4]} km" if isinstance(res_ind[4], float) else res_ind[4], help="Distância matemática geodésica baseada na fórmula de Haversine.")
+                m_time.metric("Tempo Estimado", res_ind[1], help="Tempo de deslocamento estimado via transporte motorizado.")
+                m_balsa.metric("Uso de Balsas", res_ind[3], help="Validação de interseção de corpos hídricos (Ferry) auditada via OSRM.")
                 
                 score_g = round((0.35 * res_ind[8]) + (0.35 * res_ind[14]) + (0.30 * res_ind[6]), 2)
-                m_score.metric("Score Global", f"{score_g} / 100")
+                m_score.metric("Score Global", f"{score_g} / 100", help="Grau de certeza e integridade dos dados obtidos no processamento.")
                 
                 st.info(f"🧠 **Estratégia de Roteamento (XAI):** {res_ind[28]}")
                 
@@ -1592,7 +1564,7 @@ with tab_individual:
 
 with tab_processamento:
     st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
-    arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"], key="lote_std")
+    arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"], key="lote_std", help="A planilha deve conter abas chamadas estritamente 'Origem' e 'Destino' para roteamento de A a B.")
 
     if arquivo_carregado is not None:
         df = pd.read_excel(arquivo_carregado)
@@ -1607,9 +1579,9 @@ with tab_processamento:
                 st.stop()
                 
             st.success(f"Tabela com {len(df)} registros mapeada! Pronto para processar o Lote Unificado.")
-            nome_operador = st.text_input("Matrícula / Nome do Operador (Opcional)", max_chars=50)
+            nome_operador = st.text_input("Matrícula / Nome do Operador (Opcional)", max_chars=50, help="Será registrado na Trilha de Auditoria Corporativa.")
             
-            if st.button("Iniciar Processamento em Lote"):
+            if st.button("Iniciar Processamento em Lote", help="Aciona todas as threads de processamento paralelo simultaneamente."):
                 start_lote_clock = time.time()
                 
                 novas_colunas = [
@@ -1622,12 +1594,11 @@ with tab_processamento:
                 colunas_numericas = ['Distancia', 'Linha Reta', 'Score da Rota', 'Score Num Origem', 'Score Num Destino', 'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global']
                 
                 for col in novas_colunas:
-                    if col in colunas_numericas:
-                        if col not in df.columns: df[col] = 0.0
-                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0).astype(float)
-                    else:
-                        if col not in df.columns: df[col] = "Não Informado"
-                        df[col] = df[col].astype(object)
+                    if col not in df.columns:
+                        if col in colunas_numericas:
+                            df[col] = pd.Series(0.0, index=df.index, dtype=float)
+                        else:
+                            df[col] = pd.Series("Não Informado", index=df.index, dtype=object)
                     
                 pares_unicos = set()
                 
@@ -1686,7 +1657,7 @@ with tab_processamento:
             
             col_down1, col_down2 = st.columns(2)
             with col_down1:
-                st.download_button(label="📥 Baixar Planilha (.xlsx)", data=st.session_state['planilha_pronta'], file_name="planilha_rotas_calculada.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+                st.download_button(label="📥 Baixar Planilha (.xlsx)", data=st.session_state['planilha_pronta'], file_name="planilha_rotas_calculada.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, help="O download preserva as colunas originais do seu sistema.")
             with col_down2:
                 st.markdown(
                     """
@@ -1702,18 +1673,18 @@ with tab_alocacao:
     st.write("A matriz inverteu sua lógica por segurança: Os **Endereços serão a Origem**, e as **Bases serão o Destino** da rota. A planilha final terá exatamente a mesma quantidade de linhas que o seu arquivo de endereços.")
     
     col_a1, col_a2 = st.columns(2)
-    with col_a1: file_dest = st.file_uploader("1. Planilha de Endereços / Entregas (Origens)", type=["xlsx"], key="up_dests_v19")
-    with col_a2: file_hubs = st.file_uploader("2. Planilha de Municípios / Bases (Destinos)", type=["xlsx"], key="up_hubs_v19")
+    with col_a1: file_dest = st.file_uploader("1. Planilha de Endereços / Entregas (Origens)", type=["xlsx"], key="up_dests_v19", help="Faça upload dos clientes ou endereços finais que receberão a mercadoria.")
+    with col_a2: file_hubs = st.file_uploader("2. Planilha de Municípios / Bases (Destinos)", type=["xlsx"], key="up_hubs_v19", help="Faça upload dos centros logísticos disponíveis.")
     
     if file_hubs and file_dest:
         df_hubs = pd.read_excel(file_hubs)
         df_dest = pd.read_excel(file_dest)
         
         col_s1, col_s2 = st.columns(2)
-        with col_s1: dest_col_name = st.selectbox("Selecione a coluna que contém os Endereços (Origens):", df_dest.columns)
-        with col_s2: hub_col_name = st.selectbox("Selecione a coluna que contém os Municípios/Bases (Destinos):", df_hubs.columns)
+        with col_s1: dest_col_name = st.selectbox("Selecione a coluna que contém os Endereços (Origens):", df_dest.columns, help="A coluna exata na qual o algoritmo procurará as chaves logísticas.")
+        with col_s2: hub_col_name = st.selectbox("Selecione a coluna que contém os Municípios/Bases (Destinos):", df_hubs.columns, help="A coluna exata na qual o algoritmo procurará os Hubs.")
         
-        if st.button("🗺️ Processar Cruzamento Espacial e Roteamento Duplo", type="primary"):
+        if st.button("🗺️ Processar Cruzamento Espacial e Roteamento Duplo", type="primary", help="Inicia o duelo entre o vencedor da Linha Reta e o Vice-Líder no motor do Google Maps."):
             start_alo_clock = time.time()
             
             hubs_unicos = df_hubs[hub_col_name].dropna().astype(str).str.strip().unique().tolist()
@@ -1843,7 +1814,7 @@ with tab_alocacao:
                     
                     output_buffer = io.BytesIO()
                     with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: df_final_alo.to_excel(writer, index=False)
-                    st.download_button(label="📥 Baixar Planilha de Alocação Competitiva (.xlsx)", data=output_buffer.getvalue(), file_name="matriz_alocacao_competitiva.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+                    st.download_button(label="📥 Baixar Planilha de Alocação Competitiva (.xlsx)", data=output_buffer.getvalue(), file_name="matriz_alocacao_competitiva.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, help="O download traz todas as colunas de sua planilha original inalteradas e preenchidas.")
 
 with tab_analytics:
     st.markdown("### 📊 Dashboard Analítico Interativo Corporativo")
@@ -1861,16 +1832,16 @@ with tab_analytics:
             col_f1, col_f2, col_f3, col_f4 = st.columns(4)
             
             lista_ufs = ["Todas"] + sorted(list(df_kpi['UF_Sintetica_Origem'].unique()))
-            uf_selecionada = col_f1.selectbox("UF de Origem", lista_ufs)
+            uf_selecionada = col_f1.selectbox("UF de Origem", lista_ufs, help="Filtra a base de KPIs unicamente para entregas saindo desta Unidade Federativa.")
             
             lista_municipios = ["Todos"] + sorted(list(df_kpi['Municipio Origem'].astype(str).unique()))
-            mun_selecionado = col_f2.selectbox("Município de Origem", lista_municipios)
+            mun_selecionado = col_f2.selectbox("Município de Origem", lista_municipios, help="Filtra a base para um município de despacho específico.")
             
             lista_status = ["Todos"] + sorted(list(df_kpi['Status da Rota'].astype(str).unique()))
-            status_selecionado = col_f3.selectbox("Status Global da Rota", lista_status)
+            status_selecionado = col_f3.selectbox("Status Global da Rota", lista_status, help="Filtra pela precisão Bayesiana e grau de segurança algorítmica da rota obtida.")
             
             lista_fontes = ["Todas"] + sorted(list(df_kpi['Fonte Geocoding Origem'].astype(str).unique()))
-            fonte_selecionada = col_f4.selectbox("Fonte de Geocoding (Origem)", lista_fontes)
+            fonte_selecionada = col_f4.selectbox("Fonte de Geocoding (Origem)", lista_fontes, help="Filtra rotas com base na API ou técnica (Ex: Matriz Interna, ArcGIS, OSM) que proveu as coordenadas.")
             
         df_filtrado = df_kpi.copy()
         if uf_selecionada != "Todas": df_filtrado = df_filtrado[df_filtrado['UF_Sintetica_Origem'] == uf_selecionada]
