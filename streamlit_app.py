@@ -360,7 +360,7 @@ class MotorEnderecoCanônico:
         
         if not resultado["municipio"] and len(texto_norm) > 4:
             melhor_match_global = process.extractOne(texto_norm, LISTA_CONTEXTO_FUZZY, scorer=fuzz.WRatio)
-            if melhor_match_global and melhor_match_global[1] >= 85:
+            if melhor_match_global and melhor_match_global[1] >= 92:
                 cidade_uf = melhor_match_global[0]
                 resultado.update({"uf": cidade_uf.rsplit(' ', 1)[1], "municipio": cidade_uf.rsplit(' ', 1)[0]})
                     
@@ -545,7 +545,6 @@ def validar_consistencia_municipal(candidato, mun_inf):
     if fuzz.token_set_ratio(mun_inf, cid_api) >= 95: return True
     return False
 
-# MELHORIA 17: Função Suprema Restaurada e Isolada
 def obter_coordenada_centroide_supremo(mun_nome, uf_nome):
     url_arc = f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?City={requests.utils.quote(mun_nome)}&Region={requests.utils.quote(uf_nome)}&CountryCode=BRA&f=json&maxLocations=1"
     try:
@@ -697,6 +696,30 @@ def API_Photon(query):
     registrar_telemetria("PHOTON", False, time.time() - start_t)
     return None
 
+def API_Overpass_POIs(texto_norm):
+    if len(texto_norm) < 10: return None
+    if texto_norm in cache_poi: return cache_poi[texto_norm]
+    start_t = time.time()
+    endpoints = ["https://overpass-api.de/api/interpreter", "https://lz4.overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
+    texto_seguro = re.escape(texto_norm)
+    query_osm = f'[out:json][timeout:3];(node["name"~"{texto_seguro}",i]["amenity"];way["name"~"{texto_seguro}",i]["amenity"];node["name"~"{texto_seguro}",i]["building"];way["name"~"{texto_seguro}",i]["building"];node["name"~"{texto_seguro}",i]["healthcare"];way["name"~"{texto_seguro}",i]["healthcare"];node["name"~"{texto_seguro}",i]["education"];way["name"~"{texto_seguro}",i]["education"];);out center;'
+    for url in endpoints:
+        try:
+            r = session.post(url, data={"data": query_osm}, timeout=4)
+            if r.status_code == 200:
+                elems = r.json().get("elements", [])
+                if elems:
+                    e = elems[0]
+                    lat, lon = e.get("lat", e.get("center", {}).get("lat", 0.0)), e.get("lon", e.get("center", {}).get("lon", 0.0))
+                    tags = e.get("tags", {})
+                    res_poi = {"lat": lat, "lon": lon, "fonte": "OVERPASS", "score_base": 40, "cidade": tags.get("addr:city", "").upper(), "estado": tags.get("addr:state", "").upper(), "bairro": tags.get("addr:suburb", "").upper(), "logradouro": tags.get("addr:street", "").upper(), "numero": str(tags.get("addr:housenumber", "")).upper(), "cep": tags.get("addr:postcode", "").replace("-", "")}
+                    cache_poi.set(texto_norm, [res_poi], expire=7776000)
+                    registrar_telemetria("OVERPASS", True, time.time() - start_t)
+                    return [res_poi]
+        except Exception: continue
+    registrar_telemetria("OVERPASS", False, time.time() - start_t)
+    return None
+
 def API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d):
     start_t = time.time()
     try:
@@ -778,8 +801,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         db_model = DBSCAN(eps=eps_angular, min_samples=2, metric='haversine').fit(coords_rad)
         labels = db_model.labels_
         valid_labels = [l for l in labels if l != -1]
-        
-        # MELHORIA 17: Fim do "AMBÍGUO" travando coordenadas
         if valid_labels:
             contagem_clusters = collections.Counter(valid_labels).most_common(2)
             maior_cluster_label = contagem_clusters[0][0]
@@ -877,7 +898,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         end_reverse = ", ".join([c for c in [logr_comp, bairro_comp, cidade_comp, estado_comp] if c.strip()])
         similaridade = fuzz.token_set_ratio(texto_norm, end_reverse.upper())
         
-        # MELHORIA 17: Relaxamento para strings curtas para evitar o Anti-Fantasma
         if similaridade >= 30 or tipo_entrada in ["BAIRRO", "MUNICIPIO", "RURAL"] or len(texto_norm.split()) <= 4:
             vencedor = cand
             break
@@ -981,7 +1001,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V20_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V21_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1059,7 +1079,6 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
             candidatos_validos.extend(res_nom)
             res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
 
-    # MELHORIA 17: Restauração da injeção do Centróide Supremo no final da esteira.
     if not res_final and ctx.get("municipio") and ctx.get("uf"):
         mun_nome = ctx["municipio"]
         uf_nome = ctx["uf"]
@@ -1120,7 +1139,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V19_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+    cache_key = f"GOOG_V20_{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
@@ -1184,7 +1203,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V19_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V20_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1710,10 +1729,11 @@ with tab_alocacao:
                     
                     status_alo.text("Fase 3/3: Calculando Matriz de Distâncias e montando Pipeline...")
                     
-                    alocacoes_matrix = []
+                    # MELHORIA 18: Mapeamento em lote unificando IDs originais à Matriz
+                    dest_to_hub = {}
                     for d_nome, (d_lat, d_lon, d_end) in dest_coords.items():
                         if d_lat == 0.0 or d_lon == 0.0:
-                            alocacoes_matrix.append({"Origem": "FALHA_GEO_DESTINO", "Destino": d_nome})
+                            dest_to_hub[d_nome] = "FALHA_GEO_DESTINO"
                             continue
                             
                         menor_dist = float('inf')
@@ -1725,15 +1745,15 @@ with tab_alocacao:
                                 menor_dist = dist
                                 melhor_hub = h_nome
                                 
-                        if melhor_hub:
-                            alocacoes_matrix.append({"Origem": melhor_hub, "Destino": d_nome})
-                        else:
-                            alocacoes_matrix.append({"Origem": "NENHUM_HUB_VALIDO", "Destino": d_nome})
+                        dest_to_hub[d_nome] = melhor_hub if melhor_hub else "NENHUM_HUB_VALIDO"
                     
-                    if not alocacoes_matrix:
+                    if not dest_to_hub:
                         st.error("Falha sistêmica: Nenhum par pôde ser consolidado na matriz.")
                     else:
-                        df_pares = pd.DataFrame(alocacoes_matrix)
+                        # MELHORIA 18: Construção sobre o DataFrame original (Preserva as 14 linhas do usuário)
+                        df_pares = df_dest.copy()
+                        df_pares['Destino'] = df_pares[dest_col_name].astype(str).str.strip()
+                        df_pares['Origem'] = df_pares['Destino'].map(dest_to_hub).fillna("FALHA_GEO_DESTINO")
                         
                         novas_colunas = [
                             'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Motivo Roteamento', 'Linha Reta', 'Fonte da Rota', 'Score da Rota', 
@@ -1753,17 +1773,18 @@ with tab_alocacao:
                         
                         for index, linha in df_pares.iterrows():
                             o, d = str(linha['Origem']).strip(), str(linha['Destino']).strip()
-                            if o and d and o != "FALHA_GEO_DESTINO" and o != "NENHUM_HUB_VALIDO":
-                                pares_unicos_alo.add((o, d))
-                                tipo_o = semantica.classificar_entrada(semantica.normalizar(o))
-                                tarefas_priorizadas_alo.append((MAPA_PRIORIDADE.get(tipo_o, 99), (o, d)))
+                            if o and d and o != "FALHA_GEO_DESTINO" and o != "NENHUM_HUB_VALIDO" and pd.notna(o) and pd.notna(d):
+                                if (o, d) not in pares_unicos_alo:
+                                    pares_unicos_alo.add((o, d))
+                                    tipo_o = semantica.classificar_entrada(semantica.normalizar(o))
+                                    tarefas_priorizadas_alo.append((MAPA_PRIORIDADE.get(tipo_o, 99), (o, d)))
                         
                         tarefas_priorizadas_alo.sort(key=lambda x: x[0])
                         
                         df_final_alo = rodar_pipeline_lote(df_pares, list(pares_unicos_alo), tarefas_priorizadas_alo, "Operador Matriz", progress_alo, status_alo)
                         
                         status_alo.empty(); progress_alo.empty()
-                        st.success(f"✨ Matriz resolvida! Endereços alocados e roteirizados.")
+                        st.success(f"✨ Matriz resolvida! Endereços alocados e roteirizados mantendo as linhas originais do arquivo.")
                         
                         st.dataframe(df_final_alo, use_container_width=True, height=250)
                         
