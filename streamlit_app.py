@@ -45,10 +45,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v20" not in st.session_state:
+if "cache_limpo_v21" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v20"] = True
+    st.session_state["cache_limpo_v21"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -360,7 +360,7 @@ class MotorEnderecoCanônico:
         
         if not resultado["municipio"] and len(texto_norm) > 4:
             melhor_match_global = process.extractOne(texto_norm, LISTA_CONTEXTO_FUZZY, scorer=fuzz.WRatio)
-            if melhor_match_global and melhor_match_global[1] >= 92:
+            if melhor_match_global and melhor_match_global[1] >= 85:
                 cidade_uf = melhor_match_global[0]
                 resultado.update({"uf": cidade_uf.rsplit(' ', 1)[1], "municipio": cidade_uf.rsplit(' ', 1)[0]})
                     
@@ -1001,7 +1001,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V21_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V22_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1109,7 +1109,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Falha Geográfica Absoluta por falta de candidatos e centróides na nuvem."]
 
 def obter_coordenadas_e_endereco_oficial(localidade):
-    if str(localidade).strip() == "FALHA_GEO_DESTINO" or str(localidade).strip() == "NENHUM_HUB_VALIDO":
+    if str(localidade).strip() == "FALHA_GEO_DESTINO" or str(localidade).strip() == "NENHUM_HUB_VALIDO" or str(localidade).strip() == "FALHA_GEO_ORIGEM":
         return 0.0, 0.0, "Falha de Geocodificação ou Alocação", "BAIXA", 0, "", "", "N/A", ["Ponto geográfico inválido retornado na pré-geocodificação de Hubs."]
         
     lat, lon, end_f, conf, score, dist, mun, fonte, xai = _obter_coordenadas_e_endereco_oficial_core(localidade)
@@ -1283,33 +1283,75 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
     return retorno
 
-def executar_pipeline_unificado(origem_cru, destino_cru):
+# MELHORIA 18: Suporte ao Argumento 'runner_up_info' para Extração Dupla de Rota
+def executar_pipeline_unificado(origem_cru, destino_cru, runner_up_info=None):
     orig = str(origem_cru).strip() if pd.notna(origem_cru) else ""
     dest = str(destino_cru).strip() if pd.notna(destino_cru) else ""
     
-    if orig == "FALHA_GEO_DESTINO" or orig == "NENHUM_HUB_VALIDO":
-        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ["Falha Espacial Origem"], ["Falha Espacial Destino"], "Falha de Roteamento: Hub Base ou Endereço Destino foi incapaz de resolver latitude/longitude em nuvem.", "N/A")
+    concorrente = "N/A"
+    dist_conc = 0.0
+    link_conc = "N/A"
+    justificativa = "N/A"
+    
+    if orig == "FALHA_GEO_ORIGEM" or dest == "NENHUM_HUB_VALIDO":
+        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ["Falha Espacial Origem"], ["Falha Espacial Destino"], "Falha de Roteamento: Hub Base ou Endereço Destino foi incapaz de resolver latitude/longitude em nuvem.", "N/A", concorrente, dist_conc, link_conc, justificativa)
         
     if orig.lower() in ['nan', 'none', 'null', ''] or dest.lower() in ['nan', 'none', 'null', '']:
-        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha na leitura da célula (Campo Vazio).", "N/A")
-    return calcular_pipeline_logistico(orig, dest, perfil_rota="shortest")
+        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha na leitura da célula (Campo Vazio).", "N/A", concorrente, dist_conc, link_conc, justificativa)
+    
+    res = calcular_pipeline_logistico(orig, dest, perfil_rota="shortest")
+    
+    # MELHORIA 18: Injeção de Roteamento Secundário para a Matriz de Hubs
+    if runner_up_info and res and len(res) >= 30:
+        dist_v_runner, r_nome, r_lat, r_lon = runner_up_info
+        lat_o, lon_o = res[19], res[20]
+        
+        if lat_o != 0.0 and r_lat != 0.0:
+            dist_v_real = calcular_distancia_vincenty(lat_o, lon_o, r_lat, r_lon)
+            res_g_runner = extrair_dados_reais_google(origem_cru, r_nome, lat_o, lon_o, r_lat, r_lon, dist_v_real, usar_coordenadas=True)
+            if not res_g_runner:
+                 res_g_runner = extrair_dados_reais_google(origem_cru, r_nome, lat_o, lon_o, r_lat, r_lon, dist_v_real, usar_coordenadas=False)
+            
+            if res_g_runner:
+                dist_conc = res_g_runner[0]
+                link_conc = res_g_runner[2]
+            else:
+                dist_conc = round(dist_v_real * obter_fator_desvio_rodoviario(dist_v_real), 2)
+                o_param = f"{lat_o},{lon_o}"
+                d_param = f"{r_lat},{r_lon}"
+                link_conc = f"https://www.google.com/maps/dir/?api=1&origin={o_param}&destination={d_param}&travelmode=driving"
+        
+        concorrente = r_nome
+        justificativa = f"O destino '{destino_cru}' foi selecionado por ser o mais próximo ({res[0]} km). A base concorrente mais próxima seria '{r_nome}', localizada a {dist_conc} km de distância viária da origem."
+        
+    return (*res, concorrente, dist_conc, link_conc, justificativa)
 
 def embrulhar_task_paralela(item):
-    par_id, orig, dest = item
+    if len(item) == 4:
+        par_id, orig, dest, r_info = item
+    else:
+        par_id, orig, dest = item
+        r_info = None
+        
     try: 
-        res = executar_pipeline_unificado(orig, dest)
-        if res and isinstance(res, tuple) and len(res) < 30:
-            res = tuple(list(res) + ["N/A/Dado não armazenado"] * (30 - len(res)))
+        res = executar_pipeline_unificado(orig, dest, r_info)
+        if res and isinstance(res, tuple) and len(res) < 34:
+            res = tuple(list(res) + ["N/A"] * (34 - len(res)))
         return par_id, res
     except Exception as e: 
         msg_erro = f"FALHA INTERNA: {str(e)}"
-        fallback = (0.0, "0 min", "Link Indisponível", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], msg_erro, "N/A")
+        fallback = (0.0, "0 min", "Link Indisponível", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], msg_erro, "N/A", "N/A", 0.0, "N/A", "N/A")
         return par_id, fallback
 
-def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, progress_bar, status_container):
+def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, progress_bar, status_container, runner_up_map=None):
     resultados_unicos = {}
     executor_lote = EXECUTOR_GLOBAL
-    tarefas_unicas = [(t[1], t[1][0], t[1][1]) for t in tarefas_priorizadas]
+    
+    if runner_up_map:
+        tarefas_unicas = [(t[1], t[1][0], t[1][1], runner_up_map.get(t[1][0])) for t in tarefas_priorizadas]
+    else:
+        tarefas_unicas = [(t[1], t[1][0], t[1][1]) for t in tarefas_priorizadas]
+        
     futuros = {executor_lote.submit(embrulhar_task_paralela, t): t for t in tarefas_unicas}
     
     concluidos = 0
@@ -1344,6 +1386,9 @@ def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, pr
                     df.at[idx, 'Tempo Geocoding (s)'] = float(res[23]) if res[23] is not None else 0.0
                     df.at[idx, 'Tempo Roteamento (s)'] = float(res[24]) if res[24] is not None else 0.0
                     df.at[idx, 'Tempo Total (s)'] = float(res[25]) if res[25] is not None else 0.0
+                    
+                    if runner_up_map:
+                        df.at[idx, 'Distancia Concorrente'] = float(res[31]) if res[31] != "N/A" else 0.0
                 except (ValueError, TypeError): pass
 
                 df.at[idx, 'Tempo'] = res[1] if res[1] is not None else "0 min"
@@ -1361,6 +1406,11 @@ def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, pr
                 df.at[idx, 'Fonte Geocoding Destino'] = res[17] if res[17] is not None else "Desconhecida"
                 df.at[idx, 'Endereco Oficial Destino'] = res[18] if res[18] is not None else "Endereço Não Identificado"
                 df.at[idx, 'Motivo Roteamento'] = res[28] if len(res) > 28 and res[28] is not None else "Sem Justificativa"
+                
+                if runner_up_map:
+                    df.at[idx, 'Concorrente Analisado'] = res[30] if res[30] is not None else "N/A"
+                    df.at[idx, 'Link Rota Concorrente'] = res[32] if res[32] is not None else "N/A"
+                    df.at[idx, 'Justificativa de Alocacao'] = res[33] if res[33] is not None else "N/A"
                 
                 try:
                     if float(res[19]) == 0.0 and float(res[21]) == 0.0:
@@ -1665,23 +1715,24 @@ with tab_processamento:
                 )
                 st.caption("Dica: Baixe a planilha no botão ao lado, clique em 'Abrir Google Sheets' e arraste o arquivo baixado para dentro da tela (Arquivo > Importar).")
 
+# MELHORIA 18: Refatoração do Motor de Alocação Hub-To-Spoke para Preservação 1:1 de Linhas e XAI Competitivo
 with tab_alocacao:
     st.markdown("### 📦 Matriz Geográfica de Alocação de Hubs (Nearest Neighbor)")
-    st.write("Insira a sua lista de Bases Operacionais (Hubs) e a sua lista de Entregas (Destinos). O sistema associará cada endereço à base mais próxima e calculará a rota viária completa.")
+    st.write("A matriz inverterá sua lógica: Os **Endereços serão a Origem**, e as **Bases serão o Destino** da rota. A planilha final terá exatamente a mesma quantidade de linhas que o seu arquivo de endereços.")
     
     col_a1, col_a2 = st.columns(2)
-    with col_a1: file_hubs = st.file_uploader("1. Planilha de Bases / Municípios (Excel)", type=["xlsx"], key="up_hubs")
-    with col_a2: file_dest = st.file_uploader("2. Planilha de Endereços / Entregas (Excel)", type=["xlsx"], key="up_dests")
+    with col_a1: file_dest = st.file_uploader("1. Planilha de Endereços / Entregas (Origens)", type=["xlsx"], key="up_dests_v18")
+    with col_a2: file_hubs = st.file_uploader("2. Planilha de Municípios / Bases (Destinos)", type=["xlsx"], key="up_hubs_v18")
     
     if file_hubs and file_dest:
         df_hubs = pd.read_excel(file_hubs)
         df_dest = pd.read_excel(file_dest)
         
         col_s1, col_s2 = st.columns(2)
-        with col_s1: hub_col_name = st.selectbox("Coluna contendo as Bases/Municípios (Hubs):", df_hubs.columns)
-        with col_s2: dest_col_name = st.selectbox("Coluna contendo as Entregas/Endereços:", df_dest.columns)
+        with col_s1: dest_col_name = st.selectbox("Selecione a coluna que contém os Endereços (Origens):", df_dest.columns)
+        with col_s2: hub_col_name = st.selectbox("Selecione a coluna que contém os Hubs (Destinos):", df_hubs.columns)
         
-        if st.button("🗺️ Processar Cruzamento Espacial e Roteamento", type="primary"):
+        if st.button("🗺️ Processar Cruzamento Espacial e Roteamento Duplo", type="primary"):
             hubs_unicos = df_hubs[hub_col_name].dropna().astype(str).unique().tolist()
             dests_unicos = df_dest[dest_col_name].dropna().astype(str).unique().tolist()
             
@@ -1722,75 +1773,78 @@ with tab_alocacao:
                         dest_coords[d] = (lat, lon, end)
                         
                         st.session_state['logs_auditoria_alocacao'].append({
-                            "Categoria": "Destino", "Nome Original": d, "Coordenada": f"{lat}, {lon}", 
+                            "Categoria": "Endereço (Origem)", "Nome Original": d, "Coordenada": f"{lat}, {lon}", 
                             "Endereço Oficializado": end, "Score": score, "Validação XAI": " | ".join(xai)
                         })
                         time.sleep(0.05)
                     
-                    status_alo.text("Fase 3/3: Calculando Matriz de Distâncias e montando Pipeline...")
+                    status_alo.text("Fase 3/3: Calculando Matriz Competitiva e montando Pipeline...")
                     
-                    # MELHORIA 18: Mapeamento em lote unificando IDs originais à Matriz
                     dest_to_hub = {}
-                    for d_nome, (d_lat, d_lon, d_end) in dest_coords.items():
-                        if d_lat == 0.0 or d_lon == 0.0:
-                            dest_to_hub[d_nome] = "FALHA_GEO_DESTINO"
+                    runner_up_map = {}
+                    
+                    for o_nome, (o_lat, o_lon, o_end) in dest_coords.items():
+                        if o_lat == 0.0 or o_lon == 0.0:
+                            dest_to_hub[o_nome] = "FALHA_GEO_ORIGEM"
                             continue
                             
-                        menor_dist = float('inf')
-                        melhor_hub = None
-                        
+                        hubs_dist = []
                         for h_nome, (h_lat, h_lon, h_end) in hubs_validos.items():
-                            dist = calcular_distancia_vincenty(d_lat, d_lon, h_lat, h_lon)
-                            if dist < menor_dist:
-                                menor_dist = dist
-                                melhor_hub = h_nome
-                                
-                        dest_to_hub[d_nome] = melhor_hub if melhor_hub else "NENHUM_HUB_VALIDO"
+                            dist_v = calcular_distancia_vincenty(o_lat, o_lon, h_lat, h_lon)
+                            hubs_dist.append((dist_v, h_nome, h_lat, h_lon))
+                            
+                        hubs_dist.sort(key=lambda x: x[0])
+                        
+                        if hubs_dist:
+                            dest_to_hub[o_nome] = hubs_dist[0][1]
+                            if len(hubs_dist) > 1:
+                                runner_up_map[o_nome] = hubs_dist[1]
+                        else:
+                            dest_to_hub[o_nome] = "NENHUM_HUB_VALIDO"
                     
-                    if not dest_to_hub:
-                        st.error("Falha sistêmica: Nenhum par pôde ser consolidado na matriz.")
-                    else:
-                        # MELHORIA 18: Construção sobre o DataFrame original (Preserva as 14 linhas do usuário)
-                        df_pares = df_dest.copy()
-                        df_pares['Destino'] = df_pares[dest_col_name].astype(str).str.strip()
-                        df_pares['Origem'] = df_pares['Destino'].map(dest_to_hub).fillna("FALHA_GEO_DESTINO")
-                        
-                        novas_colunas = [
-                            'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Motivo Roteamento', 'Linha Reta', 'Fonte da Rota', 'Score da Rota', 
-                            'Confianca Origem', 'Score Num Origem', 'Distrito Origem', 'Municipio Origem', 'Fonte Geocoding Origem', 'Endereco Oficial Origem',
-                            'Confianca Destino', 'Score Num Destino', 'Distrito Destino', 'Municipio Destino', 'Fonte Geocoding Destino', 'Endereco Oficial Destino',
-                            'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Status da Rota'
-                        ]
-                        colunas_numericas = ['Distancia', 'Linha Reta', 'Score da Rota', 'Score Num Origem', 'Score Num Destino', 'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global']
-                        
-                        for col in novas_colunas:
-                            if col in colunas_numericas: df_pares[col] = pd.Series(0.0, index=df_pares.index, dtype=float)
-                            else: df_pares[col] = pd.Series("Não Informado", index=df_pares.index, dtype=object)
+                    df_pares = df_dest.copy()
+                    df_pares['Origem_Limpa'] = df_pares[dest_col_name].astype(str).str.strip()
+                    df_pares['Origem'] = df_pares['Origem_Limpa']
+                    df_pares['Destino'] = df_pares['Origem_Limpa'].map(dest_to_hub).fillna("FALHA_GEO_ORIGEM")
+                    df_pares = df_pares.drop(columns=['Origem_Limpa'])
+                    
+                    novas_colunas = [
+                        'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Motivo Roteamento', 'Linha Reta', 'Fonte da Rota', 'Score da Rota', 
+                        'Confianca Origem', 'Score Num Origem', 'Distrito Origem', 'Municipio Origem', 'Fonte Geocoding Origem', 'Endereco Oficial Origem',
+                        'Confianca Destino', 'Score Num Destino', 'Distrito Destino', 'Municipio Destino', 'Fonte Geocoding Destino', 'Endereco Oficial Destino',
+                        'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Status da Rota',
+                        'Concorrente Analisado', 'Distancia Concorrente', 'Link Rota Concorrente', 'Justificativa de Alocacao'
+                    ]
+                    colunas_numericas = ['Distancia', 'Linha Reta', 'Score da Rota', 'Score Num Origem', 'Score Num Destino', 'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Distancia Concorrente']
+                    
+                    for col in novas_colunas:
+                        if col in colunas_numericas: df_pares[col] = pd.Series(0.0, index=df_pares.index, dtype=float)
+                        else: df_pares[col] = pd.Series("Não Informado", index=df_pares.index, dtype=object)
 
-                        pares_unicos_alo = set()
-                        MAPA_PRIORIDADE = {"CEP": 1, "ENDERECO_COMPLETO": 2, "POI": 3, "CONDOMINIO": 3, "MUNICIPIO": 4, "BAIRRO": 5, "RURAL": 6, "LOGRADOURO": 7}
-                        tarefas_priorizadas_alo = []
-                        
-                        for index, linha in df_pares.iterrows():
-                            o, d = str(linha['Origem']).strip(), str(linha['Destino']).strip()
-                            if o and d and o != "FALHA_GEO_DESTINO" and o != "NENHUM_HUB_VALIDO" and pd.notna(o) and pd.notna(d):
-                                if (o, d) not in pares_unicos_alo:
-                                    pares_unicos_alo.add((o, d))
-                                    tipo_o = semantica.classificar_entrada(semantica.normalizar(o))
-                                    tarefas_priorizadas_alo.append((MAPA_PRIORIDADE.get(tipo_o, 99), (o, d)))
-                        
-                        tarefas_priorizadas_alo.sort(key=lambda x: x[0])
-                        
-                        df_final_alo = rodar_pipeline_lote(df_pares, list(pares_unicos_alo), tarefas_priorizadas_alo, "Operador Matriz", progress_alo, status_alo)
-                        
-                        status_alo.empty(); progress_alo.empty()
-                        st.success(f"✨ Matriz resolvida! Endereços alocados e roteirizados mantendo as linhas originais do arquivo.")
-                        
-                        st.dataframe(df_final_alo, use_container_width=True, height=250)
-                        
-                        output_buffer = io.BytesIO()
-                        with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: df_final_alo.to_excel(writer, index=False)
-                        st.download_button(label="📥 Baixar Planilha de Alocação (.xlsx)", data=output_buffer.getvalue(), file_name="matriz_alocacao_hubs.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+                    pares_unicos_alo = set()
+                    MAPA_PRIORIDADE = {"CEP": 1, "ENDERECO_COMPLETO": 2, "POI": 3, "CONDOMINIO": 3, "MUNICIPIO": 4, "BAIRRO": 5, "RURAL": 6, "LOGRADOURO": 7}
+                    tarefas_priorizadas_alo = []
+                    
+                    for index, linha in df_pares.iterrows():
+                        o, d = str(linha['Origem']).strip(), str(linha['Destino']).strip()
+                        if o and d and o != "FALHA_GEO_ORIGEM" and d != "NENHUM_HUB_VALIDO" and pd.notna(o) and pd.notna(d):
+                            if (o, d) not in pares_unicos_alo:
+                                pares_unicos_alo.add((o, d))
+                                tipo_o = semantica.classificar_entrada(semantica.normalizar(o))
+                                tarefas_priorizadas_alo.append((MAPA_PRIORIDADE.get(tipo_o, 99), (o, d)))
+                    
+                    tarefas_priorizadas_alo.sort(key=lambda x: x[0])
+                    
+                    df_final_alo = rodar_pipeline_lote(df_pares, list(pares_unicos_alo), tarefas_priorizadas_alo, "Operador Matriz", progress_alo, status_alo, runner_up_map)
+                    
+                    status_alo.empty(); progress_alo.empty()
+                    st.success(f"✨ Matriz resolvida e Duelos concluídos! {len(df_final_alo)} linhas preservadas da planilha de endereços.")
+                    
+                    st.dataframe(df_final_alo, use_container_width=True, height=250)
+                    
+                    output_buffer = io.BytesIO()
+                    with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: df_final_alo.to_excel(writer, index=False)
+                    st.download_button(label="📥 Baixar Planilha de Alocação Competitiva (.xlsx)", data=output_buffer.getvalue(), file_name="matriz_alocacao_competitiva.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
 with tab_analytics:
     st.markdown("### 📊 Dashboard Analítico Interativo Corporativo")
