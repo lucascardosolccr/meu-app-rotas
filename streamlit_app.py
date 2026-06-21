@@ -45,10 +45,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v22" not in st.session_state:
+if "cache_limpo_v23" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v22"] = True
+    st.session_state["cache_limpo_v23"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -449,40 +449,20 @@ def validar_coordenada_brasil(lat, lon):
     except (ValueError, TypeError):
         return False, 0.0, 0.0
 
-def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
-    if not (-90 <= lat1 <= 90) or not (-90 <= lat2 <= 90) or not (-180 <= lon1 <= 180) or not (-180 <= lon2 <= 180): return 0.0
+# MELHORIA 19: Fórmula de Haversine Absoluta (Zero Erros de Convergência)
+def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2):
+    if not all(isinstance(x, (int, float)) for x in [lat1, lon1, lat2, lon2]): return 0.0
     if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0: return 0.0
     if lat1 == lat2 and lon1 == lon2: return 0.0
     try:
-        a, b, f = 6378137.0, 6356752.314245, 1 / 298.257223563
-        L = math.radians(lon2 - lon1)
-        U1, U2 = math.atan((1 - f) * math.tan(math.radians(lat1))), math.atan((1 - f) * math.tan(math.radians(lat2)))
-        sinU1, cosU1 = math.sin(U1), math.cos(U1)
-        sinU2, cosU2 = math.sin(U2), math.cos(U2)
-        lam = L
-        for _ in range(100):
-            sinLam, cosLam = math.sin(lam), math.cos(lam)
-            sinSigma = math.sqrt((cosU2 * sinLam) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLam) ** 2)
-            if sinSigma == 0: return 0.0
-            cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLam
-            sigma = math.atan2(sinSigma, cosSigma)
-            sinAlpha = cosU1 * cosU2 * sinLam / sinSigma
-            cosSqAlpha = 1 - sinAlpha ** 2
-            cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha if cosSqAlpha != 0 else 0
-            C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha))
-            lambdaPrev = lam
-            lam = L + (1 - f) * C * sinAlpha * (sigma + f * sinAlpha * (cos2SigmaM + C * cosSigma * (-1 + 2 * cos2SigmaM ** 2)))
-            if abs(lam - lambdaPrev) < 1e-12: break
-        uSq = cosSqAlpha * (a ** 2 - b ** 2) / (b ** 2)
-        A = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)))
-        B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)))
-        deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * cos2SigmaM ** 2) - B / 6 * cos2SigmaM * (-3 + 4 * sinSigma ** 2) * (-3 + 4 * cos2SigmaM ** 2)))
-        s = b * A * (sigma - deltaSigma)
-        return round(s / 1000, 2)
+        lat1_r, lon1_r, lat2_r, lon2_r = map(math.radians, [lat1, lon1, lat2, lon2])
+        dlat = lat2_r - lat1_r
+        dlon = lon2_r - lon1_r
+        a = math.sin(dlat / 2)**2 + math.cos(lat1_r) * math.cos(lat2_r) * math.sin(dlon / 2)**2
+        c = 2 * math.asin(math.sqrt(a))
+        return round(6371.0 * c, 2)
     except Exception:
-        dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
-        m_a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
-        return round(6371.0 * 2 * math.atan2(math.sqrt(m_a), math.sqrt(1 - m_a)), 2)
+        return 0.0
 
 def auditoria_geografica(km_rota, minutos_str, dist_linha_reta, lat_o, lon_o, lat_d, lon_d):
     for lat, lon, loc in [(lat_o, lon_o, "Origem"), (lat_d, lon_d, "Destino")]:
@@ -567,20 +547,6 @@ def obter_coordenada_centroide_supremo(mun_nome, uf_nome):
 # ==============================================================================
 # 🗺️ MÓDULOS DE GEOCODIFICAÇÃO COM TELEMETRIA (CONTRATO LISTA TOP-K)
 # ==============================================================================
-def API_Google_Geocoding_Scraper(query):
-    start_t = time.time()
-    try:
-        url = f"https://www.google.com/maps/search/{requests.utils.quote(query)}"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        r = session.get(url, headers=headers, timeout=5, allow_redirects=True)
-        match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.url)
-        if not match: match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', r.text)
-        if match: 
-            registrar_telemetria("GOOGLE_MAPS", True, time.time() - start_t)
-            return [{"lat": float(match.group(1)), "lon": float(match.group(2)), "fonte": "GOOGLE_MAPS", "score_base": 40, "cidade": "", "estado": "", "bairro": ""}]
-    except Exception: pass
-    registrar_telemetria("GOOGLE_MAPS", False, time.time() - start_t)
-    return None
 
 def API_TomTom(query):
     if not TOMTOM_API_KEY: return None
@@ -815,7 +781,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     if candidatos_consistentes_mun: candidatos_validos = candidatos_consistentes_mun
         
     PESO_FONTES = {}
-    DEFAULT_WEIGHTS = {"GOOGLE_MAPS": 1.00, "ARCGIS": 0.95, "TOMTOM": 0.90, "OVERPASS": 0.85, "NOMINATIM": 0.80, "PHOTON": 0.75}
+    DEFAULT_WEIGHTS = {"ARCGIS": 0.95, "TOMTOM": 0.90, "OVERPASS": 0.85, "NOMINATIM": 0.80, "PHOTON": 0.75}
     for fonte, d_w in DEFAULT_WEIGHTS.items():
         m_api = cache_api_health.get(fonte, {"hits": 0, "calls": 0})
         PESO_FONTES[fonte] = round(max(0.5, m_api["hits"] / m_api["calls"]), 2) if m_api["calls"] >= 50 else d_w
@@ -851,7 +817,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         apis_concordantes = set([c1["fonte"]])
         for c2 in candidatos_validos:
             if c1["fonte"] != c2["fonte"]:
-                dist = calcular_distancia_vincenty(c1["lat"], c1["lon"], c2["lat"], c2["lon"])
+                dist = calcular_distancia_linha_reta(c1["lat"], c1["lon"], c2["lat"], c2["lon"])
                 if dist <= tolerancia_km: 
                     apis_concordantes.add(c2["fonte"])
                     probabilidades_cluster.append(PESO_FONTES.get(c2["fonte"], 0.5))
@@ -884,7 +850,9 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         estado_comp = m.get("estado", cand.get("estado", "")).upper().strip()
         cidade_comp = m.get("cidade", cand.get("cidade", "")).upper().strip()
         
-        if uf_inf and estado_comp:
+        # MELHORIA 19: Guilhotina de UF Absoluta na Fase Final (Anti-Alucinação Viewport)
+        if uf_inf:
+            if not estado_comp: continue
             nome_estado_inf = unidecode(IBGE_ESTADOS.get(uf_inf, uf_inf)).upper()
             if uf_inf not in estado_comp and nome_estado_inf not in estado_comp: continue 
             
@@ -908,7 +876,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         if cand.get("lat", 0.0) == 0.0 or cand.get("lon", 0.0) == 0.0: continue
         f_n = cand.get("fonte", "")
         metr = cache_api_health.get(f_n, {"hits": 0, "calls": 0, "falhas": 0, "tempo_total": 0.0})
-        if calcular_distancia_vincenty(cand["lat"], cand["lon"], vencedor["lat"], vencedor["lon"]) <= 0.05:
+        if calcular_distancia_linha_reta(cand["lat"], cand["lon"], vencedor["lat"], vencedor["lon"]) <= 0.05:
             metr["hits"] += 1
         cache_api_health.set(f_n, metr, expire=None)
 
@@ -1001,7 +969,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V23_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V24_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1062,13 +1030,13 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
         return resultados
 
     if tipo_entrada == "POI" or tipo_entrada == "CONDOMINIO":
-        candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Overpass_POIs, (texto_norm,), {}), (API_TomTom, (endereco_canonico,), {})]))
+        candidatos_validos.extend(disparar_apis_paralelas([(API_Overpass_POIs, (texto_norm,), {}), (API_TomTom, (endereco_canonico,), {})]))
     elif tipo_entrada in ["ENDERECO_COMPLETO", "LOGRADOURO"]:
-        candidatos_validos.extend(disparar_apis_paralelas([(API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_TomTom, (endereco_canonico,), {})]))
+        candidatos_validos.extend(disparar_apis_paralelas([(API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_TomTom, (endereco_canonico,), {})]))
     elif tipo_entrada in ["BAIRRO", "MUNICIPIO", "DISTRITO"]:
         candidatos_validos.extend(disparar_apis_paralelas([(API_Photon, (endereco_canonico,), {})]))
     else:
-        candidatos_validos.extend(disparar_apis_paralelas([(API_Google_Geocoding_Scraper, (endereco_canonico,), {}), (API_Photon, (endereco_canonico,), {}), (API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_TomTom, (endereco_canonico,), {})]))
+        candidatos_validos.extend(disparar_apis_paralelas([(API_Photon, (endereco_canonico,), {}), (API_ArcGIS, (endereco_canonico,), {"ctx": contexto_estruturado}), (API_TomTom, (endereco_canonico,), {})]))
             
     res_final = processar_consenso_dinamico(candidatos_validos, tipo_entrada, texto_cru)
     
@@ -1139,7 +1107,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V20_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+    cache_key = f"GOOG_V21_{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
@@ -1203,7 +1171,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V20_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V21_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1214,7 +1182,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_rot = time.time()
 
     if all([lat_o is not None, lon_o is not None, lat_d is not None, lon_d is not None]) and lat_o != 0.0 and lat_d != 0.0:
-        dist_linha_reta = calcular_distancia_vincenty(lat_o, lon_o, lat_d, lon_d)
+        dist_linha_reta = calcular_distancia_linha_reta(lat_o, lon_o, lat_d, lon_d)
     else:
         dist_linha_reta = 0.0
 
@@ -1305,7 +1273,7 @@ def executar_pipeline_unificado(origem_cru, destino_cru, runner_up_info=None):
         lat_o, lon_o = res[19], res[20]
         
         if lat_o != 0.0 and r_lat != 0.0:
-            dist_v_real = calcular_distancia_vincenty(lat_o, lon_o, r_lat, r_lon)
+            dist_v_real = calcular_distancia_linha_reta(lat_o, lon_o, r_lat, r_lon)
             res_g_runner = extrair_dados_reais_google(origem_cru, r_nome, lat_o, lon_o, r_lat, r_lon, dist_v_real, usar_coordenadas=True)
             if not res_g_runner:
                  res_g_runner = extrair_dados_reais_google(origem_cru, r_nome, lat_o, lon_o, r_lat, r_lon, dist_v_real, usar_coordenadas=False)
@@ -1724,16 +1692,16 @@ with tab_alocacao:
     st.write("A matriz inverteu sua lógica por segurança: Os **Endereços serão a Origem**, e as **Bases serão o Destino** da rota. A planilha final terá exatamente a mesma quantidade de linhas que o seu arquivo de endereços.")
     
     col_a1, col_a2 = st.columns(2)
-    with col_a1: file_hubs = st.file_uploader("1. Planilha de Municípios / Bases (Destinos)", type=["xlsx"], key="up_hubs_v19")
-    with col_a2: file_dest = st.file_uploader("2. Planilha de Endereços / Entregas (Origens)", type=["xlsx"], key="up_dests_v19")
+    with col_a1: file_dest = st.file_uploader("1. Planilha de Endereços / Entregas (Origens)", type=["xlsx"], key="up_dests_v19")
+    with col_a2: file_hubs = st.file_uploader("2. Planilha de Municípios / Bases (Destinos)", type=["xlsx"], key="up_hubs_v19")
     
     if file_hubs and file_dest:
         df_hubs = pd.read_excel(file_hubs)
         df_dest = pd.read_excel(file_dest)
         
         col_s1, col_s2 = st.columns(2)
-        with col_s1: hub_col_name = st.selectbox("Selecione a coluna que contém os Municípios/Bases (Destinos):", df_hubs.columns)
-        with col_s2: dest_col_name = st.selectbox("Selecione a coluna que contém os Endereços (Origens):", df_dest.columns)
+        with col_s1: dest_col_name = st.selectbox("Selecione a coluna que contém os Endereços (Origens):", df_dest.columns)
+        with col_s2: hub_col_name = st.selectbox("Selecione a coluna que contém os Municípios/Bases (Destinos):", df_hubs.columns)
         
         if st.button("🗺️ Processar Cruzamento Espacial e Roteamento Duplo", type="primary"):
             start_alo_clock = time.time()
@@ -1795,7 +1763,7 @@ with tab_alocacao:
                             
                         hubs_dist = []
                         for h_nome, (h_lat, h_lon, h_end) in hubs_validos.items():
-                            dist_v = calcular_distancia_vincenty(o_lat, o_lon, h_lat, h_lon)
+                            dist_v = calcular_distancia_linha_reta(o_lat, o_lon, h_lat, h_lon)
                             hubs_dist.append((dist_v, h_nome, h_lat, h_lon))
                             
                         hubs_dist.sort(key=lambda x: x[0])
@@ -1807,6 +1775,7 @@ with tab_alocacao:
                         else:
                             dest_to_hub[o_nome] = "NENHUM_HUB_VALIDO"
                     
+                    # MELHORIA 18: Clone total do dataframe original para manter a exata quantidade de linhas
                     df_pares = df_dest.copy()
                     df_pares['Origem'] = df_pares[dest_col_name].astype(str).str.strip()
                     df_pares['Destino'] = df_pares['Origem'].map(dest_to_hub).fillna("FALHA_GEO_ORIGEM")
@@ -1843,7 +1812,6 @@ with tab_alocacao:
                     
                     status_alo.empty(); progress_alo.empty()
                     
-                    # MELHORIA 20: Integração da Matriz Hubs no Histórico e Dashboard Global
                     tempo_alo_segundos = round(time.time() - start_alo_clock, 2)
                     cache_historico_lotes.set(f"alocacao_{start_alo_clock}", {
                         "Data/Hora": time.strftime("%Y-%m-%d %H:%M:%S"),
