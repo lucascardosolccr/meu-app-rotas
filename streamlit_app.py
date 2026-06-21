@@ -45,10 +45,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v25" not in st.session_state:
+if "cache_limpo_v26" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v25"] = True
+    st.session_state["cache_limpo_v26"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -358,7 +358,6 @@ class MotorEnderecoCanônico:
                 if melhor_match and melhor_match[1] >= 65:
                     resultado.update({"municipio": melhor_match[0]})
         
-        # MELHORIA 21: Proteção de Estado Estrita - O sistema NÃO irá inventar um Estado caso você não digite
         if not resultado["municipio"] and not uf_explicita and len(texto_norm) > 4:
             melhor_match_global = process.extractOne(texto_norm, LISTA_CONTEXTO_FUZZY, scorer=fuzz.WRatio)
             if melhor_match_global and melhor_match_global[1] >= 85:
@@ -450,7 +449,6 @@ def validar_coordenada_brasil(lat, lon):
     except (ValueError, TypeError):
         return False, 0.0, 0.0
 
-# MELHORIA 21: Haversine Supremo para Extirpar Erros Continentais na Distância Linha Reta
 def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2):
     if not all(isinstance(x, (int, float)) for x in [lat1, lon1, lat2, lon2]): return 0.0
     if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0: return 0.0
@@ -548,6 +546,7 @@ def obter_coordenada_centroide_supremo(mun_nome, uf_nome):
 # ==============================================================================
 # 🗺️ MÓDULOS DE GEOCODIFICAÇÃO COM TELEMETRIA (CONTRATO LISTA TOP-K)
 # ==============================================================================
+
 def API_TomTom(query):
     if not TOMTOM_API_KEY: return None
     start_t = time.time()
@@ -967,7 +966,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V25_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V26_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1181,7 +1180,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V22_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V21_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1623,11 +1622,12 @@ with tab_processamento:
                 colunas_numericas = ['Distancia', 'Linha Reta', 'Score da Rota', 'Score Num Origem', 'Score Num Destino', 'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global']
                 
                 for col in novas_colunas:
-                    if col not in df.columns:
-                        if col in colunas_numericas:
-                            df[col] = pd.Series(0.0, index=df.index, dtype=float)
-                        else:
-                            df[col] = pd.Series("Não Informado", index=df.index, dtype=object)
+                    if col in colunas_numericas:
+                        if col not in df.columns: df[col] = 0.0
+                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0).astype(float)
+                    else:
+                        if col not in df.columns: df[col] = "Não Informado"
+                        df[col] = df[col].astype(object)
                     
                 pares_unicos = set()
                 
