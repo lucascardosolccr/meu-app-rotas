@@ -1300,7 +1300,6 @@ def executar_pipeline_unificado(origem_cru, destino_cru, runner_up_info=None):
     
     res = calcular_pipeline_logistico(orig, dest, perfil_rota="shortest")
     
-    # MELHORIA 18: Injeção de Roteamento Secundário para Matriz Competitiva
     if runner_up_info and res and len(res) >= 30:
         dist_v_runner, r_nome, r_lat, r_lon = runner_up_info
         lat_o, lon_o = res[19], res[20]
@@ -1737,6 +1736,8 @@ with tab_alocacao:
         with col_s2: dest_col_name = st.selectbox("Selecione a coluna que contém os Endereços (Origens):", df_dest.columns)
         
         if st.button("🗺️ Processar Cruzamento Espacial e Roteamento Duplo", type="primary"):
+            start_alo_clock = time.time()
+            
             hubs_unicos = df_hubs[hub_col_name].dropna().astype(str).str.strip().unique().tolist()
             dests_unicos = df_dest[dest_col_name].dropna().astype(str).str.strip().unique().tolist()
             
@@ -1841,7 +1842,20 @@ with tab_alocacao:
                     df_final_alo = rodar_pipeline_lote(df_pares, list(pares_unicos_alo), tarefas_priorizadas_alo, "Operador Matriz", progress_alo, status_alo, runner_up_map)
                     
                     status_alo.empty(); progress_alo.empty()
-                    st.success(f"✨ Matriz resolvida e Duelos concluídos! {len(df_final_alo)} linhas originais foram rigorosamente preservadas e preenchidas.")
+                    
+                    # MELHORIA 20: Integração da Matriz Hubs no Histórico e Dashboard Global
+                    tempo_alo_segundos = round(time.time() - start_alo_clock, 2)
+                    cache_historico_lotes.set(f"alocacao_{start_alo_clock}", {
+                        "Data/Hora": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "Operador": "Motor de Alocação (Hubs)",
+                        "Linhas Validadas": len(df_final_alo),
+                        "Tempo Gasto (s)": tempo_alo_segundos,
+                        "Tempo Médio/Rota (s)": round(tempo_alo_segundos / max(1, len(pares_unicos_alo)), 2)
+                    }, expire=None)
+
+                    st.session_state['df_processado'] = df_final_alo
+                    
+                    st.success(f"✨ Matriz resolvida e Duelos concluídos! {len(df_final_alo)} linhas originais foram rigorosamente preservadas e preenchidas. O Dashboard Analítico e o Histórico de Lotes já foram atualizados com estes dados.")
                     
                     ordem_finais_alo = list(df_dest.columns)
                     for c in ['Origem', 'Destino'] + novas_colunas:
