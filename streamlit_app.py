@@ -45,10 +45,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v18" not in st.session_state:
+if "cache_limpo_v19" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v18"] = True
+    st.session_state["cache_limpo_v19"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -358,10 +358,10 @@ class MotorEnderecoCanônico:
                 if melhor_match and melhor_match[1] >= 65:
                     resultado.update({"municipio": melhor_match[0]})
         
-        # MELHORIA 16: Válvula de Escape Global - Reconhece cidades óbvias mesmo sem UF digitada.
+        # MELHORIA 16: Limiar reduzido de 92 para 85 para capturar erros severos de sigla de estado ("DP" = "SP")
         if not resultado["municipio"] and len(texto_norm) > 4:
             melhor_match_global = process.extractOne(texto_norm, LISTA_CONTEXTO_FUZZY, scorer=fuzz.WRatio)
-            if melhor_match_global and melhor_match_global[1] >= 92:
+            if melhor_match_global and melhor_match_global[1] >= 85:
                 cidade_uf = melhor_match_global[0]
                 resultado.update({"uf": cidade_uf.rsplit(' ', 1)[1], "municipio": cidade_uf.rsplit(' ', 1)[0]})
                     
@@ -389,7 +389,6 @@ class MotorEnderecoCanônico:
             contexto = contexto_pre
 
         tipo = self.classificar_entrada(texto_fuzzy)
-        
         endereco_canonico = texto_fuzzy if texto_fuzzy else texto_norm
         
         return endereco_canonico, tipo, "", 0.0, 0.0
@@ -485,13 +484,6 @@ def calcular_distancia_vincenty(lat1, lon1, lat2, lon2):
         dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
         m_a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
         return round(6371.0 * 2 * math.atan2(math.sqrt(m_a), math.sqrt(1 - m_a)), 2)
-
-def auditoria_geografica(km_rota, minutos_str, dist_linha_reta, lat_o, lon_o, lat_d, lon_d):
-    for lat, lon, loc in [(lat_o, lon_o, "Origem"), (lat_d, lon_d, "Destino")]:
-        if not (-75.0 <= lon <= -28.0) or not (-35.0 <= lat <= 6.0): return f"AUDITORIA: Coordenada {loc} fora do BR ({lat},{lon})"
-    if km_rota and dist_linha_reta and km_rota > 0 and dist_linha_reta > 0:
-        if km_rota < (dist_linha_reta * 0.9): return f"Violação Geodésica (Rota {km_rota}km < Linha Reta {dist_linha_reta}km)"
-    return None
 
 def cascata_postal_tripla(cep_limpo):
     if cep_limpo in cache_cep:
@@ -679,6 +671,30 @@ def API_Photon(query):
     registrar_telemetria("PHOTON", False, time.time() - start_t)
     return None
 
+def API_Overpass_POIs(texto_norm):
+    if len(texto_norm) < 10: return None
+    if texto_norm in cache_poi: return cache_poi[texto_norm]
+    start_t = time.time()
+    endpoints = ["https://overpass-api.de/api/interpreter", "https://lz4.overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
+    texto_seguro = re.escape(texto_norm)
+    query_osm = f'[out:json][timeout:3];(node["name"~"{texto_seguro}",i]["amenity"];way["name"~"{texto_seguro}",i]["amenity"];node["name"~"{texto_seguro}",i]["building"];way["name"~"{texto_seguro}",i]["building"];node["name"~"{texto_seguro}",i]["healthcare"];way["name"~"{texto_seguro}",i]["healthcare"];node["name"~"{texto_seguro}",i]["education"];way["name"~"{texto_seguro}",i]["education"];);out center;'
+    for url in endpoints:
+        try:
+            r = session.post(url, data={"data": query_osm}, timeout=4)
+            if r.status_code == 200:
+                elems = r.json().get("elements", [])
+                if elems:
+                    e = elems[0]
+                    lat, lon = e.get("lat", e.get("center", {}).get("lat", 0.0)), e.get("lon", e.get("center", {}).get("lon", 0.0))
+                    tags = e.get("tags", {})
+                    res_poi = {"lat": lat, "lon": lon, "fonte": "OVERPASS", "score_base": 40, "cidade": tags.get("addr:city", "").upper(), "estado": tags.get("addr:state", "").upper(), "bairro": tags.get("addr:suburb", "").upper(), "logradouro": tags.get("addr:street", "").upper(), "numero": str(tags.get("addr:housenumber", "")).upper(), "cep": tags.get("addr:postcode", "").replace("-", "")}
+                    cache_poi.set(texto_norm, [res_poi], expire=7776000)
+                    registrar_telemetria("OVERPASS", True, time.time() - start_t)
+                    return [res_poi]
+        except Exception: continue
+    registrar_telemetria("OVERPASS", False, time.time() - start_t)
+    return None
+
 def API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d):
     start_t = time.time()
     try:
@@ -845,18 +861,23 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     top3_candidatos = candidatos_validos[:3]
     for cand in top3_candidatos:
         m = executar_reverse_geocoding_multimotor(cand["lat"], cand["lon"])
-        estado_reverse = m.get("estado", "").upper().strip()
-        cidade_reverse = m.get("cidade", "").upper().strip()
         
-        if uf_inf and estado_reverse:
+        # MELHORIA 16: Bypass de Rate Limits. Se Reverse Geo falhar, herda os atributos do candidato validado!
+        estado_comp = m.get("estado", cand.get("estado", "")).upper().strip()
+        cidade_comp = m.get("cidade", cand.get("cidade", "")).upper().strip()
+        
+        if uf_inf and estado_comp:
             nome_estado_inf = unidecode(IBGE_ESTADOS.get(uf_inf, uf_inf)).upper()
-            if uf_inf not in estado_reverse and nome_estado_inf not in estado_reverse: continue 
+            if uf_inf not in estado_comp and nome_estado_inf not in estado_comp: continue 
             
-        if mun_inf and cidade_reverse:
-            match_cid = (mun_inf in cidade_reverse) or (cidade_reverse in mun_inf) or (fuzz.token_set_ratio(mun_inf, cidade_reverse) >= 85)
+        if mun_inf and cidade_comp:
+            match_cid = (mun_inf in cidade_comp) or (cidade_comp in mun_inf) or (fuzz.token_set_ratio(mun_inf, cidade_comp) >= 85)
             if not match_cid: continue
         
-        end_reverse = ", ".join([c for c in [m.get("logradouro", ""), m.get("bairro", ""), m.get("cidade", ""), estado_reverse] if c.strip()])
+        bairro_comp = m.get("bairro", cand.get("bairro", "")).upper().strip()
+        logr_comp = m.get("logradouro", cand.get("logradouro", "")).upper().strip()
+        
+        end_reverse = ", ".join([c for c in [logr_comp, bairro_comp, cidade_comp, estado_comp] if c.strip()])
         similaridade = fuzz.token_set_ratio(texto_norm, end_reverse.upper())
         
         if similaridade >= 55 or tipo_entrada in ["BAIRRO", "MUNICIPIO", "RURAL"]:
@@ -962,7 +983,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V17_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V19_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1072,8 +1093,8 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     return 0.0, 0.0, endereco_canonico, "BAIXA", 0, "", "", "N/A", ["Falha Geográfica Absoluta por falta de candidatos e centróides na nuvem."]
 
 def obter_coordenadas_e_endereco_oficial(localidade):
-    if localidade == "FALHA_GEO_DESTINO" or localidade == "NENHUM_HUB_VALIDO":
-        return 0.0, 0.0, "Falha de Geocodificação ou Alocação", "BAIXA", 0, "", "", "N/A", ["Ponto geográfico inválido."]
+    if str(localidade).strip() == "FALHA_GEO_DESTINO" or str(localidade).strip() == "NENHUM_HUB_VALIDO":
+        return 0.0, 0.0, "Falha de Geocodificação ou Alocação", "BAIXA", 0, "", "", "N/A", ["Ponto geográfico inválido retornado na pré-geocodificação de Hubs."]
         
     lat, lon, end_f, conf, score, dist, mun, fonte, xai = _obter_coordenadas_e_endereco_oficial_core(localidade)
     
@@ -1102,7 +1123,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_raw, destino_raw, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V18_{origem_raw}|{destino_raw}|{usar_coordenadas}"
+    cache_key = f"GOOG_V19_{origem_raw}|{destino_raw}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     origem_param = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_raw)
@@ -1166,7 +1187,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V18_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V19_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1250,9 +1271,9 @@ def executar_pipeline_unificado(origem_cru, destino_cru):
     orig = str(origem_cru).strip() if pd.notna(origem_cru) else ""
     dest = str(destino_cru).strip() if pd.notna(destino_cru) else ""
     
-    # MELHORIA 16: Tratamento de exceção de Alocação de Hubs
+    # MELHORIA 16: Retorno estrutural tolerante a falhas geográficas da aba de Hubs
     if orig == "FALHA_GEO_DESTINO" or orig == "NENHUM_HUB_VALIDO":
-        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha na alocação: Base ou Destino não possui coordenadas rastreáveis.", "N/A")
+        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ["Falha Espacial Origem"], ["Falha Espacial Destino"], "Falha de Roteamento: Hub Base ou Endereço Destino foi incapaz de resolver latitude/longitude em nuvem.", "N/A")
         
     if orig.lower() in ['nan', 'none', 'null', ''] or dest.lower() in ['nan', 'none', 'null', '']:
         return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha na leitura da célula (Campo Vazio).", "N/A")
@@ -1327,10 +1348,14 @@ def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, pr
                 df.at[idx, 'Motivo Roteamento'] = res[28] if len(res) > 28 and res[28] is not None else "Sem Justificativa"
                 
                 try:
-                    score_o, score_d, score_r = float(df.at[idx, 'Score Num Origem']), float(df.at[idx, 'Score Num Destino']), float(df.at[idx, 'Score da Rota'])
-                    score_global = round((0.35 * score_o) + (0.35 * score_d) + (0.30 * score_r), 2)
-                    df.at[idx, 'Score Final Global'] = score_global
-                    df.at[idx, 'Status da Rota'] = "Excelente" if score_global >= 90 else "Boa" if score_global >= 80 else "Aceitável" if score_global >= 70 else "Revisar"
+                    if float(res[19]) == 0.0 and float(res[21]) == 0.0:
+                        df.at[idx, 'Score Final Global'] = 0.0
+                        df.at[idx, 'Status da Rota'] = "Erro"
+                    else:
+                        score_o, score_d, score_r = float(df.at[idx, 'Score Num Origem']), float(df.at[idx, 'Score Num Destino']), float(df.at[idx, 'Score da Rota'])
+                        score_global = round((0.35 * score_o) + (0.35 * score_d) + (0.30 * score_r), 2)
+                        df.at[idx, 'Score Final Global'] = score_global
+                        df.at[idx, 'Status da Rota'] = "Excelente" if score_global >= 90 else "Boa" if score_global >= 80 else "Aceitável" if score_global >= 70 else "Revisar"
                 except Exception:
                     df.at[idx, 'Score Final Global'] = 0.0
                     df.at[idx, 'Status da Rota'] = "Erro"
@@ -1583,7 +1608,7 @@ with tab_processamento:
                 barra_progresso = st.progress(0)
                 container_status = st.empty()
                 
-                df_final = rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, barra_progresso, container_status)
+                df_final = rodar_pipeline_lote(df, list(pares_unicos), tarefas_priorizadas, nome_operador, barra_progresso, container_status)
                 
                 tempo_lote_segundos = round(time.time() - start_lote_clock, 2)
                 cache_historico_lotes.set(f"lote_{start_lote_clock}", {
@@ -1651,29 +1676,44 @@ with tab_alocacao:
                 progress_alo = st.progress(0)
                 status_alo = st.empty()
                 
+                if 'logs_auditoria_alocacao' not in st.session_state:
+                    st.session_state['logs_auditoria_alocacao'] = []
+                st.session_state['logs_auditoria_alocacao'].clear()
+                
                 status_alo.text("Fase 1/3: Geocodificando e blindando Hubs Logísticos...")
                 hub_coords = {}
                 for i, h in enumerate(hubs_unicos):
                     progress_alo.progress((i + 1) / len(hubs_unicos))
-                    lat, lon, end, _, _, _, _, _, _ = obter_coordenadas_e_endereco_oficial(h)
+                    lat, lon, end, conf, score, dist, mun, fonte, xai = obter_coordenadas_e_endereco_oficial(h)
                     hub_coords[h] = (lat, lon, end)
+                    
+                    st.session_state['logs_auditoria_alocacao'].append({
+                        "Categoria": "Base/Hub", "Nome Original": h, "Coordenada": f"{lat}, {lon}", 
+                        "Endereço Oficializado": end, "Score": score, "Validação XAI": " | ".join(xai)
+                    })
+                    time.sleep(0.05) # Pausa micro para não colapsar APIs Reverse Geo
                 
                 hubs_validos = {k: v for k, v in hub_coords.items() if v[0] != 0.0}
                 
                 if not hubs_validos:
-                    st.error("CRÍTICO: Nenhuma Base/Hub pôde ser geocodificada no mapa. Assegure-se de que a coluna de Bases contenha endereços, nomes de cidades ou coordenadas válidas.")
+                    st.error("CRÍTICO: Nenhuma Base/Hub pôde ser geocodificada no mapa. Assegure-se de que a coluna de Bases contenha endereços, nomes de cidades ou coordenadas válidas. Verifique a Aba de Auditoria.")
                     status_alo.empty(); progress_alo.empty()
                 else:
                     status_alo.text("Fase 2/3: Geocodificando Endereços de Destino...")
                     dest_coords = {}
                     for i, d in enumerate(dests_unicos):
                         progress_alo.progress((i + 1) / len(dests_unicos))
-                        lat, lon, end, _, _, _, _, _, _ = obter_coordenadas_e_endereco_oficial(d)
+                        lat, lon, end, conf, score, dist, mun, fonte, xai = obter_coordenadas_e_endereco_oficial(d)
                         dest_coords[d] = (lat, lon, end)
+                        
+                        st.session_state['logs_auditoria_alocacao'].append({
+                            "Categoria": "Destino", "Nome Original": d, "Coordenada": f"{lat}, {lon}", 
+                            "Endereço Oficializado": end, "Score": score, "Validação XAI": " | ".join(xai)
+                        })
+                        time.sleep(0.05)
                     
                     status_alo.text("Fase 3/3: Calculando Matriz de Distâncias e montando Pipeline...")
                     
-                    # MELHORIA 16: Injeção de Falhas Elegantes para não colapsar a matriz.
                     alocacoes_matrix = []
                     for d_nome, (d_lat, d_lon, d_end) in dest_coords.items():
                         if d_lat == 0.0 or d_lon == 0.0:
@@ -1717,7 +1757,7 @@ with tab_alocacao:
                         
                         for index, linha in df_pares.iterrows():
                             o, d = str(linha['Origem']).strip(), str(linha['Destino']).strip()
-                            if o and d and o != "FALHA_GEO_DESTINO" and o != "NENHUM_HUB_VALIDO":
+                            if o and d:
                                 pares_unicos_alo.add((o, d))
                                 tipo_o = semantica.classificar_entrada(semantica.normalizar(o))
                                 tarefas_priorizadas_alo.append((MAPA_PRIORIDADE.get(tipo_o, 99), (o, d)))
@@ -1872,8 +1912,20 @@ with tab_analytics:
 
 with tab_auditoria:
     st.markdown("### 🕵️ Dossiê de Auditoria Viária e Espacial")
-    if 'logs_auditoria' in st.session_state and st.session_state['logs_auditoria']:
-        st.write("Abaixo consta a árvore de decisões explicáveis tomada pelo motor de consenso ponderado:")
-        st.dataframe(pd.DataFrame(st.session_state['logs_auditoria']), use_container_width=True)
-    else:
-        st.info("Nenhum registro de auditoria gerado. Inicie o processamento na primeira aba para popular este painel.")
+    
+    # MELHORIA 16: Bipartição da aba de Auditoria para separar Lote e Matriz
+    tab_aud_lote, tab_aud_hub = st.tabs(["⚙️ Logs do Lote de Roteamento Padrão", "📦 Logs do Motor de Alocação (Hubs)"])
+    
+    with tab_aud_lote:
+        if 'logs_auditoria' in st.session_state and st.session_state['logs_auditoria']:
+            st.write("Abaixo consta a árvore de decisões explicáveis tomada pelo motor de Lote:")
+            st.dataframe(pd.DataFrame(st.session_state['logs_auditoria']), use_container_width=True)
+        else:
+            st.info("Nenhum registro de auditoria gerado. Processe uma planilha na aba de Processamento em Lote.")
+            
+    with tab_aud_hub:
+        if 'logs_auditoria_alocacao' in st.session_state and st.session_state['logs_auditoria_alocacao']:
+            st.write("Abaixo constam as inferências individuais feitas para cada Base e Destino lido na formação da Matriz:")
+            st.dataframe(pd.DataFrame(st.session_state['logs_auditoria_alocacao']), use_container_width=True)
+        else:
+            st.info("Nenhum registro de auditoria gerado. Processe matrizes na aba de Alocação de Hubs para visualizar as justificativas.")
