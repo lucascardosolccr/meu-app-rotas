@@ -45,10 +45,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v29" not in st.session_state:
+if "cache_limpo_v30" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v29"] = True
+    st.session_state["cache_limpo_v30"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -424,10 +424,10 @@ def parse_tempo_minutos(t_str):
 def validar_coordenadas_mapa(lat, lon):
     try:
         if pd.isna(lat) or pd.isna(lon): return False
-        lat_f, lon_f = float(lat), float(lon)
-        if math.isnan(lat_f) or math.isnan(lon_f) or math.isinf(lat_f) or math.isinf(lon_f): return False
-        if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= lon_f <= 180.0): return False
-        if lat_f == 0.0 and lon_f == 0.0: return False
+        lat_f, float(lat), float(lon)
+        if math.isnan(lat_f) or math.isnan(float(lon)) or math.isinf(lat_f) or math.isinf(float(lon)): return False
+        if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= float(lon) <= 180.0): return False
+        if lat_f == 0.0 and float(lon) == 0.0: return False
         return True
     except Exception:
         return False
@@ -954,7 +954,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V29_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V30_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1116,18 +1116,20 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V29_{origem_texto}|{destino_texto}|{usar_coordenadas}"
+    cache_key = f"GOOG_V30_{origem_texto}|{destino_texto}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
-    origem_param_scraper = f"{lat_o},{lon_o}" if usar_coordenadas else requests.utils.quote(origem_texto)
-    destino_param_scraper = f"{lat_d},{lon_d}" if usar_coordenadas else requests.utils.quote(destino_texto)
-    
-    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param_scraper}!1m2!1m1!1s{destino_param_scraper}!3e0"
-    
     orig_link_txt = requests.utils.quote(origem_texto)
     dest_link_txt = requests.utils.quote(destino_texto)
+
+    # URL Interna mantida para o Web Scraper extrair a distância (não necessita API Key, usa host dinâmico interno)
+    origem_param_scraper = f"{lat_o},{lon_o}" if usar_coordenadas else orig_link_txt
+    destino_param_scraper = f"{lat_d},{lon_d}" if usar_coordenadas else dest_link_txt
+    url_api = f"https://www.google.com/maps/preview/directions?authuser=0&hl=pt-BR&gl=br&pb=!1m2!1m1!1s{origem_param_scraper}!1m2!1m1!1s{destino_param_scraper}!3e0"
+    
+    # NOVAS URLs Limpas para a Interface do Usuário e Iframe (Embed Gratuito)
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={orig_link_txt}&destination={dest_link_txt}&travelmode=driving"
-    link_embed = f"https://www.google.com/maps/embed/v1/directions?origin={orig_link_txt}&destination={dest_link_txt}"
+    link_embed = f"https://maps.google.com/maps?saddr={orig_link_txt}&daddr={dest_link_txt}&output=embed"
     
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
@@ -1183,7 +1185,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V29_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V30_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1200,8 +1202,9 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
 
     orig_param_fb = requests.utils.quote(end_oficial_o) if end_oficial_o else f"{lat_o},{lon_o}"
     dest_param_fb = requests.utils.quote(end_oficial_d) if end_oficial_d else f"{lat_d},{lon_d}"
+    
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
-    link_embed_fallback = f"https://www.google.com/maps/embed/v1/directions?origin={orig_param_fb}&destination={dest_param_fb}"
+    link_embed_fallback = f"https://maps.google.com/maps?saddr={orig_param_fb}&daddr={dest_param_fb}&output=embed"
 
     res_google = None
     res_osrm = None
