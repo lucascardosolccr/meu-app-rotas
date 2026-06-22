@@ -13,9 +13,6 @@ import pickle
 import collections
 import hashlib
 import json
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 import urllib.parse
 import altair as alt
 from unidecode import unidecode
@@ -50,10 +47,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v46" not in st.session_state:
+if "cache_limpo_v47" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v46"] = True
+    st.session_state["cache_limpo_v47"] = True
     st.session_state['dash_key'] = 0
 
 def realizar_manutencao_logs_google():
@@ -960,7 +957,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V46_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V47_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1122,7 +1119,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V46_{origem_texto}|{destino_texto}|{usar_coordenadas}"
+    cache_key = f"GOOG_V47_{origem_texto}|{destino_texto}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     orig_link_txt = requests.utils.quote(origem_texto)
@@ -1189,7 +1186,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V46_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V47_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1770,6 +1767,7 @@ with tab_alocacao:
                     status_alo.text("Fase 3/3: Calculando Matriz Competitiva e montando Pipeline...")
                     
                     dest_to_hub = {}
+                    dest_to_linha_reta = {}
                     runner_up_map = {}
                     
                     for o_nome, (o_lat, o_lon, o_end) in dest_coords.items():
@@ -1786,6 +1784,7 @@ with tab_alocacao:
                         
                         if hubs_dist:
                             dest_to_hub[o_nome] = hubs_dist[0][1]
+                            dest_to_linha_reta[o_nome] = hubs_dist[0][0]
                             if len(hubs_dist) > 1:
                                 runner_up_map[o_nome] = hubs_dist[1]
                         else:
@@ -1831,6 +1830,8 @@ with tab_alocacao:
                     df_final_alo = rodar_pipeline_lote(df_pares, list(pares_unicos_alo), tarefas_priorizadas_alo, "Operador Matriz", progress_alo, status_alo, runner_up_map)
                     
                     status_alo.empty(); progress_alo.empty()
+                    
+                    df_final_alo['Linha Reta'] = df_final_alo['Origem'].astype(str).str.strip().map(dest_to_linha_reta).fillna(df_final_alo['Linha Reta'])
                     
                     tempo_alo_segundos = round(time.time() - start_alo_clock, 2)
                     cache_historico_lotes.set(f"alocacao_{start_alo_clock}", {
@@ -1940,7 +1941,6 @@ with tab_analytics:
             
             st.caption("✨ **DICA DE OURO INTERATIVA:** Clique em uma fatia da rosca ou em uma barra de município. A tabela ao lado, bem como a matriz de dispersão abaixo, reagirão automaticamente filtrando os dados! Desenhar um retângulo na Matriz também atualizará os gráficos acima.")
             
-            # Setup Cross-Filtering Altair
             click_uf = alt.selection_point(fields=['UF_Sintetica_Origem'], name='UF')
             click_mun = alt.selection_point(fields=['Municipio Origem'], name='Mun')
             brush = alt.selection_interval(name='Brush')
@@ -1948,7 +1948,6 @@ with tab_analytics:
             top_muns = df_filtrado['Municipio Origem'].value_counts().head(20).index.tolist()
             base_chart = alt.Chart(df_filtrado)
 
-            # --- GRÁFICO 1: PIE CHART (Sem números centrais) ---
             pie_base = base_chart.encode(
                 theta=alt.Theta("count():Q", stack=True),
                 color=alt.Color("UF_Sintetica_Origem:N", legend=alt.Legend(title="Estados (UF)"))
@@ -1958,9 +1957,11 @@ with tab_analytics:
                 tooltip=['UF_Sintetica_Origem', 'count()']
             ).add_params(click_uf)
             
-            chart_pie = arc.transform_filter(click_mun).properties(width=220, height=280, title="Volume por Estado (UF)")
+            text_arc = pie_base.mark_text(radiusOffset=-20, color='white', fontWeight='bold').encode(
+                text=alt.Text("count():Q")
+            )
+            chart_pie = alt.layer(arc, text_arc).transform_filter(click_mun).properties(width=220, height=280, title="Volume por Estado (UF)")
 
-            # --- GRÁFICO 2: BAR CHART ---
             bar_base = base_chart.transform_filter(alt.FieldOneOfPredicate(field='Municipio Origem', oneOf=top_muns)).encode(
                 x=alt.X('count():Q', title='Volume', axis=alt.Axis(tickMinStep=1)),
                 y=alt.Y('Municipio Origem:N', title='Município', sort=alt.EncodingSortField(field='Municipio Origem', op='count', order='descending'))
@@ -1975,7 +1976,6 @@ with tab_analytics:
             )
             chart_bars = alt.layer(bar, text_bar).transform_filter(click_uf).properties(width=380, height=280, title="Ranking de Municípios (Top 20)")
 
-            # --- GRÁFICO 3: SCATTER PLOT ---
             max_dist = int(df_filtrado['Distancia'].max()) if not df_filtrado.empty else 100
             valores_eixo_x = list(range(0, max_dist + 100, 50))
             
@@ -1983,17 +1983,15 @@ with tab_analytics:
                 x=alt.X('Distancia:Q', title='Distância Viária Oficial (km)', axis=alt.Axis(values=valores_eixo_x)),
                 y=alt.Y('Tempo_Horas:Q', title='Tempo Estimado (Horas)'),
                 color=alt.Color('Status da Rota:N', scale=alt.Scale(scheme='set2')),
-                opacity=alt.condition(brush, alt.value(0.9), alt.value(0.1)),
+                opacity=alt.condition(click_uf & click_mun & brush, alt.value(0.9), alt.value(0.1)),
                 tooltip=['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota', 'Score Final Global']
             ).add_params(brush).transform_filter(click_uf).transform_filter(click_mun).properties(
                 width=850, height=280, title="Matriz de Dispersão (Gargalos Logísticos)"
             )
 
-            # Agrupa tudo em um único Dashboard VConcat + HConcat do Altair
             dash_top = alt.hconcat(chart_pie, chart_bars, spacing=30).resolve_scale(color='independent')
             dashboard_completo = alt.vconcat(dash_top, scatter, spacing=30).resolve_scale(color='independent').configure_view(strokeWidth=0)
 
-            # Renderização de Colunas do Streamlit (65% Altair Dashboard, 35% Table)
             col_graficos, col_tabela = st.columns([65, 35], gap="large")
             
             with col_graficos:
