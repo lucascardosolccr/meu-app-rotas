@@ -47,10 +47,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v39" not in st.session_state:
+if "cache_limpo_v40" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v39"] = True
+    st.session_state["cache_limpo_v40"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -956,7 +956,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V39_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V40_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1118,7 +1118,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V39_{origem_texto}|{destino_texto}|{usar_coordenadas}"
+    cache_key = f"GOOG_V40_{origem_texto}|{destino_texto}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     orig_link_txt = requests.utils.quote(origem_texto)
@@ -1185,7 +1185,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V39_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V40_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1909,7 +1909,7 @@ with tab_analytics:
             
             st.markdown("---")
             st.caption("✨ **DICA DE OURO INTERATIVA:** Clique em uma fatia da rosca (Estado) para que a barra de Municípios e a Matriz mostrem SOMENTE os dados daquele estado. Se você clicar num Município, a rosca e a matriz vão reagir a ele! Você também pode arrastar o mouse na Matriz (desenhando um quadrado) e os dois gráficos acima mostrarão de onde vieram aquelas rotas selecionadas.")
-            st.markdown("<br>", unsafe_allow_html=True)
+            st.write("")
             
             click_uf = alt.selection_point(fields=['UF_Sintetica_Origem'], name='Selecao_UF')
             click_mun = alt.selection_point(fields=['Municipio Origem'], name='Selecao_Municipio')
@@ -1928,7 +1928,7 @@ with tab_analytics:
 
             bars = base_chart.mark_bar(color='#1E90FF').encode(
                 x=alt.X('count():Q', title='Volume de Entregas', axis=alt.Axis(tickMinStep=1)),
-                y=alt.Y('Municipio Origem:N', title='Município', sort='-x'),
+                y=alt.Y('Municipio Origem:N', title='Município', sort=alt.EncodingSortField(field='Municipio Origem', op='count', order='descending')),
                 opacity=alt.condition(click_mun, alt.value(1), alt.value(0.4)),
                 tooltip=['Municipio Origem', 'count()']
             ).add_params(click_mun).transform_filter(click_uf).transform_filter(brush).transform_window(
@@ -1959,7 +1959,7 @@ with tab_analytics:
                 grafico_dispersao
             ).configure_view(strokeWidth=0)
 
-            st.altair_chart(dashboard_unificado, use_container_width=True)
+            st.altair_chart(dashboard_unificado, use_container_width=True, key="dashboard_kpi")
 
             st.markdown("---")
             st.markdown("#### 🏆 Top Extremos Logísticos")
@@ -2067,7 +2067,7 @@ with tab_motores:
                 theta=alt.Theta(field="Fonte Geocoding Origem", aggregate="count"),
                 color=alt.Color(field="Fonte Geocoding Origem", type="nominal", legend=alt.Legend(title="Motores")),
                 tooltip=['Fonte Geocoding Origem', 'count()']
-            ).interactive().properties(height=350)
+            ).properties(height=350)
             st.altair_chart(grafico_apis, use_container_width=True)
             
         with col_m2:
@@ -2077,7 +2077,7 @@ with tab_motores:
                 y=alt.Y('count():Q', title='Volume de Rotas'),
                 color=alt.Color('Status da Rota:N', scale=alt.Scale(domain=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro'], range=['#00FF7F', '#1E90FF', '#FFD700', '#FFA500', '#FF4500'])),
                 tooltip=['Status da Rota', 'count()']
-            ).interactive().properties(height=350)
+            ).properties(height=350)
             st.altair_chart(grafico_status, use_container_width=True)
             
     st.markdown("---")
