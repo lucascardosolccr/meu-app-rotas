@@ -50,10 +50,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v48" not in st.session_state:
+if "cache_limpo_v49" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v48"] = True
+    st.session_state["cache_limpo_v49"] = True
     st.session_state['dash_key'] = 0
 
 def realizar_manutencao_logs_google():
@@ -464,10 +464,10 @@ def validar_coordenada_brasil(lat, lon):
         return False, 0.0, 0.0
 
 def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2):
-    if not all(isinstance(x, (int, float)) for x in [lat1, lon1, lat2, lon2]): return 0.0
-    if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0: return 0.0
-    if lat1 == lat2 and lon1 == lon2: return 0.0
     try:
+        lat1, lon1, lat2, lon2 = float(lat1), float(lon1), float(lat2), float(lon2)
+        if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0: return 0.0
+        if lat1 == lat2 and lon1 == lon2: return 0.0
         lat1_r, lon1_r, lat2_r, lon2_r = map(math.radians, [lat1, lon1, lat2, lon2])
         dlat = lat2_r - lat1_r
         dlon = lon2_r - lon1_r
@@ -960,7 +960,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V48_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V49_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1122,7 +1122,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V48_{origem_texto}|{destino_texto}|{usar_coordenadas}"
+    cache_key = f"GOOG_V49_{origem_texto}|{destino_texto}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     orig_link_txt = requests.utils.quote(origem_texto)
@@ -1189,7 +1189,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V48_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V49_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1660,6 +1660,13 @@ with tab_processamento:
                 
                 df_final = rodar_pipeline_lote(df, list(pares_unicos), tarefas_priorizadas, nome_operador, barra_progresso, container_status)
                 
+                # FORÇA BRUTA DE SEGURANÇA: Recálculo de Linha Reta em Vetor (Evita 0.0 acidentais em caso de falha de rede/API)
+                def recalculate_haversine_lote(row):
+                    if row['Linha Reta'] == 0.0 and row['Lat Origem'] != 0.0 and row['Lat Destino'] != 0.0:
+                        return calcular_distancia_linha_reta(row['Lat Origem'], row['Lon Origem'], row['Lat Destino'], row['Lon Destino'])
+                    return row['Linha Reta']
+                df_final['Linha Reta'] = df_final.apply(recalculate_haversine_lote, axis=1)
+
                 tempo_lote_segundos = round(time.time() - start_lote_clock, 2)
                 cache_historico_lotes.set(f"lote_{start_lote_clock}", {
                     "Data/Hora": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1834,8 +1841,16 @@ with tab_alocacao:
                     
                     status_alo.empty(); progress_alo.empty()
                     
+                    # FORÇA BRUTA DE SEGURANÇA: Injetar a linha reta matemática garantida no mapeamento
                     df_final_alo['Linha Reta'] = df_final_alo['Origem'].astype(str).str.strip().map(dest_to_linha_reta).fillna(df_final_alo['Linha Reta'])
                     
+                    # FORÇA BRUTA DE SEGURANÇA: Recálculo de Linha Reta em Vetor final (Evita falhas de dicionário)
+                    def recalculate_haversine_alo(row):
+                        if row['Linha Reta'] == 0.0 and row['Lat Origem'] != 0.0 and row['Lat Destino'] != 0.0:
+                            return calcular_distancia_linha_reta(row['Lat Origem'], row['Lon Origem'], row['Lat Destino'], row['Lon Destino'])
+                        return row['Linha Reta']
+                    df_final_alo['Linha Reta'] = df_final_alo.apply(recalculate_haversine_alo, axis=1)
+
                     tempo_alo_segundos = round(time.time() - start_alo_clock, 2)
                     cache_historico_lotes.set(f"alocacao_{start_alo_clock}", {
                         "Data/Hora": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1927,7 +1942,7 @@ with tab_analytics:
         if fonte_selecionada != "Todas": df_filtrado = df_filtrado[df_filtrado['Fonte Geocoding Origem'] == fonte_selecionada]
         
         if df_filtrado.empty:
-            st.warning("A combinação de filtros não retornou nenhum registro.")
+            st.warning("A combination de filtros não retornou nenhum registro.")
         else:
             df_sucesso = df_filtrado[df_filtrado["Status da Rota"].str.contains("Erro") == False]
             
@@ -1952,13 +1967,15 @@ with tab_analytics:
             base_chart = alt.Chart(df_filtrado)
 
             pie_base = base_chart.encode(
-                theta=alt.Theta("count():Q"),
+                theta=alt.Theta("count():Q", stack=True),
                 color=alt.Color("UF_Sintetica_Origem:N", legend=alt.Legend(title="Estados (UF)"))
             )
-            chart_pie = pie_base.mark_arc(innerRadius=60).encode(
+            arc = pie_base.mark_arc(innerRadius=60).encode(
                 opacity=alt.condition(click_uf & click_mun & brush, alt.value(1), alt.value(0.2)),
                 tooltip=['UF_Sintetica_Origem', 'count()']
-            ).add_params(click_uf).transform_filter(click_mun).properties(width=220, height=280, title="Volume por Estado (UF)")
+            ).add_params(click_uf)
+            
+            chart_pie = arc.transform_filter(click_mun).properties(width=220, height=280, title="Volume por Estado (UF)")
 
             bar_base = base_chart.transform_filter(alt.FieldOneOfPredicate(field='Municipio Origem', oneOf=top_muns)).encode(
                 x=alt.X('count():Q', title='Volume', axis=alt.Axis(tickMinStep=1)),
