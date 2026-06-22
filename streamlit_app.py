@@ -45,10 +45,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v27" not in st.session_state:
+if "cache_limpo_v28" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v27"] = True
+    st.session_state["cache_limpo_v28"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -303,17 +303,14 @@ class MotorEnderecoCanônico:
         cache_fuzzy.set(texto_norm, texto_norm, expire=2592000)
         return texto_norm
 
-    # MELHORIA 23: Bloqueio Rigoroso de Estado baseado em Regex Extrativo. Fim da Confusão DF/TO.
     def resolver_contexto_administrativo(self, texto_norm):
         uf_explicita = None
         
-        # 1. Procura exata por siglas isoladas (ex: " TO ", ", TO,", "MT")
         for sigla in IBGE_ESTADOS.keys():
             if re.search(rf'\b{sigla}\b', texto_norm):
                 uf_explicita = sigla
                 break
         
-        # 2. Procura exata pelo nome completo do Estado (ex: "TOCANTINS")
         if not uf_explicita:
             for sigla, nome in IBGE_ESTADOS.items():
                 if re.search(rf'\b{nome}\b', texto_norm):
@@ -322,7 +319,6 @@ class MotorEnderecoCanônico:
 
         resultado = {"uf": uf_explicita if uf_explicita else "", "municipio": "", "distrito": ""}
 
-        # 3. Contexto Específico de Brasília (APENAS se o Estado for DF ou estiver vazio)
         if not uf_explicita or uf_explicita == "DF":
             for token in texto_norm.split():
                 sigla_limpa = re.sub(r'[^A-Z]', '', token)
@@ -335,7 +331,6 @@ class MotorEnderecoCanônico:
                     resultado.update({"uf": "DF", "municipio": "BRASILIA", "distrito": ra_oficial})
                     return resultado
 
-        # 4. Restrição de Busca (O Segredo para não alucinar Taguatinga-TO como Taguatinga-DF)
         cidades_para_busca = IBGE_MUNICIPIOS
         if uf_explicita:
             cidades_filtradas = {}
@@ -345,7 +340,6 @@ class MotorEnderecoCanônico:
                     cidades_filtradas[mun] = itens_uf
             cidades_para_busca = cidades_filtradas
 
-        # 5. Mapeamento direto de chunk para as cidades restritas
         tokens = texto_norm.split()
         for i in range(len(tokens)):
             for j in range(i + 1, len(tokens) + 1):
@@ -354,7 +348,6 @@ class MotorEnderecoCanônico:
                     resultado.update({"uf": cidades_para_busca[chunk][0]["uf"], "municipio": chunk})
                     return resultado
 
-        # 6. Fuzzy Match Fechado (Se a sigla foi dada, mas a cidade foi escrita errada, tenta aproximar DENTRO do Estado)
         if uf_explicita and not resultado["municipio"]:
             chaves = list(cidades_para_busca.keys())
             if chaves:
@@ -363,7 +356,6 @@ class MotorEnderecoCanônico:
                     resultado.update({"municipio": melhor_match[0]})
                     return resultado
         
-        # 7. Válvula de Escape Global (Apenas se NENHUM Estado foi digitado)
         if not resultado["municipio"] and not uf_explicita and len(texto_norm) > 4:
             melhor_match_global = process.extractOne(texto_norm, LISTA_CONTEXTO_FUZZY, scorer=fuzz.WRatio)
             if melhor_match_global and melhor_match_global[1] >= 85:
@@ -665,30 +657,6 @@ def API_Photon(query):
         return resultados if resultados else None
     except Exception: pass
     registrar_telemetria("PHOTON", False, time.time() - start_t)
-    return None
-
-def API_Overpass_POIs(texto_norm):
-    if len(texto_norm) < 10: return None
-    if texto_norm in cache_poi: return cache_poi[texto_norm]
-    start_t = time.time()
-    endpoints = ["https://overpass-api.de/api/interpreter", "https://lz4.overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
-    texto_seguro = re.escape(texto_norm)
-    query_osm = f'[out:json][timeout:3];(node["name"~"{texto_seguro}",i]["amenity"];way["name"~"{texto_seguro}",i]["amenity"];node["name"~"{texto_seguro}",i]["building"];way["name"~"{texto_seguro}",i]["building"];node["name"~"{texto_seguro}",i]["healthcare"];way["name"~"{texto_seguro}",i]["healthcare"];node["name"~"{texto_seguro}",i]["education"];way["name"~"{texto_seguro}",i]["education"];);out center;'
-    for url in endpoints:
-        try:
-            r = session.post(url, data={"data": query_osm}, timeout=4)
-            if r.status_code == 200:
-                elems = r.json().get("elements", [])
-                if elems:
-                    e = elems[0]
-                    lat, lon = e.get("lat", e.get("center", {}).get("lat", 0.0)), e.get("lon", e.get("center", {}).get("lon", 0.0))
-                    tags = e.get("tags", {})
-                    res_poi = {"lat": lat, "lon": lon, "fonte": "OVERPASS", "score_base": 40, "cidade": tags.get("addr:city", "").upper(), "estado": tags.get("addr:state", "").upper(), "bairro": tags.get("addr:suburb", "").upper(), "logradouro": tags.get("addr:street", "").upper(), "numero": str(tags.get("addr:housenumber", "")).upper(), "cep": tags.get("addr:postcode", "").replace("-", "")}
-                    cache_poi.set(texto_norm, [res_poi], expire=7776000)
-                    registrar_telemetria("OVERPASS", True, time.time() - start_t)
-                    return [res_poi]
-        except Exception: continue
-    registrar_telemetria("OVERPASS", False, time.time() - start_t)
     return None
 
 def API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d):
@@ -1429,7 +1397,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    # MELHORIA 23: Expansão do Manual Didático com Fórmulas e Processos
     st.header("📖 Manual do Sistema Completo", help="Acesse toda a documentação técnica, fluxogramas e detalhes operacionais do motor.")
     st.caption("Documentação Técnica e Operacional Detalhada")
     
@@ -1476,10 +1443,7 @@ with st.sidebar:
     with st.expander("5. Fórmulas e Cálculos Geodésicos"):
         st.markdown("""
         **Distância em Linha Reta (Geodésica):**
-        Para auditar desvios e calcular proximidade na Aba de Alocação, o sistema aplica a **Fórmula de Haversine** (Navegação Esférica de Precisão):
-        
-        $$d = 2r \\arcsin\\left(\\sqrt{\\sin^2\\left(\\frac{\\Delta\\phi}{2}\\right) + \\cos(\\phi_1)\\cos(\\phi_2)\\sin^2\\left(\\frac{\\Delta\\lambda}{2}\\right)}\\right)$$
-        
+        Para auditar desvios e calcular proximidade na Aba de Alocação, o sistema aplica a **Fórmula de Haversine** (Navegação Esférica de Precisão).
         Isso mitiga qualquer erro estrutural do Google Maps, fornecendo a distância real "aérea" entre a Origem e o Destino.
         """)
 
@@ -1505,7 +1469,6 @@ tab_individual, tab_processamento, tab_alocacao, tab_analytics, tab_auditoria = 
 with tab_individual:
     st.markdown("### 🔍 Validador Rápido de Rota (Single-Shot)")
     col_ind1, col_ind2 = st.columns(2)
-    # MELHORIA 23: Tooltips de Ajuda nos Inputs
     with col_ind1: orig_ind = st.text_input("Origem (Endereço, POI ou Coordenadas)", "Ribeirão Cascalheira , MT, Brasil", help="Insira o local de partida. O sistema bloqueará a busca apenas para o Estado cuja sigla for identificada.")
     with col_ind2: dest_ind = st.text_input("Destino (Endereço, POI ou Coordenadas)", "SAO MIGUEL DO ARAGUAIA , GO, Brasil", help="Insira o destino final. O uso de UF (Ex: GO) assegura máxima precisão contra localidades homônimas em outros estados.")
     
@@ -1593,12 +1556,16 @@ with tab_processamento:
                 
                 colunas_numericas = ['Distancia', 'Linha Reta', 'Score da Rota', 'Score Num Origem', 'Score Num Destino', 'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global']
                 
+                # MELHORIA 24: Prevenção Estrita de TypeError com dtype object vs float (Injeção de Marreta Typesafe)
                 for col in novas_colunas:
-                    if col not in df.columns:
-                        if col in colunas_numericas:
-                            df[col] = pd.Series(0.0, index=df.index, dtype=float)
-                        else:
-                            df[col] = pd.Series("Não Informado", index=df.index, dtype=object)
+                    if col in colunas_numericas:
+                        if col not in df.columns:
+                            df[col] = 0.0
+                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0).astype(float)
+                    else:
+                        if col not in df.columns:
+                            df[col] = "Não Informado"
+                        df[col] = df[col].astype(object)
                     
                 pares_unicos = set()
                 
@@ -1769,10 +1736,16 @@ with tab_alocacao:
                     ]
                     colunas_numericas = ['Distancia', 'Linha Reta', 'Score da Rota', 'Score Num Origem', 'Score Num Destino', 'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Distancia Concorrente']
                     
+                    # MELHORIA 24: Coerção Typesafe para Alocação
                     for col in novas_colunas:
-                        if col not in df_pares.columns:
-                            if col in colunas_numericas: df_pares[col] = pd.Series(0.0, index=df_pares.index, dtype=float)
-                            else: df_pares[col] = pd.Series("Não Informado", index=df_pares.index, dtype=object)
+                        if col in colunas_numericas:
+                            if col not in df_pares.columns:
+                                df_pares[col] = 0.0
+                            df_pares[col] = pd.to_numeric(df_pares[col], errors='coerce').fillna(0.0).astype(float)
+                        else:
+                            if col not in df_pares.columns:
+                                df_pares[col] = "Não Informado"
+                            df_pares[col] = df_pares[col].astype(object)
 
                     pares_unicos_alo = set()
                     MAPA_PRIORIDADE = {"CEP": 1, "ENDERECO_COMPLETO": 2, "POI": 3, "CONDOMINIO": 3, "MUNICIPIO": 4, "BAIRRO": 5, "RURAL": 6, "LOGRADOURO": 7}
