@@ -1,5 +1,6 @@
 structlog
 prometheus-client
+plotly
 
 streamlit>=1.46.0
 
