@@ -47,10 +47,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v41" not in st.session_state:
+if "cache_limpo_v42" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v41"] = True
+    st.session_state["cache_limpo_v42"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -956,7 +956,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V41_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V42_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1118,7 +1118,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V41_{origem_texto}|{destino_texto}|{usar_coordenadas}"
+    cache_key = f"GOOG_V42_{origem_texto}|{destino_texto}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     orig_link_txt = requests.utils.quote(origem_texto)
@@ -1185,7 +1185,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V41_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V42_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1832,7 +1832,7 @@ with tab_alocacao:
 
 with tab_analytics:
     st.info("💡 **Objetivo desta aba:** Visualizar graficamente a distribuição geográfica e os indicadores logísticos das *localidades e entregas* do seu último lote. Monitore volume por Estado (UF), Municípios mais procurados e a densidade viária.")
-    st.markdown("### 📊 Dashboard Analítico de Localidades (Cross-Filtering Global)")
+    st.markdown("### 📊 Dashboard Analítico de Localidades (Avançado)")
     if 'df_processado' in st.session_state:
         df_kpi = st.session_state['df_processado'].copy()
         
@@ -1908,55 +1908,52 @@ with tab_analytics:
             col_k4.metric("Score Global Médio", f"{round(df_sucesso['Score Final Global'].mean(), 1) if not df_sucesso.empty else 0} / 100")
             
             st.markdown("---")
-            st.caption("✨ **DICA DE OURO INTERATIVA:** Clique em uma fatia da rosca ou em uma barra de município. A tabela ao lado, bem como a matriz de dispersão abaixo, reagirão automaticamente e se auto-filtrarão para exibir **somente** os dados da localidade que você tocou! Desenhar um retângulo na Matriz de Dispersão também filtrará os dados de cima.")
-            st.write("")
+            st.caption("✨ **DICA DE OURO INTERATIVA:** Clique em uma fatia da rosca (Estado) para que a barra de Municípios mostre SOMENTE os dados daquele estado. O mesmo serve para a matriz de dispersão abaixo. A Tabela ao lado listará apenas as rotas referentes ao local que você tocou!")
             
-            click_uf = alt.selection_point(fields=['UF_Sintetica_Origem'], name='Selecao_UF')
-            click_mun = alt.selection_point(fields=['Municipio Origem'], name='Selecao_Municipio')
-            brush = alt.selection_interval(name='Selecao_Dispersao')
-
+            # Cross-Filtering Params
+            click_uf = alt.selection_point(fields=['UF_Sintetica_Origem'], name='UF')
+            click_mun = alt.selection_point(fields=['Municipio Origem'], name='Mun')
+            
+            # Limitando as barras aos Top 20 para evitar crash do DOM Text Layer
+            top_muns = df_filtrado['Municipio Origem'].value_counts().head(20).index.tolist()
+            
             base_chart = alt.Chart(df_filtrado)
 
-            base_pie = base_chart.encode(
+            # GRÁFICO 1: Rosca de Estados com Textos Internos
+            pie_base = base_chart.encode(
                 theta=alt.Theta("count():Q", stack=True),
                 color=alt.Color("UF_Sintetica_Origem:N", legend=alt.Legend(title="Estados (UF)"))
             )
-            
-            pie = base_pie.mark_arc(innerRadius=60).encode(
+            arc = pie_base.mark_arc(innerRadius=50).encode(
                 opacity=alt.condition(click_uf, alt.value(1), alt.value(0.2)),
                 tooltip=['UF_Sintetica_Origem', 'count()']
             ).add_params(click_uf)
             
-            text_pie = base_pie.mark_text(radiusOffset=20, color='white', fontWeight='bold').encode(
-                text="count():Q"
-            )
-
-            grafico_uf = alt.layer(pie, text_pie).transform_filter(click_mun).transform_filter(brush).properties(
-                width=250, height=350, title="Distribuição do Volume por Estado (UF)"
-            )
-
-            base_bar = base_chart.encode(
-                x=alt.X('count():Q', title='Volume de Entregas', axis=alt.Axis(tickMinStep=1)),
-                y=alt.Y('Municipio Origem:N', title='Município', sort=alt.EncodingSortField(field='Municipio Origem', op='count', order='descending'))
+            text_arc = pie_base.mark_text(radiusOffset=-25, color='white', fontWeight='bold').encode(
+                text=alt.Text("count():Q")
             )
             
-            bars = base_bar.mark_bar(color='#1E90FF').encode(
-                opacity=alt.condition(click_mun, alt.value(1), alt.value(0.4)),
+            chart_pie = alt.layer(arc, text_arc).transform_filter(click_mun).properties(width=280, height=350, title="Volume por Estado (UF)")
+
+            # GRÁFICO 2: Barras de Municípios com Textos Internos
+            bar_base = base_chart.transform_filter(alt.FieldOneOfPredicate(field='Municipio Origem', oneOf=top_muns)).encode(
+                x=alt.X('count():Q', title='Volume', axis=alt.Axis(tickMinStep=1)),
+                y=alt.Y('Municipio Origem:N', title='Município', sort='-x')
+            )
+            bar = bar_base.mark_bar(color='#1E90FF').encode(
+                opacity=alt.condition(click_mun, alt.value(1), alt.value(0.3)),
                 tooltip=['Municipio Origem', 'count()']
             ).add_params(click_mun)
             
-            text_bars = base_bar.mark_text(align='right', dx=-5, color='white', fontWeight='bold').encode(
-                text='count():Q'
+            text_bar = bar_base.mark_text(align='right', dx=-10, color='white', fontWeight='bold').encode(
+                text=alt.Text("count():Q")
             )
 
-            grafico_mun = alt.layer(bars, text_bars).transform_filter(click_uf).transform_filter(brush).transform_window(
-                rank='rank(count())', sort=[alt.SortField('count()', order='descending')]
-            ).transform_filter(alt.datum.rank <= 15).properties(
-                width=300, height=350, title="Top 15 Municípios Dinâmicos"
-            )
+            chart_bars = alt.layer(bar, text_bar).transform_filter(click_uf).properties(width=350, height=350, title="Ranking de Municípios (Top 20)")
 
-            dash_top = alt.hconcat(grafico_mun, grafico_uf).resolve_scale(color='independent').configure_view(strokeWidth=0)
+            dash_top = alt.hconcat(chart_pie, chart_bars).resolve_scale(color='independent').configure_view(strokeWidth=0)
 
+            # Dividindo o painel para a Tabela Sincronizada ao Lado
             col_graficos, col_tabela = st.columns([55, 45])
             
             with col_graficos:
@@ -1967,14 +1964,14 @@ with tab_analytics:
                     st.altair_chart(dash_top, use_container_width=True)
 
             with col_tabela:
-                st.caption("📋 **Tabela Detalhada (Sincronizada com os Gráficos)**")
+                st.caption("📋 **Tabela Detalhada Dinâmica**")
                 
                 ufs_selecionadas = []
                 muns_selecionados = []
                 
                 if evento_clique and hasattr(evento_clique, 'selection'):
-                    sel_uf = evento_clique.selection.get('Selecao_UF', [])
-                    sel_mun = evento_clique.selection.get('Selecao_Municipio', [])
+                    sel_uf = evento_clique.selection.get('UF', [])
+                    sel_mun = evento_clique.selection.get('Mun', [])
                     
                     for item in sel_uf:
                         if isinstance(item, dict) and 'UF_Sintetica_Origem' in item:
@@ -1991,29 +1988,28 @@ with tab_analytics:
                     df_tabela[['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota', 'Link da Rota']],
                     use_container_width=True,
                     height=350,
-                    column_config={
-                        "Link da Rota": st.column_config.LinkColumn("🔗 Abrir no Google Maps")
-                    },
+                    column_config={"Link da Rota": st.column_config.LinkColumn("🔗 Abrir Rota")},
                     hide_index=True
                 )
 
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.caption("**Matriz de Dispersão Interativa: Tempo vs. Distância Viária** (Deslize para a direita para ver rotas longas)")
+            st.write("")
+            st.caption("**Matriz de Dispersão Interativa: Tempo vs. Distância Viária** (Deslize a barra inferior 👉 para ver rotas longas)")
             
+            brush = alt.selection_interval(name='Brush')
             max_dist = int(df_filtrado['Distancia'].max()) if not df_filtrado.empty else 100
-            valores_eixo_x = list(range(0, max_dist + 50, 50))
+            valores_eixo_x = list(range(0, max_dist + 100, 50))
             
-            grafico_dispersao = alt.Chart(df_filtrado).mark_circle(size=70).encode(
+            scatter = base_chart.mark_circle(size=70).encode(
                 x=alt.X('Distancia:Q', title='Distância Viária Oficial (km)', axis=alt.Axis(values=valores_eixo_x)),
                 y=alt.Y('Tempo_Horas:Q', title='Tempo Estimado (Horas)'),
                 color=alt.Color('Status da Rota:N', scale=alt.Scale(scheme='set2')),
                 opacity=alt.condition(brush, alt.value(0.8), alt.value(0.1)),
                 tooltip=['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota', 'Score Final Global']
             ).add_params(brush).transform_filter(click_uf).transform_filter(click_mun).properties(
-                width=1200, height=400, title="Identificação de Gargalos Logísticos"
+                width=1000, height=400, title="Identificação de Gargalos Logísticos"
             )
             
-            st.altair_chart(grafico_dispersao, use_container_width=False)
+            st.altair_chart(scatter, use_container_width=False)
 
             st.markdown("---")
             st.markdown("#### 🏆 Top Extremos Logísticos")
