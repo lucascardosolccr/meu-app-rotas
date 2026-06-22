@@ -50,10 +50,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v49" not in st.session_state:
+if "cache_limpo_v50" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v49"] = True
+    st.session_state["cache_limpo_v50"] = True
     st.session_state['dash_key'] = 0
 
 def realizar_manutencao_logs_google():
@@ -1660,7 +1660,6 @@ with tab_processamento:
                 
                 df_final = rodar_pipeline_lote(df, list(pares_unicos), tarefas_priorizadas, nome_operador, barra_progresso, container_status)
                 
-                # FORÇA BRUTA DE SEGURANÇA: Recálculo de Linha Reta em Vetor (Evita 0.0 acidentais em caso de falha de rede/API)
                 def recalculate_haversine_lote(row):
                     if row['Linha Reta'] == 0.0 and row['Lat Origem'] != 0.0 and row['Lat Destino'] != 0.0:
                         return calcular_distancia_linha_reta(row['Lat Origem'], row['Lon Origem'], row['Lat Destino'], row['Lon Destino'])
@@ -1841,10 +1840,7 @@ with tab_alocacao:
                     
                     status_alo.empty(); progress_alo.empty()
                     
-                    # FORÇA BRUTA DE SEGURANÇA: Injetar a linha reta matemática garantida no mapeamento
                     df_final_alo['Linha Reta'] = df_final_alo['Origem'].astype(str).str.strip().map(dest_to_linha_reta).fillna(df_final_alo['Linha Reta'])
-                    
-                    # FORÇA BRUTA DE SEGURANÇA: Recálculo de Linha Reta em Vetor final (Evita falhas de dicionário)
                     def recalculate_haversine_alo(row):
                         if row['Linha Reta'] == 0.0 and row['Lat Origem'] != 0.0 and row['Lat Destino'] != 0.0:
                             return calcular_distancia_linha_reta(row['Lat Origem'], row['Lon Origem'], row['Lat Destino'], row['Lon Destino'])
@@ -1942,7 +1938,7 @@ with tab_analytics:
         if fonte_selecionada != "Todas": df_filtrado = df_filtrado[df_filtrado['Fonte Geocoding Origem'] == fonte_selecionada]
         
         if df_filtrado.empty:
-            st.warning("A combination de filtros não retornou nenhum registro.")
+            st.warning("A combinação de filtros não retornou nenhum registro.")
         else:
             df_sucesso = df_filtrado[df_filtrado["Status da Rota"].str.contains("Erro") == False]
             
@@ -1966,16 +1962,12 @@ with tab_analytics:
             top_muns = df_filtrado['Municipio Origem'].value_counts().head(20).index.tolist()
             base_chart = alt.Chart(df_filtrado)
 
-            pie_base = base_chart.encode(
+            chart_pie = base_chart.mark_arc(innerRadius=60).encode(
                 theta=alt.Theta("count():Q", stack=True),
-                color=alt.Color("UF_Sintetica_Origem:N", legend=alt.Legend(title="Estados (UF)"))
-            )
-            arc = pie_base.mark_arc(innerRadius=60).encode(
+                color=alt.Color("UF_Sintetica_Origem:N", legend=alt.Legend(title="Estados (UF)")),
                 opacity=alt.condition(click_uf & click_mun & brush, alt.value(1), alt.value(0.2)),
                 tooltip=['UF_Sintetica_Origem', 'count()']
-            ).add_params(click_uf)
-            
-            chart_pie = arc.transform_filter(click_mun).properties(width=220, height=280, title="Volume por Estado (UF)")
+            ).add_params(click_uf).transform_filter(click_mun).properties(width=220, height=280, title="Volume por Estado (UF)")
 
             bar_base = base_chart.transform_filter(alt.FieldOneOfPredicate(field='Municipio Origem', oneOf=top_muns)).encode(
                 x=alt.X('count():Q', title='Volume', axis=alt.Axis(tickMinStep=1)),
