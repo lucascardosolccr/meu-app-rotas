@@ -47,10 +47,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v35" not in st.session_state:
+if "cache_limpo_v36" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v35"] = True
+    st.session_state["cache_limpo_v36"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -956,7 +956,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V35_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V36_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1118,7 +1118,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V35_{origem_texto}|{destino_texto}|{usar_coordenadas}"
+    cache_key = f"GOOG_V36_{origem_texto}|{destino_texto}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     orig_link_txt = requests.utils.quote(origem_texto)
@@ -1185,7 +1185,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V35_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V36_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1841,10 +1841,24 @@ with tab_analytics:
         df_kpi['Tempo_Minutos'] = df_kpi['Tempo'].apply(parse_tempo_minutos)
         df_kpi['Tempo_Horas'] = df_kpi['Tempo_Minutos'] / 60.0
         
+        MAPA_ESTADOS_FULL = {
+            "ACRE": "AC", "ALAGOAS": "AL", "AMAPA": "AP", "AMAZONAS": "AM",
+            "BAHIA": "BA", "CEARA": "CE", "DISTRITO FEDERAL": "DF", "ESPIRITO SANTO": "ES",
+            "GOIAS": "GO", "MARANHAO": "MA", "MATO GROSSO": "MT", "MATO GROSSO DO SUL": "MS",
+            "MINAS GERAIS": "MG", "PARA": "PA", "PARAIBA": "PB", "PARANA": "PR",
+            "PERNAMBUCO": "PE", "PIAUI": "PI", "RIO DE JANEIRO": "RJ", "RIO GRANDE DO NORTE": "RN",
+            "RIO GRANDE DO SUL": "RS", "RONDONIA": "RO", "RORAIMA": "RR", "SANTA CATARINA": "SC",
+            "SAO PAULO": "SP", "SERGIPE": "SE", "TOCANTINS": "TO"
+        }
+
         def extrair_uf_precisa(endereco):
             if not isinstance(endereco, str): return "Indefinido"
+            end_upper = unidecode(endereco.upper())
+            for nome, sigla in MAPA_ESTADOS_FULL.items():
+                if f" {nome} " in f" {end_upper} " or end_upper.endswith(nome) or f", {nome}," in end_upper:
+                    return sigla
             padrao_uf = r'\b(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\b'
-            partes = [p.strip() for p in endereco.upper().split(',')]
+            partes = [p.strip() for p in end_upper.split(',')]
             for p in reversed(partes):
                 match = re.search(padrao_uf, p)
                 if match: return match.group(1)
@@ -1896,6 +1910,9 @@ with tab_analytics:
             st.markdown("---")
             st.markdown("#### 📊 Dashboards de Inteligência Geográfica")
             
+            click_uf = alt.selection_point(fields=['UF_Sintetica_Origem'], bind='legend')
+            brush = alt.selection_interval()
+            
             col_c1, col_c2 = st.columns(2)
             
             with col_c1:
@@ -1904,7 +1921,7 @@ with tab_analytics:
                 df_top_mun.columns = ['Municipio Origem', 'Contagem']
                 
                 bars = alt.Chart(df_top_mun).mark_bar(color='#1E90FF').encode(
-                    x=alt.X('Contagem:Q', title='Volume de Entregas/Rotas'),
+                    x=alt.X('Contagem:Q', title='Volume de Entregas/Rotas', axis=alt.Axis(tickMinStep=1)),
                     y=alt.Y('Municipio Origem:N', title='Município', sort='-x')
                 )
                 text = bars.mark_text(
@@ -1924,20 +1941,24 @@ with tab_analytics:
                 grafico_uf = alt.Chart(df_filtrado).mark_arc(innerRadius=60).encode(
                     theta=alt.Theta(field="UF_Sintetica_Origem", aggregate="count"),
                     color=alt.Color(field="UF_Sintetica_Origem", type="nominal", legend=alt.Legend(title="Estados (UF)")),
+                    opacity=alt.condition(click_uf, alt.value(1), alt.value(0.2)),
                     tooltip=['UF_Sintetica_Origem', 'count()']
-                ).interactive().properties(height=350)
+                ).add_params(click_uf).interactive().properties(height=350)
                 st.altair_chart(grafico_uf, use_container_width=True)
 
             st.markdown("<br>", unsafe_allow_html=True)
-            st.caption("**Matriz de Dispersão: Tempo vs. Distância Viária** (Identificação de Anomalias Logísticas)")
+            st.caption("**Matriz de Dispersão Interativa: Tempo vs. Distância Viária** (Identificação de Anomalias Logísticas)")
             
             max_dist = int(df_filtrado['Distancia'].max()) if not df_filtrado.empty else 100
-            grafico_dispersao = alt.Chart(df_filtrado).mark_circle(size=70, opacity=0.7).encode(
-                x=alt.X('Distancia:Q', title='Distância Viária Oficial (km)', axis=alt.Axis(values=list(range(0, max_dist + 50, 50)))),
+            valores_eixo_x = list(range(0, max_dist + 50, 50))
+            
+            grafico_dispersao = alt.Chart(df_filtrado).mark_circle(size=70).encode(
+                x=alt.X('Distancia:Q', title='Distância Viária Oficial (km)', axis=alt.Axis(values=valores_eixo_x)),
                 y=alt.Y('Tempo_Horas:Q', title='Tempo Estimado (Horas)'),
-                color=alt.Color('Status da Rota:N', scale=alt.Scale(scheme='set2')),
+                color=alt.condition(brush, 'Status da Rota:N', alt.value('lightgray'), scale=alt.Scale(scheme='set2')),
+                opacity=alt.condition(click_uf, alt.value(0.8), alt.value(0.1)),
                 tooltip=['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota', 'Score Final Global']
-            ).interactive().properties(height=400)
+            ).add_params(brush, click_uf).interactive().properties(height=400)
             st.altair_chart(grafico_dispersao, use_container_width=True)
 
             st.markdown("---")
