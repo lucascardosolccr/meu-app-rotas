@@ -47,10 +47,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v31" not in st.session_state:
+if "cache_limpo_v32" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v31"] = True
+    st.session_state["cache_limpo_v32"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -956,7 +956,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V31_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V32_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1118,7 +1118,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V31_{origem_texto}|{destino_texto}|{usar_coordenadas}"
+    cache_key = f"GOOG_V32_{origem_texto}|{destino_texto}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     orig_link_txt = requests.utils.quote(origem_texto)
@@ -1185,7 +1185,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V31_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V32_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1427,7 +1427,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("📖 Documentação Técnica Oficial do Sistema", help="Diretrizes estruturais, matemáticas e logísticas do motor corporativo.")
+    st.header("📖 Documentação Técnica Oficial", help="Diretrizes estruturais, matemáticas e logísticas do motor corporativo.")
     
     with st.expander("1. Visão Geral da Arquitetura Corporativa"):
         st.markdown("""
@@ -1436,44 +1436,46 @@ with st.sidebar:
         Sua premissa é atuar sob um **Pipeline Híbrido Multimotor**: nunca depender de uma única API, garantindo alta disponibilidade (SLA) e eliminando falsos positivos topológicos por meio de consenso matemático e inteligência geográfica em nuvem.
         """)
 
-    with st.expander("2. Inteligência de Busca e Motores em Nuvem (APIs)"):
+    with st.expander("2. Inteligência de Busca e Motores em Nuvem"):
         st.markdown("""
-        O sistema dispara procuras simultâneas e paralelas (`ThreadPoolExecutor`) contra múltiplos provedores globais:
+        O sistema dispara procuras simultâneas e paralelas contra múltiplos provedores globais:
         
-        * **ArcGIS (ESRI):** Considerado o padrão-ouro no geocoding corporativo. Possui a melhor malha predial urbana do Brasil e é prioritário para rotas contendo logradouros, CEPs e numerações específicas.
-        * **Nominatim & Photon (Malha OSM):** Motores open-source construídos sobre o OpenStreetMap. Desempenham com altíssima excelência em localizações rurais, distritos isolados e assentamentos frequentemente ignorados pelas plataformas comerciais.
-        * **TomTom Logistics:** Focado estritamente na malha rodoviária. Utilizado em redundância para garantir coordenadas ancoradas perto do asfalto comercial.
-        * **Google Maps Engine (Web Scraper):** Motor oficial de roteamento viário. O sistema aciona o Google usando as coordenadas rigorosamente consolidadas e extrai em tempo real a **Quilometragem Viária Exata** e o tempo de trânsito estático.
-        * **OSRM (Open Source Routing Machine):** Atua paralelamente ao Google como um validador de manobras logísticas (`ferry`). Ele assegura a detecção matemática de interseção de rios (Balsas) não capturadas em nível superficial.
+        * **ArcGIS (ESRI):** Considerado o padrão-ouro no geocoding corporativo. Possui a melhor malha predial urbana do Brasil e é prioritário para rotas contendo logradouros e CEPs.
+        * **Nominatim & Photon (OSM):** Motores baseados no OpenStreetMap. Desempenham com altíssima excelência em localizações rurais e assentamentos ignorados pelas plataformas comerciais.
+        * **TomTom Logistics:** Focado estritamente na malha rodoviária B2B.
+        * **Google Maps Engine:** Motor oficial de roteamento viário. Extrai em tempo real a *Quilometragem Viária Exata* e o tempo de trânsito em asfalto.
+        * **OSRM (Open Source Routing Machine):** Atua paralelamente como um validador de manobras logísticas, assegurando a detecção de balsas e rios.
         """)
 
-    with st.expander("3. Algoritmos, Matemáticas e Fórmulas"):
+    with st.expander("3. Algoritmos e Fórmulas Matemáticas"):
         st.markdown("""
-        O rigor do sistema provém de sua fundação algorítmica:
-        
-        * **Fórmula de Haversine (Geodésica Esférica):** Utilizada no backend para medir distâncias aéreas puras entre a Origem e o Destino ($d = 2r \arcsin{\sqrt{\sin^2({\Delta\phi}/2) + \cos{\phi_1}\cos{\phi_2}\sin^2({\Delta\lambda}/2)}}$). Esta medida serve como *Baseline* contra o asfalto. Se o asfalto apresentar um desvio impossível em relação à linha reta, o sistema invalida a rota, caracterizando-a como "Violação Geodésica".
-        * **Clustering Espacial via DBSCAN:** Quando as APIs discordam entre si sobre onde fica uma rua, o sistema plota todas no mapa e usa _Density-Based Spatial Clustering_ para agrupar as coordenadas verdadeiras que estão a menos de 500 metros umas das outras, descartando anomalias.
-        * **Inferência Bayesiana Multiplicativa:** Motor heurístico que gera o "Score Global". Ele pondera *a priori* as chances de um endereço estar certo, multiplicando vetores de confiança se o CEP for perfeitamente validado no banco BrasilAPI, se a UF for condizente e se a malha do IBGE oficial reconhece o distrito.
+        * **Fórmula de Haversine (Geodésica Esférica):** Utilizada no backend para medir distâncias aéreas puras (em linha reta) entre a Origem e o Destino. Serve como *Baseline* para auditar o desvio de asfalto do Google.
+        """)
+        st.latex(r"d = 2r \arcsin{\sqrt{\sin^2(\frac{\Delta\phi}{2}) + \cos{\phi_1}\cos{\phi_2}\sin^2(\frac{\Delta\lambda}{2})}}")
+        st.markdown("""
+        * **Clustering Espacial via DBSCAN:** Plota todos os retornos de APIs no mapa e agrupa as coordenadas verdadeiras que estão a menos de 500 metros umas das outras, descartando anomalias.
+        * **Inferência Bayesiana Multiplicativa:** Motor heurístico que gera o "Score Global", multiplicando fatores de confiança se o CEP for validado, se a UF for condizente e se o IBGE reconhecer o distrito.
         """)
 
-    with st.expander("4. Guia de Funcionalidades (Abas de Operação)"):
+    with st.expander("4. Guia Rápido das Abas de Operação"):
         st.markdown("""
-        * **📍 Geocodificação Rápida:** Modo *Single-Shot*. Destinado à aferição instantânea de um traçado único. Emite o link de Iframe validado do Google Maps para auditoria visual e entrega a explicabilidade estrutural da IA (XAI).
-        * **⚙️ Processamento em Lote:** O núcleo de alta volumetria. Recebe planilhas do Excel. Identifica rotas redundantes e aplica otimização O(U) com Filas de Prioridade, poupando processamento e entregando um arquivo enriquecido com colunas operacionais prontas para uso em *dashboards*.
-        * **📦 Alocação de Hubs (Nearest Neighbor):** Modo estratégico de competição cruzada. Permite injetar uma lista N de destinos e M bases logísticas. O sistema fará $N \\times M$ cálculos cruzados usando a matriz de Haversine para alocar a base rigorosamente mais próxima de cada cliente, providenciando inclusive o comparativo do "Vice-Líder" em traçado viário.
-        * **📊 Analytics & Dashboard:** Interface corporativa automatizada para auditoria sistêmica das volumetrias. Interage diretamente com a última planilha processada, demonstrando top-10 de volumes, anomalias e consumo de APIs.
-        * **🕵️ Aba de Auditoria:** "Caixa Preta" transparente. Revela para os engenheiros a árvore de decisão do sistema, explicando via texto qual motor ganhou o consenso, por que o ganhou e a coordenada subjacente.
+        * **Geocodificação Rápida:** Modo para testar e inspecionar rotas uma a uma.
+        * **Processamento em Lote:** O núcleo do sistema. Envie tabelas massivas e ele devolverá os dados processados e auditados em alta velocidade.
+        * **Alocação de Hubs (Nearest Neighbor):** A inteligência competitiva. Descobre automaticamente qual é a sua Base Logística mais próxima de cada cliente da lista.
+        * **Analytics & Dashboards:** Visualização de KPIs para as localidades logísticas do último lote processado.
+        * **Motores & APIs:** Monitor de infraestrutura de rede.
+        * **Auditoria:** Acesso à árvore de decisões (Caixa Preta) do algoritmo.
         """)
 
-    with st.expander("5. Correções Assistidas e Pré-Processamento"):
+    with st.expander("5. Pré-Processamento Anti-Fantasma"):
         st.markdown("""
-        * **Filtro Anti-Fantasma (Street Snapping):** Localidades puras (apenas "Nome da Cidade + UF") bypassam nuvem. A coordenada é imediatamente sacada de uma estrutura de dicionário fixo (IBGE) residente em disco, gerando Latência 0s e exatidão governamental.
-        * **Fuzzy Léxico:** Algoritmos de distância de Levenshtein capturam erros de digitação humanos (Ex: `RIB CASCALH` corrigido magicamente em *backend* para `RIBEIRAO CASCALHEIRA`) usando contexto da região e UF fornecida na string de busca.
+        * **Fast-Track IBGE:** Localidades contendo apenas "Nome da Cidade + UF" bypassam a nuvem, pegando a coordenada centróide perfeita direto do IBGE sem latência.
+        * **Fuzzy Léxico:** Algoritmos de correção ortográfica consertam digitações equivocadas automaticamente (Ex: `RIB CASCALH` corrigido para `RIBEIRAO CASCALHEIRA`).
         """)
 
     st.markdown("---")
-    st.subheader("💡 Enviar Sugestões à Engenharia")
-    st.write("Identificou algum cenário de anomalia, localidade errônea ou tem ideias de expansão sistêmica? Submeta o alerta direto aos *maintainers*.")
+    st.subheader("💡 Canal Direto de Engenharia")
+    st.caption("Identificou alguma anomalia, localidade errônea ou tem ideias de expansão sistêmica? Envie direto para o desenvolvedor.")
     
     sugestao_texto = st.text_area("Descreva a melhoria desejada detalhadamente:", height=100)
     
@@ -1489,11 +1491,12 @@ with st.sidebar:
         else:
             st.warning("Por favor, descreva a sugestão antes de gerar o link de envio.")
 
-tab_individual, tab_processamento, tab_alocacao, tab_analytics, tab_auditoria = st.tabs([
-    "📍 Geocodificação Rápida", "⚙️ Processamento em Lote", "📦 Alocação de Hubs", "📊 Analytics & Dashboard", "🕵️ Aba de Auditoria"
+tab_individual, tab_processamento, tab_alocacao, tab_analytics, tab_motores, tab_auditoria = st.tabs([
+    "📍 Geocodificação Rápida", "⚙️ Processamento em Lote", "📦 Alocação de Hubs", "📊 Analytics de Localidades", "🔌 Motores & APIs", "🕵️ Aba de Auditoria"
 ])
 
 with tab_individual:
+    st.info("💡 **Objetivo desta aba:** Validar rapidamente uma única rota. Digite a Origem e o Destino para obter a distância viária oficial do Google Maps, o desvio em relação à linha reta geodésica e a explicabilidade do motor de geocodificação.")
     st.markdown("### 🔍 Validador Rápido de Rota (Single-Shot)")
     col_ind1, col_ind2 = st.columns(2)
     with col_ind1: orig_ind = st.text_input("Origem (Endereço, POI ou Coordenadas)", "Ribeirão Cascalheira , MT, Brasil", help="Insira o local de partida. O sistema bloqueará a busca apenas para o Estado cuja sigla for identificada.")
@@ -1553,6 +1556,7 @@ with tab_individual:
             st.warning("Preencha origem e destino.")
 
 with tab_processamento:
+    st.info("💡 **Objetivo desta aba:** Processamento em massa O(U). Envie uma planilha Excel com milhares de origens e destinos. O sistema extrairá rotas únicas, calculará os desvios de todas simultaneamente e devolverá a planilha rigorosamente preenchida.")
     st.write("Insira uma planilha Excel (.xlsx) contendo as colunas **Origem** e **Destino**.")
     arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"], key="lote_std", help="A planilha deve conter abas chamadas estritamente 'Origem' e 'Destino' para roteamento de A a B.")
 
@@ -1662,6 +1666,7 @@ with tab_processamento:
                 st.caption("Dica: Baixe a planilha no botão ao lado, clique em 'Abrir Google Sheets' e arraste o arquivo baixado para dentro da tela (Arquivo > Importar).")
 
 with tab_alocacao:
+    st.info("💡 **Objetivo desta aba:** Inteligência Logística de Hubs. Envie uma lista de clientes (Origens) e uma lista de Centros de Distribuição/Bases (Destinos). O sistema calculará todas as combinações espaciais e descobrirá automaticamente qual é a Base Logística mais próxima de cada cliente individualmente.")
     st.markdown("### 📦 Matriz Geográfica de Alocação de Hubs (Nearest Neighbor)")
     st.write("A matriz inverteu sua lógica por segurança: Os **Endereços serão a Origem**, e as **Bases serão o Destino** da rota. A planilha final terá exatamente a mesma quantidade de linhas que o seu arquivo de endereços.")
     
@@ -1815,7 +1820,8 @@ with tab_alocacao:
                     st.download_button(label="📥 Baixar Planilha de Alocação Competitiva (.xlsx)", data=output_buffer.getvalue(), file_name="matriz_alocacao_competitiva.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, help="O download traz todas as colunas de sua planilha original inalteradas e preenchidas.")
 
 with tab_analytics:
-    st.markdown("### 📊 Dashboard Analítico Interativo Corporativo")
+    st.info("💡 **Objetivo desta aba:** Visualizar graficamente a distribuição geográfica e os indicadores logísticos das *localidades e entregas* do seu último lote. Monitore volume por Estado (UF), Municípios mais procurados e a densidade viária.")
+    st.markdown("### 📊 Dashboard Analítico de Localidades")
     if 'df_processado' in st.session_state:
         df_kpi = st.session_state['df_processado'].copy()
         
@@ -1824,7 +1830,7 @@ with tab_analytics:
         df_kpi['Tempo_Minutos'] = df_kpi['Tempo'].apply(parse_tempo_minutos)
         df_kpi['UF_Sintetica_Origem'] = df_kpi['Endereco Oficial Origem'].str.extract(r',\s*([A-Z]{2})\s*,')[0].fillna("Indefinido")
         
-        st.markdown("#### 🎛️ Filtros Avançados")
+        st.markdown("#### 🎛️ Filtros Avançados de Localidades")
         with st.container():
             col_f1, col_f2, col_f3, col_f4 = st.columns(4)
             
@@ -1853,7 +1859,7 @@ with tab_analytics:
         else:
             df_sucesso = df_filtrado[df_filtrado["Status da Rota"].str.contains("Erro") == False]
             
-            st.markdown("#### 📈 KPIs de Execução")
+            st.markdown("#### 📈 KPIs Logísticos Acumulados")
             col_k1, col_k2, col_k3, col_k4 = st.columns(4)
             
             total_distancia = df_sucesso['Distancia'].sum()
@@ -1866,28 +1872,27 @@ with tab_analytics:
             col_k4.metric("Score Global Médio", f"{round(df_sucesso['Score Final Global'].mean(), 1) if not df_sucesso.empty else 0} / 100")
             
             st.markdown("---")
-            st.markdown("#### 📊 Dashboards Analíticos")
+            st.markdown("#### 📊 Dashboards de Inteligência Geográfica")
             
             col_c1, col_c2 = st.columns(2)
             
             with col_c1:
-                st.caption("**Distribuição Qualitativa: Status Bayesiano da Rota**")
-                grafico_status = alt.Chart(df_filtrado).mark_bar().encode(
-                    x=alt.X('Status da Rota:N', title='Classificação de Confiança'),
-                    y=alt.Y('count():Q', title='Volume de Rotas'),
-                    color=alt.Color('Status da Rota:N', scale=alt.Scale(domain=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro'], range=['#00FF7F', '#1E90FF', '#FFD700', '#FFA500', '#FF4500'])),
-                    tooltip=['Status da Rota', 'count()']
+                st.caption("**Top 10 Municípios de Despacho (Origens Mais Frequentes)**")
+                grafico_mun = alt.Chart(df_filtrado).mark_bar(color='#1E90FF').encode(
+                    x=alt.X('count():Q', title='Volume de Entregas/Rotas'),
+                    y=alt.Y('Municipio Origem:N', title='Município', sort='-x', limit=10),
+                    tooltip=['Municipio Origem', 'count()']
                 ).interactive().properties(height=350)
-                st.altair_chart(grafico_status, use_container_width=True)
+                st.altair_chart(grafico_mun, use_container_width=True)
                 
             with col_c2:
-                st.caption("**Distribuição do Uso de Motores em Nuvem (Origem)**")
-                grafico_apis = alt.Chart(df_filtrado).mark_arc(innerRadius=60).encode(
-                    theta=alt.Theta(field="Fonte Geocoding Origem", aggregate="count"),
-                    color=alt.Color(field="Fonte Geocoding Origem", type="nominal", legend=alt.Legend(title="Motores")),
-                    tooltip=['Fonte Geocoding Origem', 'count()']
+                st.caption("**Distribuição do Volume Logístico por Estado (UF)**")
+                grafico_uf = alt.Chart(df_filtrado).mark_arc(innerRadius=60).encode(
+                    theta=alt.Theta(field="UF_Sintetica_Origem", aggregate="count"),
+                    color=alt.Color(field="UF_Sintetica_Origem", type="nominal", legend=alt.Legend(title="Estados (UF)")),
+                    tooltip=['UF_Sintetica_Origem', 'count()']
                 ).interactive().properties(height=350)
-                st.altair_chart(grafico_apis, use_container_width=True)
+                st.altair_chart(grafico_uf, use_container_width=True)
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.caption("**Matriz de Dispersão: Tempo vs. Distância Viária** (Identificação de Anomalias Logísticas)")
@@ -1900,8 +1905,8 @@ with tab_analytics:
             st.altair_chart(grafico_dispersao, use_container_width=True)
 
             st.markdown("---")
-            st.markdown("#### 🏆 Rankings Top 10")
-            tab_dist_max, tab_dist_min, tab_tempo, tab_municipio = st.tabs(["Maiores Distâncias", "Menores Distâncias", "Maiores Tempos", "Volume Geográfico"])
+            st.markdown("#### 🏆 Top Extremos Logísticos")
+            tab_dist_max, tab_dist_min, tab_tempo = st.tabs(["Maiores Distâncias", "Menores Distâncias", "Maiores Tempos (Gargalos)"])
             
             with tab_dist_max:
                 st.dataframe(df_filtrado.nlargest(10, 'Distancia')[['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota']], use_container_width=True)
@@ -1909,42 +1914,19 @@ with tab_analytics:
                 st.dataframe(df_filtrado.nsmallest(10, 'Distancia')[['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota']], use_container_width=True)
             with tab_tempo:
                 st.dataframe(df_filtrado.nlargest(10, 'Tempo_Minutos')[['Origem', 'Destino', 'Tempo', 'Distancia', 'Status da Rota']], use_container_width=True)
-            with tab_municipio:
-                c1, c2, c3 = st.columns(3)
-                c1.write("**Top Municípios Origem**")
-                c1.dataframe(df_filtrado['Municipio Origem'].value_counts().head(10), use_container_width=True)
-                c2.write("**Top Estados Origem**")
-                c2.dataframe(df_filtrado['UF_Sintetica_Origem'].value_counts().head(10), use_container_width=True)
-                c3.write("**Motores de Origem Utilizados**")
-                c3.dataframe(df_filtrado['Fonte Geocoding Origem'].value_counts().head(10), use_container_width=True)
-                
+
             st.markdown("---")
-            st.markdown("#### 🚨 Análise de Qualidade de Dados (Rotas Críticas)")
+            st.markdown("#### 🚨 Auditoria de Qualidade de Dados (Rotas Críticas)")
             df_suspeitas = df_filtrado[(df_filtrado['Score Final Global'] < 70) | (df_filtrado['Status da Rota'] == "Erro") | (df_filtrado['Confianca Origem'] == "BAIXA")]
             
             if not df_suspeitas.empty:
                 st.error(f"Foram identificadas {len(df_suspeitas)} rotas requerendo intervenção humana/auditoria.")
                 st.dataframe(df_suspeitas[['Origem', 'Destino', 'Score Final Global', 'Confianca Origem', 'Fonte Geocoding Origem', 'Motivo Roteamento']], use_container_width=True)
             else:
-                st.success("🎉 Todas as rotas neste recorte passaram no controle de qualidade (Score >= 70 e Confiança > Baixa).")
-
-        st.markdown("---")
-        st.markdown("#### ⚙️ Performance Logística e Motor de Apis")
-        col_p1, col_p2, col_p3 = st.columns(3)
-        col_p1.metric("Tempo Médio Geocoding / Rota", f"{round(df_filtrado['Tempo Geocoding (s)'].mean(), 2)} s")
-        col_p2.metric("Tempo Médio Roteamento / Rota", f"{round(df_filtrado['Tempo Roteamento (s)'].mean(), 2)} s")
-        col_p3.metric("Tempo Global Total / Rota", f"{round(df_filtrado['Tempo Total (s)'].mean(), 2)} s")
-        
-        health_data = []
-        for api in ["GOOGLE_MAPS", "ARCGIS", "TOMTOM", "NOMINATIM", "PHOTON", "OVERPASS", "OSRM"]:
-            dados = cache_api_health.get(api, {"hits": 0, "calls": 0, "falhas": 0, "tempo_total": 0.0})
-            t_med = f"{round((dados['tempo_total'] / max(1, dados['calls'])) * 1000)} ms" if dados['calls'] > 0 else "N/A"
-            tx_err = f"{round((dados['falhas'] / max(1, dados['calls'] + dados['falhas'])) * 100, 1)}%" if dados['calls'] > 0 else "0.0%"
-            health_data.append({"Provedor": api, "Status": "Online" if dados["falhas"] == 0 else "Instável", "Latência Média": t_med, "Taxa de Erro": tx_err, "Chamadas": dados["calls"]})
-        st.dataframe(pd.DataFrame(health_data), use_container_width=True)
+                st.success("🎉 Todas as rotas neste recorte passaram no controle de qualidade geodésica (Score >= 70 e Confiança > Baixa).")
 
     else:
-        st.info("Aguardando processamento de planilha na aba de Lotes para ativar o Data Analytics Engine.")
+        st.warning("Aguardando processamento de planilha na aba de Lotes para ativar o Data Analytics Engine.")
         
     st.markdown("---")
     st.markdown("#### 📜 Trilha de Auditoria Corporativa (Histórico de Lotes)")
@@ -1954,7 +1936,54 @@ with tab_analytics:
     else:
         st.caption("Nenhum registro de lote persistido na base histórica até o momento.")
 
+with tab_motores:
+    st.info("💡 **Objetivo desta aba:** Monitorar a saúde técnica do ecossistema. Visualize quais APIs em nuvem responderam melhor, identifique instabilidades (timeouts), observe os tempos médios de resposta e verifique a integridade algorítmica do último lote.")
+    st.markdown("### 🔌 Saúde dos Motores em Nuvem e Performance Sistêmica")
+    
+    if 'df_processado' in st.session_state:
+        df_kpi = st.session_state['df_processado'].copy()
+        
+        col_p1, col_p2, col_p3 = st.columns(3)
+        col_p1.metric("Tempo Médio Geocoding / Rota", f"{round(df_kpi['Tempo Geocoding (s)'].mean(), 2)} s")
+        col_p2.metric("Tempo Médio Roteamento / Rota", f"{round(df_kpi['Tempo Roteamento (s)'].mean(), 2)} s")
+        col_p3.metric("Tempo Global Total / Rota", f"{round(df_kpi['Tempo Total (s)'].mean(), 2)} s")
+        
+        st.markdown("---")
+        
+        col_m1, col_m2 = st.columns(2)
+        
+        with col_m1:
+            st.caption("**Volume de Requisições por Motor de Origem (Market Share)**")
+            grafico_apis = alt.Chart(df_kpi).mark_arc(innerRadius=60).encode(
+                theta=alt.Theta(field="Fonte Geocoding Origem", aggregate="count"),
+                color=alt.Color(field="Fonte Geocoding Origem", type="nominal", legend=alt.Legend(title="Motores")),
+                tooltip=['Fonte Geocoding Origem', 'count()']
+            ).interactive().properties(height=350)
+            st.altair_chart(grafico_apis, use_container_width=True)
+            
+        with col_m2:
+            st.caption("**Distribuição Qualitativa: Status Bayesiano da Rota**")
+            grafico_status = alt.Chart(df_kpi).mark_bar().encode(
+                x=alt.X('Status da Rota:N', title='Classificação de Confiança'),
+                y=alt.Y('count():Q', title='Volume de Rotas'),
+                color=alt.Color('Status da Rota:N', scale=alt.Scale(domain=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro'], range=['#00FF7F', '#1E90FF', '#FFD700', '#FFA500', '#FF4500'])),
+                tooltip=['Status da Rota', 'count()']
+            ).interactive().properties(height=350)
+            st.altair_chart(grafico_status, use_container_width=True)
+            
+    st.markdown("---")
+    st.markdown("#### 📡 Tabela Mestre de Latência das APIs")
+    health_data = []
+    for api in ["GOOGLE_MAPS", "ARCGIS", "TOMTOM", "NOMINATIM", "PHOTON", "OVERPASS", "OSRM"]:
+        dados = cache_api_health.get(api, {"hits": 0, "calls": 0, "falhas": 0, "tempo_total": 0.0})
+        t_med = f"{round((dados['tempo_total'] / max(1, dados['calls'])) * 1000)} ms" if dados['calls'] > 0 else "N/A"
+        tx_err = f"{round((dados['falhas'] / max(1, dados['calls'] + dados['falhas'])) * 100, 1)}%" if dados['calls'] > 0 else "0.0%"
+        health_data.append({"Provedor Oficial": api, "Status da Conexão": "🟢 Online" if dados["falhas"] == 0 else "🔴 Instável/Erros", "Latência Média Observada": t_med, "Taxa de Falha": tx_err, "Total de Chamadas Realizadas": dados["calls"]})
+    
+    st.dataframe(pd.DataFrame(health_data), use_container_width=True)
+
 with tab_auditoria:
+    st.info("💡 **Objetivo desta aba:** Transparência Total e Explicabilidade (XAI). Funciona como uma 'Caixa Preta' aberta do sistema. Verifique em detalhes qual algoritmo tomou a decisão para cada coordenada e por que ele escolheu descartar outras opções.")
     st.markdown("### 🕵️ Dossiê de Auditoria Viária e Espacial")
     
     tab_aud_lote, tab_aud_hub = st.tabs(["⚙️ Logs do Lote de Roteamento Padrão", "📦 Logs do Motor de Alocação (Hubs)"])
