@@ -14,6 +14,9 @@ import collections
 import hashlib
 import json
 import urllib.parse
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import altair as alt
 from unidecode import unidecode
 from rapidfuzz import process, fuzz
@@ -47,10 +50,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v47" not in st.session_state:
+if "cache_limpo_v48" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v47"] = True
+    st.session_state["cache_limpo_v48"] = True
     st.session_state['dash_key'] = 0
 
 def realizar_manutencao_logs_google():
@@ -957,7 +960,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V47_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V48_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1119,7 +1122,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V47_{origem_texto}|{destino_texto}|{usar_coordenadas}"
+    cache_key = f"GOOG_V48_{origem_texto}|{destino_texto}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     orig_link_txt = requests.utils.quote(origem_texto)
@@ -1186,7 +1189,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V47_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V48_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1949,18 +1952,13 @@ with tab_analytics:
             base_chart = alt.Chart(df_filtrado)
 
             pie_base = base_chart.encode(
-                theta=alt.Theta("count():Q", stack=True),
+                theta=alt.Theta("count():Q"),
                 color=alt.Color("UF_Sintetica_Origem:N", legend=alt.Legend(title="Estados (UF)"))
             )
-            arc = pie_base.mark_arc(innerRadius=60).encode(
+            chart_pie = pie_base.mark_arc(innerRadius=60).encode(
                 opacity=alt.condition(click_uf & click_mun & brush, alt.value(1), alt.value(0.2)),
                 tooltip=['UF_Sintetica_Origem', 'count()']
-            ).add_params(click_uf)
-            
-            text_arc = pie_base.mark_text(radiusOffset=-20, color='white', fontWeight='bold').encode(
-                text=alt.Text("count():Q")
-            )
-            chart_pie = alt.layer(arc, text_arc).transform_filter(click_mun).properties(width=220, height=280, title="Volume por Estado (UF)")
+            ).add_params(click_uf).transform_filter(click_mun).properties(width=220, height=280, title="Volume por Estado (UF)")
 
             bar_base = base_chart.transform_filter(alt.FieldOneOfPredicate(field='Municipio Origem', oneOf=top_muns)).encode(
                 x=alt.X('count():Q', title='Volume', axis=alt.Axis(tickMinStep=1)),
@@ -1980,8 +1978,8 @@ with tab_analytics:
             valores_eixo_x = list(range(0, max_dist + 100, 50))
             
             scatter = base_chart.mark_circle(size=80).encode(
-                x=alt.X('Distancia:Q', title='Distância Viária Oficial (km)', axis=alt.Axis(values=valores_eixo_x)),
-                y=alt.Y('Tempo_Horas:Q', title='Tempo Estimado (Horas)'),
+                x=alt.X('Distancia:Q', title='Distância Viária Oficial (km)', axis=alt.Axis(values=valores_eixo_x), scale=alt.Scale(zero=False, nice=True, padding=10)),
+                y=alt.Y('Tempo_Horas:Q', title='Tempo Estimado (Horas)', scale=alt.Scale(zero=False, nice=True, padding=10)),
                 color=alt.Color('Status da Rota:N', scale=alt.Scale(scheme='set2')),
                 opacity=alt.condition(click_uf & click_mun & brush, alt.value(0.9), alt.value(0.1)),
                 tooltip=['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota', 'Score Final Global']
@@ -1992,7 +1990,7 @@ with tab_analytics:
             dash_top = alt.hconcat(chart_pie, chart_bars, spacing=30).resolve_scale(color='independent')
             dashboard_completo = alt.vconcat(dash_top, scatter, spacing=30).resolve_scale(color='independent').configure_view(strokeWidth=0)
 
-            col_graficos, col_tabela = st.columns([65, 35], gap="large")
+            col_graficos, col_tabela = st.columns([60, 40], gap="large")
             
             with col_graficos:
                 try:
