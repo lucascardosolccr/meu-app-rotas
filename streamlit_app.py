@@ -47,10 +47,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v34" not in st.session_state:
+if "cache_limpo_v35" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v34"] = True
+    st.session_state["cache_limpo_v35"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -956,7 +956,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V34_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V35_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1118,7 +1118,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V34_{origem_texto}|{destino_texto}|{usar_coordenadas}"
+    cache_key = f"GOOG_V35_{origem_texto}|{destino_texto}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     orig_link_txt = requests.utils.quote(origem_texto)
@@ -1185,7 +1185,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V34_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V35_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
     
     start_geo = time.time()
@@ -1930,8 +1930,10 @@ with tab_analytics:
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.caption("**Matriz de Dispersão: Tempo vs. Distância Viária** (Identificação de Anomalias Logísticas)")
+            
+            max_dist = int(df_filtrado['Distancia'].max()) if not df_filtrado.empty else 100
             grafico_dispersao = alt.Chart(df_filtrado).mark_circle(size=70, opacity=0.7).encode(
-                x=alt.X('Distancia:Q', title='Distância Viária Oficial (km)', axis=alt.Axis(tickStep=50)),
+                x=alt.X('Distancia:Q', title='Distância Viária Oficial (km)', axis=alt.Axis(values=list(range(0, max_dist + 50, 50)))),
                 y=alt.Y('Tempo_Horas:Q', title='Tempo Estimado (Horas)'),
                 color=alt.Color('Status da Rota:N', scale=alt.Scale(scheme='set2')),
                 tooltip=['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota', 'Score Final Global']
@@ -2014,8 +2016,6 @@ with tab_enciclopedia:
     ## 6. Validação Geodésica e Roteamento (A Marreta Matemática)
     Com o Ponto A e o Ponto B em mãos, o aplicativo efetua um cálculo matemático puro: A **Fórmula de Haversine**. 
     Ela mede, respeitando a curvatura da Terra, a distância exata em Linha Reta entre os dois pontos.
-    
-    $$d = 2r \\arcsin{\sqrt{\sin^2(\\frac{\Delta\phi}{2}) + \cos{\phi_1}\cos{\phi_2}\sin^2(\\frac{\Delta\lambda}{2})}}$$
     
     Só então o motor do Google Maps é acionado. Se o Google disser que a viagem de asfalto tem 1.000 km, mas a Linha Reta matemática de Haversine atestou que a distância é de apenas 15 km, o motor "rebela-se" contra o Google Maps, entendendo que ocorreu uma **Violação Geodésica**, rejeita o caminho do asfalto falso e adota lógicas e heurísticas de correção.
 
