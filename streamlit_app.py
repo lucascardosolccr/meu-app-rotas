@@ -219,11 +219,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v58" not in st.session_state:
+if "cache_limpo_v59" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v58"] = True
-    st.session_state['dash_key'] = 0
+    st.session_state["cache_limpo_v59"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
@@ -572,11 +571,6 @@ def validar_coordenada_brasil(lat, lon):
         return False, 0.0, 0.0
 
 def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
-    """
-    Motor Geodésico Robusto com 5 Camadas (Incluindo Bounding Box Territorial).
-    Garante que coordenadas válidas e distintas nunca retornem 0.0 km e não estrapolem os limites do Brasil.
-    Retorna Tuple(distancia_float, status_linha_reta_string)
-    """
     global METRICAS_DISTANCIA
     METRICAS_DISTANCIA["total_calculos"] += 1
     
@@ -1640,7 +1634,7 @@ def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, pr
 # ==============================================================================
 # ENGINE DE CROSS-FILTERING GLOBAL (ALTAIR -> PYTHON STATE)
 # ==============================================================================
-def extrair_selecoes_altair(dk):
+def extrair_selecoes_altair():
     sel = {'regiao': [], 'uf': [], 'mun': [], 'status': [], 'linha_mun': [], 'scatter_mun': [], 'brush': {}}
     
     def _get_sel(key, field, sel_key):
@@ -1649,23 +1643,22 @@ def extrair_selecoes_altair(dk):
             return [i[field] for i in items if isinstance(i, dict) and field in i]
         return []
         
-    sel['regiao'] = _get_sel(f"dash_reg_{dk}", 'Regiao_Sintetica_Origem', 'Reg')
-    sel['uf'] = _get_sel(f"dash_uf_{dk}", 'UF_Sintetica_Origem', 'UF')
-    sel['status'] = _get_sel(f"dash_status_{dk}", 'Status da Rota', 'Status')
-    sel['mun'] = _get_sel(f"dash_mun_{dk}", 'Municipio Origem', 'Mun')
-    sel['linha_mun'] = _get_sel(f"dash_lr_{dk}", 'Municipio Origem', 'LinhaMun')
-    sel['scatter_mun'] = _get_sel(f"dash_scatter_{dk}", 'Municipio Origem', 'ScatterMun')
+    sel['regiao'] = _get_sel("dash_reg", 'Regiao_Sintetica_Origem', 'Reg')
+    sel['uf'] = _get_sel("dash_uf", 'UF_Sintetica_Origem', 'UF')
+    sel['status'] = _get_sel("dash_status", 'Status da Rota', 'Status')
+    sel['mun'] = _get_sel("dash_mun", 'Municipio Origem', 'Mun')
+    sel['linha_mun'] = _get_sel("dash_lr", 'Municipio Origem', 'LinhaMun')
+    sel['scatter_mun'] = _get_sel("dash_scatter", 'Municipio Origem', 'ScatterMun')
     
-    k_scatter = f"dash_scatter_{dk}"
-    if k_scatter in st.session_state and 'selection' in st.session_state[k_scatter]:
-        sel['brush'] = st.session_state[k_scatter]['selection'].get('Brush', {})
+    if "dash_scatter" in st.session_state and 'selection' in st.session_state["dash_scatter"]:
+        sel['brush'] = st.session_state["dash_scatter"]['selection'].get('Brush', {})
         
     return sel
 
-def sync_altair_to_widgets(dk):
+def sync_altair_to_widgets():
     """Sincroniza os cliques gráficos com os filtros avançados (Selectboxes)."""
-    sel = extrair_selecoes_altair(dk)
-    prev_sel_key = f"prev_altair_sel_{dk}"
+    sel = extrair_selecoes_altair()
+    prev_sel_key = "prev_altair_sel"
     prev_sel = st.session_state.get(prev_sel_key, {'regiao':[], 'uf':[], 'mun':[], 'status':[], 'linha_mun':[], 'scatter_mun':[], 'brush':{}})
     
     def check_update(field, widget_key, default_val):
@@ -1676,6 +1669,7 @@ def sync_altair_to_widgets(dk):
     check_update('uf', 'widget_uf', 'Todas')
     check_update('status', 'widget_status', 'Todos')
     
+    # Priority for municipality selection (from any chart)
     if sel['mun'] != prev_sel['mun']:
         st.session_state['widget_mun'] = sel['mun'][0] if sel['mun'] else 'Todos'
     elif sel['linha_mun'] != prev_sel['linha_mun']:
@@ -2202,16 +2196,19 @@ with tab_analytics:
         st.markdown("### 📊 Enterprise Analytics Dashboard")
     with col_d_btn:
         if st.button("🧹 Limpar Todos os Filtros", use_container_width=True, help="Remove os filtros cruzados clicados nos gráficos e restaura a visualização completa."):
-            st.session_state['dash_key'] = st.session_state.get('dash_key', 0) + 1
-            st.session_state['widget_regiao'] = 'Todas'
-            st.session_state['widget_uf'] = 'Todas'
-            st.session_state['widget_mun'] = 'Todos'
-            st.session_state['widget_status'] = 'Todos'
-            st.session_state['widget_fonte'] = 'Todas'
+            keys_to_clear = [
+                'widget_regiao', 'widget_uf', 'widget_mun', 'widget_status', 'widget_fonte',
+                'dash_reg', 'dash_uf', 'dash_status', 'dash_mun', 'dash_lr', 'dash_scatter',
+                'prev_altair_sel'
+            ]
+            for k in keys_to_clear:
+                if k in st.session_state:
+                    del st.session_state[k]
             st.rerun()
 
     if 'df_processado' in st.session_state:
-        dk = st.session_state.get('dash_key', 0)
+        # Extração Estável de Filtros (Sem Chaves Dinâmicas)
+        sel = extrair_selecoes_altair()
         
         # Inicialização Segura das Chaves de Filtro Bidirecional
         if 'widget_regiao' not in st.session_state: st.session_state['widget_regiao'] = 'Todas'
@@ -2220,9 +2217,10 @@ with tab_analytics:
         if 'widget_status' not in st.session_state: st.session_state['widget_status'] = 'Todos'
         if 'widget_fonte' not in st.session_state: st.session_state['widget_fonte'] = 'Todas'
 
-        sync_altair_to_widgets(dk)
+        sync_altair_to_widgets()
         
         df_kpi = st.session_state['df_processado'].copy()
+        
         df_kpi['Distancia'] = pd.to_numeric(df_kpi['Distancia'], errors='coerce').fillna(0)
         df_kpi['Linha Reta'] = pd.to_numeric(df_kpi['Linha Reta'], errors='coerce').fillna(0)
         df_kpi['Tempo_Minutos'] = df_kpi['Tempo'].apply(parse_tempo_minutos)
@@ -2296,20 +2294,20 @@ with tab_analytics:
             score_range = col_f7.slider("Score de Integridade Geodésica", min_value=0.0, max_value=100.0, value=(min_score_val, 100.0))
 
         # Motor de Filtragem Global Centralizado
-        df_cf = aplicar_filtro_global(df_kpi, extrair_selecoes_altair(dk))
+        df_cf = aplicar_filtro_global(df_kpi, extrair_selecoes_altair())
         
         # Filtros de Slider
         df_cf = df_cf[(df_cf['Distancia'] >= dist_range[0]) & (df_cf['Distancia'] <= dist_range[1])]
         df_cf = df_cf[(df_cf['Tempo_Horas'] >= time_range[0]) & (df_cf['Tempo_Horas'] <= time_range[1])]
         df_cf = df_cf[(df_cf['Score Final Global'] >= score_range[0]) & (df_cf['Score Final Global'] <= score_range[1])]
         
-        has_any_filter = bool(regiao_selecionada != "Todas" or uf_selecionada != "Todas" or mun_selecionado != "Todos" or status_selecionado != "Todos" or fonte_selecionada != "Todas" or extrair_selecoes_altair(dk)['brush'])
+        has_any_filter = bool(regiao_selecionada != "Todas" or uf_selecionada != "Todas" or mun_selecionado != "Todos" or status_selecionado != "Todos" or fonte_selecionada != "Todas" or extrair_selecoes_altair()['brush'])
         if has_any_filter:
             df_kpi['_is_selected'] = np.where(df_kpi.index.isin(df_cf.index), 1, 0)
         else:
             df_kpi['_is_selected'] = 1
 
-        renderizar_indicador_filtros(extrair_selecoes_altair(dk)['brush'])
+        renderizar_indicador_filtros(extrair_selecoes_altair()['brush'])
 
         if df_cf.empty:
             st.warning("A combinação de filtros cruzados selecionada não retornou nenhum registro neste lote. Limpe os filtros.")
@@ -2352,6 +2350,7 @@ with tab_analytics:
                     
             with tab_kpi_regional:
                 with st.container(border=True):
+                    # Agregação Regional obedecendo o cross-filter (df_cf)
                     df_regioes = df_cf.groupby('Regiao_Sintetica_Origem').agg(
                         Rotas=('Origem', 'count'),
                         Dist_Media=('Distancia', 'mean'),
@@ -2385,6 +2384,7 @@ with tab_analytics:
                 click_uf = alt.selection_point(fields=['UF_Sintetica_Origem'], name='UF')
                 click_mun = alt.selection_point(fields=['Municipio Origem'], name='Mun')
                 click_linha = alt.selection_point(fields=['Municipio Origem'], name='LinhaMun')
+                click_status = alt.selection_point(fields=['Status da Rota'], name='Status')
                 click_scatter = alt.selection_point(fields=['Municipio Origem'], name='ScatterMun')
                 brush = alt.selection_interval(name='Brush')
 
@@ -2405,7 +2405,16 @@ with tab_analytics:
                     tooltip=['UF_Sintetica_Origem', 'count()']
                 ).add_params(click_uf).properties(height=320, title="Market Share por Estado")
 
-                # Melhoria 05 - Evolução da Distância em Linha Reta por Município (Substitui Status Rota)
+                status_palette = alt.Scale(domain=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro'], range=['#2ECC71', '#3498DB', '#F1C40F', '#E67E22', '#E74C3C'])
+                chart_status = base_chart.mark_bar(cornerRadiusEnd=4).encode(
+                    x=alt.X('Status da Rota:N', title='Status de Confiança', sort=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro']),
+                    y=alt.Y('count():Q', title='Volume'),
+                    color=alt.Color('Status da Rota:N', scale=status_palette, legend=None),
+                    opacity=alt.condition(click_status & (alt.datum._is_selected == 1), alt.value(1.0), alt.value(0.2)),
+                    tooltip=['Status da Rota', 'count()']
+                ).add_params(click_status).properties(height=320, title="Monitor de Qualidade Geodésica")
+
+                # Melhoria 05 - Evolução da Distância em Linha Reta por Município
                 df_linha = df_kpi.groupby('Municipio Origem').agg(
                     Média=('Linha Reta', 'mean'),
                     Mediana=('Linha Reta', 'median'),
@@ -2445,7 +2454,6 @@ with tab_analytics:
                 )
                 chart_muns = alt.layer(bar_mun, text_bar).properties(height=350, title="Top 15 Municípios de Despacho Operacional")
 
-                status_palette = alt.Scale(domain=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro'], range=['#2ECC71', '#3498DB', '#F1C40F', '#E67E22', '#E74C3C'])
                 chart_scatter = base_chart.mark_circle(size=80).encode(
                     x=alt.X('Distancia:Q', title='Distância Viária Oficial (km)', scale=alt.Scale(zero=False, nice=True, padding=10)),
                     y=alt.Y('Tempo_Horas:Q', title='Tempo Estimado (Horas)', scale=alt.Scale(zero=False, nice=True, padding=10)),
@@ -2454,25 +2462,19 @@ with tab_analytics:
                     tooltip=['Municipio Origem', 'Origem', 'Destino', 'Distancia', 'Tempo_Horas', 'Status da Rota', 'Score Final Global']
                 ).add_params(brush, click_scatter).properties(height=350, title="Matriz de Dispersão e Identificação de Outliers")
 
-                # Renderização Sincronizada Bidirecional
+                # Renderização Estável em Container
                 col_p1, col_p2, col_p3 = st.columns(3)
-                try: col_p1.altair_chart(chart_reg, use_container_width=True, on_select="rerun", key=f"dash_reg_{dk}")
-                except Exception: col_p1.altair_chart(chart_reg, use_container_width=True)
-                
-                try: col_p2.altair_chart(chart_uf, use_container_width=True, on_select="rerun", key=f"dash_uf_{dk}")
-                except Exception: col_p2.altair_chart(chart_uf, use_container_width=True)
-                
-                try: col_p3.altair_chart(chart_lr_mun, use_container_width=True, on_select="rerun", key=f"dash_lr_{dk}")
-                except Exception: col_p3.altair_chart(chart_lr_mun, use_container_width=True)
+                col_p1.altair_chart(chart_reg, use_container_width=True, on_select="rerun", key="dash_reg")
+                col_p2.altair_chart(chart_uf, use_container_width=True, on_select="rerun", key="dash_uf")
+                col_p3.altair_chart(chart_status, use_container_width=True, on_select="rerun", key="dash_status")
 
                 st.divider()
                 
                 col_p4, col_p5 = st.columns(2)
-                try: col_p4.altair_chart(chart_muns, use_container_width=True, on_select="rerun", key=f"dash_mun_{dk}")
-                except Exception: col_p4.altair_chart(chart_muns, use_container_width=True)
-                
-                try: col_p5.altair_chart(chart_scatter, use_container_width=True, on_select="rerun", key=f"dash_scatter_{dk}")
-                except Exception: col_p5.altair_chart(chart_scatter, use_container_width=True)
+                col_p4.altair_chart(chart_lr_mun, use_container_width=True, on_select="rerun", key="dash_lr")
+                col_p5.altair_chart(chart_muns, use_container_width=True, on_select="rerun", key="dash_mun")
+
+                st.altair_chart(chart_scatter, use_container_width=True, on_select="rerun", key="dash_scatter")
 
             st.markdown("#### 🗺️ Torre de Controle Espacial (Heatmap Dinâmico)")
             with st.container(border=True):
@@ -2703,4 +2705,6 @@ with tab_auditoria:
     with tab_aud_hub:
         if 'logs_auditoria_alocacao' in st.session_state and st.session_state['logs_auditoria_alocacao']:
             st.write("Abaixo constam as inferências espaciais estritas feitas individualmente para cada Base (Destino) e Endereço (Origem) na leitura e mapeamento da Matriz Geográfica:")
-            st.dataframe(pd
+            st.dataframe(pd.DataFrame(st.session_state['logs_auditoria_alocacao']), use_container_width=True)
+        else:
+            st.info("Nenhuma árvore de decisão persistida. Processe o cálculo de matrizes matemáticas na aba de Alocação de Hubs (📦) para carregar as justificativas competitivas.")
