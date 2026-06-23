@@ -185,6 +185,17 @@ st.markdown("""
         font-size: 15px;
         font-weight: 400;
     }
+    .filter-badge {
+        display: inline-block;
+        background-color: #3B82F6;
+        color: white;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-size: 13px;
+        font-weight: 600;
+        margin-right: 8px;
+        margin-bottom: 8px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -207,10 +218,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v56" not in st.session_state:
+if "cache_limpo_v57" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v56"] = True
+    st.session_state["cache_limpo_v57"] = True
     st.session_state['dash_key'] = 0
 
 def realizar_manutencao_logs_google():
@@ -247,7 +258,7 @@ FILA_NOMINATIM = ThreadPoolExecutor(max_workers=1)
 EXECUTOR_APIS = ThreadPoolExecutor(max_workers=16)
 
 # ==============================================================================
-# 🎛️ DADOS GLOBAIS THREAD-SAFE, HUB B2B E EXPANSÃO SEMÂNTICA
+# 🎛️ DADOS GLOBAIS THREAD-SAFE E EXPANSÃO SEMÂNTICA
 # ==============================================================================
 SINONIMOS_SEMANTICOS = {
     "UNB": "UNIVERSIDADE DE BRASILIA", "CATOLICA": "UNIVERSIDADE CATOLICA",
@@ -573,15 +584,12 @@ def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
         dist_final = 0.0
         status_final = ""
         
-        # Cenário 1: Falha Geográfica Real (Uma das pontas não foi geocodificada)
         if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0: 
             return 0.0, "Falha Operacional (Coordenadas Ausentes)"
             
-        # Cenário 2: Pontos Topológicos Idênticos (Mesma Coordenada)
         if lat1 == lat2 and lon1 == lon2: 
             return 0.0, "Calculada Normalmente (Pontos Coincidentes)"
             
-        # CAMADA 1: GeographicLib (Mais preciso, modelo WGS-84)
         calculado_sucesso = False
         if GEOGRAPHICLIB_DISPONIVEL:
             try:
@@ -594,7 +602,6 @@ def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
             except Exception as e:
                 logger.warning(f"GeographicLib falhou: {e}")
                 
-        # CAMADA 2: Geopy Geodesic
         if not calculado_sucesso and GEOPY_DISPONIVEL:
             try:
                 dist_km = geodesic((lat1, lon1), (lat2, lon2)).km
@@ -605,7 +612,6 @@ def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
             except Exception as e:
                 logger.warning(f"Geopy falhou: {e}")
 
-        # CAMADA 3: Fallback Matemático Automático (Haversine Manual)
         if not calculado_sucesso:
             lat1_r, lon1_r, lat2_r, lon2_r = map(math.radians, [lat1, lon1, lat2, lon2])
             dlat = lat2_r - lat1_r
@@ -614,7 +620,6 @@ def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
             c = 2 * math.asin(math.sqrt(a))
             dist_haversine = 6371.0 * c
             
-            # CAMADA 4: Validação Estrita Anti-Zero
             if dist_haversine >= 0.01:
                 METRICAS_DISTANCIA["fallback_haversine"] += 1
                 dist_final, status_final = round(dist_haversine, 2), "Calculada via Fallback Haversine"
@@ -623,11 +628,10 @@ def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
                 METRICAS_DISTANCIA["correcoes_automaticas"] += 1
                 dist_final, status_final = 0.01, "Calculada após reprocessamento (Correção Anti-Zero)"
 
-        # CAMADA 5: Validação Territorial (Bounding Box Brasil Máximo ~ 4500km aéreo)
         if dist_final > 5000.0:
             logger.error(f"ANOMALIA TERRITORIAL: Distância de {dist_final}km excede fisicamente os limites do Brasil. Ctx: {contexto}")
             METRICAS_DISTANCIA["barreira_territorial"] += 1
-            return 0.01, "Falha de Bounding Box Territorial"
+            return 0.01, "Falha de Bounding Box (Distância Transcontinental Impossível)"
 
         return dist_final, status_final
 
@@ -835,11 +839,6 @@ def API_Photon(query):
     return None
 
 def forcar_geocodificacao_hierarquica_estrita(texto_cru):
-    """
-    Motor Anti-Colisão (Desambiguação): Chamado estritamente quando dois textos diferentes colapsam no mesmo centróide.
-    Executa busca paralela severa em nuvem e rejeita resultados que sejam meramente "cidades/municípios".
-    Prioriza granularidade a nível de bairro/logradouro.
-    """
     texto_norm = semantica.normalizar(texto_cru)
     candidatos = []
     
@@ -854,7 +853,6 @@ def forcar_geocodificacao_hierarquica_estrita(texto_cru):
             
     if not candidatos: return None
     
-    # Ordena pelo peso de granularidade (Rejeita centróides vazios)
     candidatos.sort(key=lambda x: (x.get('score_base', 0) + (40 if x.get('bairro') else 0) + (50 if x.get('logradouro') else 0)), reverse=True)
     melhor = candidatos[0]
     
@@ -1296,7 +1294,7 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     return lat, lon, end_f, conf, score, dist, mun, fonte, xai
 
 # ==============================================================================
-# 🚀 MOTOR DE ROTEAMENTO EXTREMO (ARBITRAGEM DE PROVEDORES COM LINK DINÂMICO)
+# 🚀 MOTOR DE ROTEAMENTO EXTREMO E PIPELINE UNIFICADO
 # ==============================================================================
 def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
     cache_key = f"GOOG_V54_{origem_texto}|{destino_texto}|{usar_coordenadas}"
@@ -1398,7 +1396,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     lat_o, lon_o, end_oficial_o, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, xai_o = obter_coordenadas_e_endereco_oficial(origem_clean)
     lat_d, lon_d, end_oficial_d, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, xai_d = obter_coordenadas_e_endereco_oficial(destino_clean)
     
-    # 🚧 BARREIRA TOPOLÓGICA DE COLISÃO E DESAMBIGUAÇÃO ESTRITA 🚧
+    # BARREIRA TOPOLÓGICA DE COLISÃO E DESAMBIGUAÇÃO ESTRITA
     if lat_o == lat_d and lon_o == lon_d and lat_o != 0.0:
         if semantica.normalizar(origem_clean) != semantica.normalizar(destino_clean):
             METRICAS_DISTANCIA["desambiguacoes_estritas"] += 1
@@ -1637,6 +1635,58 @@ def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, pr
                 df.at[idx, 'Status Linha Reta'] = "Omitida por Erro Estrutural"
                 
     return df
+
+# ==============================================================================
+# ENGINE DE CROSS-FILTERING GLOBAL (ALTAIR -> PYTHON STATE)
+# ==============================================================================
+def extrair_selecoes_altair(dk):
+    """Lê a session_state buscando cliques em gráficos de runs anteriores."""
+    sel = {'regiao': [], 'uf': [], 'mun': [], 'status': [], 'brush': {}}
+    
+    def _get_sel(key, field, sel_key):
+        if key in st.session_state and 'selection' in st.session_state[key]:
+            items = st.session_state[key]['selection'].get(sel_key, [])
+            return [i[field] for i in items if isinstance(i, dict) and field in i]
+        return []
+        
+    sel['regiao'] = _get_sel(f"dash_reg_{dk}", 'Regiao_Sintetica_Origem', 'Reg')
+    sel['uf'] = _get_sel(f"dash_uf_{dk}", 'UF_Sintetica_Origem', 'UF')
+    sel['mun'] = _get_sel(f"dash_mun_{dk}", 'Municipio Origem', 'Mun')
+    sel['status'] = _get_sel(f"dash_status_{dk}", 'Status da Rota', 'Status')
+    
+    k_scatter = f"dash_scatter_{dk}"
+    if k_scatter in st.session_state and 'selection' in st.session_state[k_scatter]:
+        sel['brush'] = st.session_state[k_scatter]['selection'].get('Brush', {})
+        
+    return sel
+
+def aplicar_filtro_global(df_base, sel):
+    """Constrói o dataframe estritamente cruzado e o injeta com a flag _is_selected."""
+    df_cf = df_base.copy()
+    if sel['regiao']: df_cf = df_cf[df_cf['Regiao_Sintetica_Origem'].isin(sel['regiao'])]
+    if sel['uf']: df_cf = df_cf[df_cf['UF_Sintetica_Origem'].isin(sel['uf'])]
+    if sel['mun']: df_cf = df_cf[df_cf['Municipio Origem'].isin(sel['mun'])]
+    if sel['status']: df_cf = df_cf[df_cf['Status da Rota'].isin(sel['status'])]
+    
+    if sel['brush']:
+        b = sel['brush']
+        if 'Distancia' in b:
+            df_cf = df_cf[(df_cf['Distancia'] >= b['Distancia'][0]) & (df_cf['Distancia'] <= b['Distancia'][1])]
+        if 'Tempo_Horas' in b:
+            df_cf = df_cf[(df_cf['Tempo_Horas'] >= b['Tempo_Horas'][0]) & (df_cf['Tempo_Horas'] <= b['Tempo_Horas'][1])]
+            
+    return df_cf
+
+def renderizar_indicador_filtros(sel):
+    active_html = ""
+    if sel['regiao']: active_html += f"<span class='filter-badge'>Região: {', '.join(sel['regiao'])}</span>"
+    if sel['uf']: active_html += f"<span class='filter-badge'>UF: {', '.join(sel['uf'])}</span>"
+    if sel['mun']: active_html += f"<span class='filter-badge'>Município: {', '.join(sel['mun'])}</span>"
+    if sel['status']: active_html += f"<span class='filter-badge'>Status: {', '.join(sel['status'])}</span>"
+    if sel['brush']: active_html += f"<span class='filter-badge'>Intervalo do Scatter Ativo</span>"
+    
+    if active_html:
+        st.markdown(f"<div style='background:#1E232F; padding:15px; border-radius:8px; border: 1px solid #3B82F6; margin-bottom:15px'><b>🔍 Filtros Cross-Filter Ativos:</b><br><br> {active_html}</div>", unsafe_allow_html=True)
 
 # ==============================================================================
 # INTERFACE STREAMLIT COM ENGINE DE SIDEBAR MANUAL E ABAS DE AUDITORIA
@@ -2113,48 +2163,43 @@ with tab_alocacao:
                     st.download_button(label="📥 Baixar Planilha de Alocação Competitiva (.xlsx)", data=output_buffer.getvalue(), file_name="matriz_alocacao_competitiva.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, help="O download traz todas as colunas de sua planilha original inalteradas e preenchidas.")
 
 with tab_analytics:
-    st.info("💡 **Objetivo desta aba:** Visualizar graficamente a distribuição geográfica e os indicadores logísticos das *localidades e entregas* do seu último lote processado.")
+    st.info("💡 **Objetivo desta aba:** Sistema Analítico Global estilo Power BI. Clique nas fatias, barras ou arraste o mouse no Scatter Plot para filtrar dinamicamente TODOS os indicadores, mapas e tabelas abaixo.")
     
     col_d_title, col_d_btn = st.columns([80, 20])
     with col_d_title:
         st.markdown("### 📊 Enterprise Analytics Dashboard")
     with col_d_btn:
-        if st.button("🧹 Limpar Filtros Visuais", use_container_width=True, help="Remove os filtros cruzados clicados nos gráficos."):
+        if st.button("🧹 Limpar Todos os Filtros", use_container_width=True, help="Remove os filtros cruzados clicados nos gráficos e restaura a visualização completa."):
             st.session_state['dash_key'] = st.session_state.get('dash_key', 0) + 1
             st.rerun()
 
     if 'df_processado' in st.session_state:
-        df_kpi = st.session_state['df_processado'].copy()
+        # Puxa a chave atual de renderização para garantir sincronicidade dos gráficos
+        dk = st.session_state.get('dash_key', 0)
+        sel = extrair_selecoes_altair(dk)
         
+        df_kpi = st.session_state['df_processado'].copy()
         df_kpi['Distancia'] = pd.to_numeric(df_kpi['Distancia'], errors='coerce').fillna(0)
         df_kpi['Linha Reta'] = pd.to_numeric(df_kpi['Linha Reta'], errors='coerce').fillna(0)
         df_kpi['Tempo_Minutos'] = df_kpi['Tempo'].apply(parse_tempo_minutos)
         df_kpi['Tempo_Horas'] = df_kpi['Tempo_Minutos'] / 60.0
         
         MAPA_ESTADOS_FULL = {
-            "ACRE": "AC", "ALAGOAS": "AL", "AMAPA": "AP", "AMAZONAS": "AM",
-            "BAHIA": "BA", "CEARA": "CE", "DISTRITO FEDERAL": "DF", "ESPIRITO SANTO": "ES",
-            "GOIAS": "GO", "MARANHAO": "MA", "MATO GROSSO": "MT", "MATO GROSSO DO SUL": "MS",
-            "MINAS GERAIS": "MG", "PARA": "PA", "PARAIBA": "PB", "PARANA": "PR",
-            "PERNAMBUCO": "PE", "PIAUI": "PI", "RIO DE JANEIRO": "RJ", "RIO GRANDE DO NORTE": "RN",
-            "RIO GRANDE DO SUL": "RS", "RONDONIA": "RO", "RORAIMA": "RR", "SANTA CATARINA": "SC",
-            "SAO PAULO": "SP", "SERGIPE": "SE", "TOCANTINS": "TO"
+            "ACRE": "AC", "ALAGOAS": "AL", "AMAPA": "AP", "AMAZONAS": "AM", "BAHIA": "BA", "CEARA": "CE", "DISTRITO FEDERAL": "DF", 
+            "ESPIRITO SANTO": "ES", "GOIAS": "GO", "MARANHAO": "MA", "MATO GROSSO": "MT", "MATO GROSSO DO SUL": "MS", "MINAS GERAIS": "MG", 
+            "PARA": "PA", "PARAIBA": "PB", "PARANA": "PR", "PERNAMBUCO": "PE", "PIAUI": "PI", "RIO DE JANEIRO": "RJ", "RIO GRANDE DO NORTE": "RN",
+            "RIO GRANDE DO SUL": "RS", "RONDONIA": "RO", "RORAIMA": "RR", "SANTA CATARINA": "SC", "SAO PAULO": "SP", "SERGIPE": "SE", "TOCANTINS": "TO"
         }
-
         REGIOES_BRASIL = {
-            "Norte": ["AC", "AP", "AM", "PA", "RO", "RR", "TO"],
-            "Nordeste": ["AL", "BA", "CE", "MA", "PB", "PE", "PI", "RN", "SE"],
-            "Centro-Oeste": ["DF", "GO", "MT", "MS"],
-            "Sudeste": ["ES", "MG", "RJ", "SP"],
-            "Sul": ["PR", "RS", "SC"]
+            "Norte": ["AC", "AP", "AM", "PA", "RO", "RR", "TO"], "Nordeste": ["AL", "BA", "CE", "MA", "PB", "PE", "PI", "RN", "SE"],
+            "Centro-Oeste": ["DF", "GO", "MT", "MS"], "Sudeste": ["ES", "MG", "RJ", "SP"], "Sul": ["PR", "RS", "SC"]
         }
         
         def extrair_uf_precisa(endereco):
             if not isinstance(endereco, str): return "Indefinido"
             end_upper = unidecode(endereco.upper())
             for nome, sigla in MAPA_ESTADOS_FULL.items():
-                if f" {nome} " in f" {end_upper} " or end_upper.endswith(nome) or f", {nome}," in end_upper:
-                    return sigla
+                if f" {nome} " in f" {end_upper} " or end_upper.endswith(nome) or f", {nome}," in end_upper: return sigla
             padrao_uf = r'\b(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\b'
             partes = [p.strip() for p in end_upper.split(',')]
             for p in reversed(partes):
@@ -2163,198 +2208,143 @@ with tab_analytics:
             return "Indefinido"
             
         df_kpi['UF_Sintetica_Origem'] = df_kpi['Endereco Oficial Origem'].apply(extrair_uf_precisa)
+        df_kpi['Regiao_Sintetica_Origem'] = df_kpi['UF_Sintetica_Origem'].apply(lambda uf: next((regiao for regiao, ufs in REGIOES_BRASIL.items() if uf in ufs), "Indefinido"))
         
-        def obter_regiao(uf):
-            for regiao, ufs in REGIOES_BRASIL.items():
-                if uf in ufs: return regiao
-            return "Indefinido"
-            
-        df_kpi['Regiao_Sintetica_Origem'] = df_kpi['UF_Sintetica_Origem'].apply(obter_regiao)
+        # Constrói o Dataframe Filtrado Global que alimentará todo o painel inferior (KPIs, Mapas, Tabelas)
+        df_cf = aplicar_filtro_global(df_kpi, sel)
         
-        st.markdown("#### 🎛️ Painel de Controle de Filtros Avançados")
-        with st.expander("Filtros Segmentados Globais (Recalcula todos os Dashboards)", expanded=False):
-            col_f0, col_f1, col_f2, col_f3, col_f4 = st.columns(5)
-            
-            lista_regioes = ["Todas"] + sorted(list(df_kpi['Regiao_Sintetica_Origem'].unique()))
-            regiao_selecionada = col_f0.selectbox("Região do Brasil", lista_regioes)
-            
-            lista_ufs = ["Todas"] + sorted(list(df_kpi['UF_Sintetica_Origem'].unique()))
-            uf_selecionada = col_f1.selectbox("UF de Origem", lista_ufs)
-            
-            lista_municipios = ["Todos"] + sorted(list(df_kpi['Municipio Origem'].astype(str).unique()))
-            mun_selecionado = col_f2.selectbox("Município de Origem", lista_municipios)
-            
-            lista_status = ["Todos"] + sorted(list(df_kpi['Status da Rota'].astype(str).unique()))
-            status_selecionado = col_f3.selectbox("Status Global da Rota", lista_status)
-            
-            lista_fontes = ["Todas"] + sorted(list(df_kpi['Fonte Geocoding Origem'].astype(str).unique()))
-            fonte_selecionada = col_f4.selectbox("Fonte de Geocoding", lista_fontes)
-            
-            col_f5, col_f6, col_f7 = st.columns(3)
-            
-            min_dist_val, max_dist_val = float(df_kpi['Distancia'].min()), float(df_kpi['Distancia'].max())
-            if max_dist_val <= min_dist_val: max_dist_val = min_dist_val + 1.0
-            dist_range = col_f5.slider("Faixa de Distância (km)", min_value=0.0, max_value=max_dist_val, value=(0.0, max_dist_val))
-            
-            min_time_val, max_time_val = float(df_kpi['Tempo_Horas'].min()), float(df_kpi['Tempo_Horas'].max())
-            if max_time_val <= min_time_val: max_time_val = min_time_val + 1.0
-            time_range = col_f6.slider("Faixa de Tempo (Horas)", min_value=0.0, max_value=max_time_val, value=(0.0, max_time_val))
-            
-            min_score_val, max_score_val = float(df_kpi['Score Final Global'].min()), float(df_kpi['Score Final Global'].max())
-            if max_score_val <= min_score_val: max_score_val = min_score_val + 1.0
-            score_range = col_f7.slider("Score Geodésico", min_value=0.0, max_value=100.0, value=(min_score_val, 100.0))
-            
-        df_filtrado = df_kpi.copy()
-        if regiao_selecionada != "Todas": df_filtrado = df_filtrado[df_filtrado['Regiao_Sintetica_Origem'] == regiao_selecionada]
-        if uf_selecionada != "Todas": df_filtrado = df_filtrado[df_filtrado['UF_Sintetica_Origem'] == uf_selecionada]
-        if mun_selecionado != "Todos": df_filtrado = df_filtrado[df_filtrado['Municipio Origem'] == mun_selecionado]
-        if status_selecionado != "Todos": df_filtrado = df_filtrado[df_filtrado['Status da Rota'] == status_selecionado]
-        if fonte_selecionada != "Todas": df_filtrado = df_filtrado[df_filtrado['Fonte Geocoding Origem'] == fonte_selecionada]
-        
-        df_filtrado = df_filtrado[(df_filtrado['Distancia'] >= dist_range[0]) & (df_filtrado['Distancia'] <= dist_range[1])]
-        df_filtrado = df_filtrado[(df_filtrado['Tempo_Horas'] >= time_range[0]) & (df_filtrado['Tempo_Horas'] <= time_range[1])]
-        df_filtrado = df_filtrado[(df_filtrado['Score Final Global'] >= score_range[0]) & (df_filtrado['Score Final Global'] <= score_range[1])]
-        
-        if df_filtrado.empty:
-            st.warning("A combinação de filtros selecionada não retornou nenhum registro neste lote.")
+        # Injeta a flag no dataframe base para os gráficos saberem quem está ativo e quem deve escurecer
+        has_any_filter = bool(sel['regiao'] or sel['uf'] or sel['mun'] or sel['status'] or sel['brush'])
+        if has_any_filter:
+            df_kpi['_is_selected'] = np.where(df_kpi.index.isin(df_cf.index), 1, 0)
         else:
-            df_sucesso = df_filtrado[df_filtrado["Status da Rota"].str.contains("Erro") == False]
-            
-            tab_kpi_nacional, tab_kpi_regional = st.tabs(["🌎 Visão Nacional Macro", "📍 Análise Regionalizada (Nova Função)"])
-            
-            with tab_kpi_nacional:
-                with st.container(border=True):
-                    col_k1, col_k2, col_k3, col_k4, col_k5, col_k6 = st.columns(6)
-                    total_distancia = df_sucesso['Distancia'].sum()
-                    total_tempo_mins = df_sucesso['Tempo_Minutos'].sum()
-                    tempo_total_str = f"{total_tempo_mins // 60}h {total_tempo_mins % 60}m"
-                    dist_media = total_distancia / len(df_sucesso) if len(df_sucesso) > 0 else 0
-                    tempo_medio = total_tempo_mins / len(df_sucesso) if len(df_sucesso) > 0 else 0
-                    tempo_medio_str = f"{int(tempo_medio // 60)}h {int(tempo_medio % 60)}m"
-                    
-                    col_k1.metric("Rotas Processadas", f"{len(df_filtrado)}")
-                    col_k2.metric("Distância Acumulada", f"{round(total_distancia, 1)} km")
-                    col_k3.metric("Tempo Acumulado", f"{tempo_total_str}")
-                    col_k4.metric("Distância Média/Rota", f"{round(dist_media, 1)} km")
-                    col_k5.metric("Tempo Médio/Rota", f"{tempo_medio_str}")
-                    col_k6.metric("Score Geodésico Médio", f"{round(df_sucesso['Score Final Global'].mean(), 1) if not df_sucesso.empty else 0}/100")
+            df_kpi['_is_selected'] = 1
 
-                    st.divider()
-                    
-                    col_k7, col_k8, col_k9, col_k10, col_k11, col_k12 = st.columns(6)
-                    muns_atendidos = df_filtrado['Municipio Destino'].nunique()
-                    ufs_atendidas = df_filtrado['Endereco Oficial Destino'].apply(extrair_uf_precisa).nunique()
-                    rotas_balsa = len(df_filtrado[df_filtrado['Balsas'] == 'Sim'])
-                    taxa_sucesso = round((len(df_sucesso) / len(df_filtrado)) * 100, 1) if len(df_filtrado) > 0 else 0
-                    
-                    col_k7.metric("Cidades Alcançadas", f"{muns_atendidos}")
-                    col_k8.metric("Estados Alcançados (UFs)", f"{ufs_atendidas}")
-                    col_k9.metric("Maior Viagem Mapeada", f"{round(df_filtrado['Distancia'].max(), 1)} km")
-                    col_k10.metric("Rotas Fluviais (Balsa)", f"{rotas_balsa}")
-                    col_k11.metric("Taxa de Sucesso (Roteamento)", f"{taxa_sucesso}%")
-                    col_k12.metric("Confiança 'Altíssima'", f"{len(df_filtrado[df_filtrado['Confianca Destino'] == 'ALTISSIMA'])}")
-                    
-            with tab_kpi_regional:
-                with st.container(border=True):
-                    df_regioes = df_filtrado.groupby('Regiao_Sintetica_Origem').agg(
-                        Rotas=('Origem', 'count'),
-                        Dist_Media=('Distancia', 'mean'),
-                        Tempo_Medio_Horas=('Tempo_Horas', 'mean'),
-                        Score_Medio=('Score Final Global', 'mean'),
-                        Muns_Unicos=('Municipio Origem', 'nunique')
-                    ).reset_index()
-                    df_regioes = df_regioes[df_regioes['Regiao_Sintetica_Origem'] != "Indefinido"]
-                    df_regioes['Participacao_Nacional'] = round((df_regioes['Rotas'] / len(df_filtrado)) * 100, 1)
-                    
-                    if not df_regioes.empty:
-                        col_r1, col_r2 = st.columns(2)
-                        with col_r1:
-                            bar_regiao = alt.Chart(df_regioes).mark_bar(color='#3B82F6').encode(
-                                x=alt.X('Rotas:Q', title='Volume de Rotas'),
-                                y=alt.Y('Regiao_Sintetica_Origem:N', sort='-x', title='Região do Brasil'),
-                                tooltip=['Regiao_Sintetica_Origem', 'Rotas', 'Participacao_Nacional', 'Dist_Media', 'Muns_Unicos']
-                            ).properties(height=280, title="Ranking de Volume por Região Nacional")
-                            st.altair_chart(bar_regiao, use_container_width=True)
-                        with col_r2:
-                            st.write("Tabela Mestre Regional")
-                            st.dataframe(df_regioes.rename(columns={'Regiao_Sintetica_Origem': 'Região Geográfica', 'Dist_Media': 'Distância Média (km)', 'Tempo_Medio_Horas': 'Tempo Médio (h)', 'Score_Medio': 'Score Médio', 'Muns_Unicos': 'Municípios Atendidos', 'Participacao_Nacional': 'Share Nacional (%)'}), use_container_width=True, hide_index=True)
-                    else:
-                        st.info("Não há dados regionais válidos mapeados neste lote.")
+        renderizar_indicador_filtros(sel)
+
+        if df_cf.empty:
+            st.warning("A combinação de filtros cruzados selecionada não retornou nenhum registro neste lote. Limpe os filtros.")
+        else:
+            df_sucesso = df_cf[~df_cf["Status da Rota"].str.contains("Erro")]
             
-            st.markdown("#### 📈 Análise Operacional de Micro-Regiões (Cross-Filtering)")
-            st.caption("✨ **DICA DE OURO INTERATIVA:** Clique em uma fatia da rosca ou barra de município. A matriz de dispersão E a tabela mestre reagirão automaticamente.")
-            
+            st.markdown("#### 🏆 Visão Executiva Macro (KPIs Mestre)")
             with st.container(border=True):
-                click_uf = alt.selection_point(fields=['UF_Sintetica_Origem'], name='UF')
-                click_mun = alt.selection_point(fields=['Municipio Origem'], name='Mun')
-                brush = alt.selection_interval(name='Brush')
-
-                top_muns = df_filtrado['Municipio Origem'].value_counts().head(15).index.tolist()
-                base_chart = alt.Chart(df_filtrado)
-
-                chart_pie = base_chart.mark_arc(innerRadius=60).encode(
-                    theta=alt.Theta("count():Q", stack=True),
-                    color=alt.Color("UF_Sintetica_Origem:N", legend=alt.Legend(title="Estados (UF)", orient='bottom')),
-                    opacity=alt.condition(click_uf, alt.value(1), alt.value(0.2)),
-                    tooltip=['UF_Sintetica_Origem', 'count()']
-                ).add_params(click_uf).properties(height=350, title="Volume de Demanda por Estado (UF)")
-
-                bar_base = base_chart.transform_filter(alt.FieldOneOfPredicate(field='Municipio Origem', oneOf=top_muns))
-                bar = bar_base.mark_bar(color='#3B82F6').encode(
-                    x=alt.X('count():Q', title='Volume de Rotas', axis=alt.Axis(tickMinStep=1)),
-                    y=alt.Y('Municipio Origem:N', title='Município', sort=alt.EncodingSortField(field='Municipio Origem', op='count', order='descending')),
-                    opacity=alt.condition(click_mun, alt.value(1), alt.value(0.3)),
-                    tooltip=['Municipio Origem', 'count()']
-                ).add_params(click_mun)
+                col_k1, col_k2, col_k3, col_k4, col_k5, col_k6 = st.columns(6)
+                total_distancia = df_sucesso['Distancia'].sum()
+                total_tempo_mins = df_sucesso['Tempo_Minutos'].sum()
+                tempo_total_str = f"{total_tempo_mins // 60}h {total_tempo_mins % 60}m"
+                dist_media = total_distancia / len(df_sucesso) if len(df_sucesso) > 0 else 0
+                tempo_medio = total_tempo_mins / len(df_sucesso) if len(df_sucesso) > 0 else 0
+                tempo_medio_str = f"{int(tempo_medio // 60)}h {int(tempo_medio % 60)}m"
                 
-                text_bar = bar_base.mark_text(align='right', dx=-5, color='white', fontWeight='bold').encode(
-                    x=alt.X('count():Q'),
-                    y=alt.Y('Municipio Origem:N', sort=alt.EncodingSortField(field='Municipio Origem', op='count', order='descending')),
-                    text=alt.Text("count():Q")
-                )
-
-                chart_bars = alt.layer(bar, text_bar).properties(height=350, title="Top 15 Municípios de Despacho (Origem)")
-
-                col_p1, col_p2 = st.columns(2)
-                with col_p1:
-                    try:
-                        evento_uf = st.altair_chart(chart_pie, use_container_width=True, on_select="rerun", key=f"dash_uf_{st.session_state.get('dash_key', 0)}")
-                    except Exception:
-                        evento_uf = None
-                        st.altair_chart(chart_pie, use_container_width=True)
-                with col_p2:
-                    try:
-                        evento_mun = st.altair_chart(chart_bars, use_container_width=True, on_select="rerun", key=f"dash_mun_{st.session_state.get('dash_key', 0)}")
-                    except Exception:
-                        evento_mun = None
-                        st.altair_chart(chart_bars, use_container_width=True)
+                col_k1.metric("Rotas Selecionadas", f"{len(df_cf)}")
+                col_k2.metric("Distância Acumulada", f"{round(total_distancia, 1)} km")
+                col_k3.metric("Tempo Acumulado", f"{tempo_total_str}")
+                col_k4.metric("Distância Média/Rota", f"{round(dist_media, 1)} km")
+                col_k5.metric("Tempo Médio/Rota", f"{tempo_medio_str}")
+                col_k6.metric("Score Geodésico Médio", f"{round(df_sucesso['Score Final Global'].mean(), 1) if not df_sucesso.empty else 0}/100")
 
                 st.divider()
-                st.write("**Matriz de Dispersão Logística (Identificação de Gargalos Espaciais e Outliers)**")
                 
+                col_k7, col_k8, col_k9, col_k10, col_k11, col_k12 = st.columns(6)
+                muns_atendidos = df_cf['Municipio Destino'].nunique()
+                ufs_atendidas = df_cf['Endereco Oficial Destino'].apply(extrair_uf_precisa).nunique()
+                rotas_balsa = len(df_cf[df_cf['Balsas'] == 'Sim'])
+                taxa_sucesso = round((len(df_sucesso) / len(df_cf)) * 100, 1) if len(df_cf) > 0 else 0
+                
+                col_k7.metric("Cidades Alcançadas", f"{muns_atendidos}")
+                col_k8.metric("Estados Alcançados (UFs)", f"{ufs_atendidas}")
+                col_k9.metric("Maior Viagem Mapeada", f"{round(df_cf['Distancia'].max(), 1)} km")
+                col_k10.metric("Rotas Fluviais (Balsa)", f"{rotas_balsa}")
+                col_k11.metric("Taxa de Sucesso (Roteamento)", f"{taxa_sucesso}%")
+                col_k12.metric("Confiança 'Altíssima'", f"{len(df_cf[df_cf['Confianca Destino'] == 'ALTISSIMA'])}")
+            
+            st.markdown("#### 📈 Análise Operacional e Motor Interativo de Filtros")
+            st.caption("✨ **DICA DE OURO INTERATIVA:** Clique nos gráficos abaixo para segmentar automaticamente todos os dados deste painel.")
+            
+            with st.container(border=True):
+                # Inicialização dos Parâmetros de Seleção Cruzada (Cross-Filter Altair)
+                click_reg = alt.selection_point(fields=['Regiao_Sintetica_Origem'], name='Reg')
+                click_uf = alt.selection_point(fields=['UF_Sintetica_Origem'], name='UF')
+                click_mun = alt.selection_point(fields=['Municipio Origem'], name='Mun')
+                click_status = alt.selection_point(fields=['Status da Rota'], name='Status')
+                brush = alt.selection_interval(name='Brush')
+
+                base_chart = alt.Chart(df_kpi)
+
+                # Construção dos Gráficos com Injeção de Opacidade Condicional baseada na seleção Python (_is_selected)
+                chart_reg = base_chart.mark_bar(cornerRadiusEnd=4).encode(
+                    x=alt.X('count():Q', title='Volume de Rotas', axis=alt.Axis(grid=False)),
+                    y=alt.Y('Regiao_Sintetica_Origem:N', sort='-x', title='Região'),
+                    color=alt.value('#60A5FA'),
+                    opacity=alt.condition(click_reg & (alt.datum._is_selected == 1), alt.value(1.0), alt.value(0.2)),
+                    tooltip=['Regiao_Sintetica_Origem', 'count()']
+                ).add_params(click_reg).properties(height=320, title="Volume de Demanda por Região")
+
+                chart_uf = base_chart.mark_arc(innerRadius=60).encode(
+                    theta=alt.Theta("count():Q", stack=True),
+                    color=alt.Color("UF_Sintetica_Origem:N", legend=alt.Legend(title="Estados (UF)", orient='bottom')),
+                    opacity=alt.condition(click_uf & (alt.datum._is_selected == 1), alt.value(1.0), alt.value(0.2)),
+                    tooltip=['UF_Sintetica_Origem', 'count()']
+                ).add_params(click_uf).properties(height=320, title="Market Share por Estado")
+
                 status_palette = alt.Scale(domain=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro'], range=['#2ECC71', '#3498DB', '#F1C40F', '#E67E22', '#E74C3C'])
-                
-                scatter = base_chart.mark_circle(size=80).encode(
+                chart_status = base_chart.mark_bar(cornerRadiusEnd=4).encode(
+                    x=alt.X('Status da Rota:N', title='Status de Confiança', sort=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro']),
+                    y=alt.Y('count():Q', title='Volume'),
+                    color=alt.Color('Status da Rota:N', scale=status_palette, legend=None),
+                    opacity=alt.condition(click_status & (alt.datum._is_selected == 1), alt.value(1.0), alt.value(0.2)),
+                    tooltip=['Status da Rota', 'count()']
+                ).add_params(click_status).properties(height=320, title="Monitor de Qualidade Geodésica")
+
+                top_muns = df_kpi['Municipio Origem'].value_counts().head(15).index.tolist()
+                bar_base = base_chart.transform_filter(alt.FieldOneOfPredicate(field='Municipio Origem', oneOf=top_muns))
+                bar_mun = bar_base.mark_bar(color='#3B82F6', cornerRadiusEnd=4).encode(
+                    x=alt.X('count():Q', title='Volume de Rotas', axis=alt.Axis(tickMinStep=1)),
+                    y=alt.Y('Municipio Origem:N', title='Município', sort=alt.EncodingSortField(field='Municipio Origem', op='count', order='descending')),
+                    opacity=alt.condition(click_mun & (alt.datum._is_selected == 1), alt.value(1.0), alt.value(0.2)),
+                    tooltip=['Municipio Origem', 'count()']
+                ).add_params(click_mun)
+                text_bar = bar_base.mark_text(align='right', dx=-5, color='white', fontWeight='bold').encode(
+                    x=alt.X('count():Q'), y=alt.Y('Municipio Origem:N', sort=alt.EncodingSortField(field='Municipio Origem', op='count', order='descending')), text=alt.Text("count():Q")
+                )
+                chart_muns = alt.layer(bar_mun, text_bar).properties(height=350, title="Top 15 Municípios de Despacho Operacional")
+
+                chart_scatter = base_chart.mark_circle(size=80).encode(
                     x=alt.X('Distancia:Q', title='Distância Viária Oficial (km)', scale=alt.Scale(zero=False, nice=True, padding=10)),
                     y=alt.Y('Tempo_Horas:Q', title='Tempo Estimado (Horas)', scale=alt.Scale(zero=False, nice=True, padding=10)),
                     color=alt.Color('Status da Rota:N', scale=status_palette),
-                    opacity=alt.condition(brush, alt.value(0.9), alt.value(0.1)),
-                    tooltip=['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota', 'Score Final Global']
-                ).add_params(brush).properties(height=350)
-                
-                try:
-                    evento_brush = st.altair_chart(scatter, use_container_width=True, on_select="rerun", key=f"dash_scatter_{st.session_state.get('dash_key', 0)}")
-                except Exception:
-                    evento_brush = None
-                    st.altair_chart(scatter, use_container_width=True)
+                    opacity=alt.condition(brush & (alt.datum._is_selected == 1), alt.value(0.9), alt.value(0.1)),
+                    tooltip=['Origem', 'Destino', 'Distancia', 'Tempo_Horas', 'Status da Rota', 'Score Final Global']
+                ).add_params(brush).properties(height=350, title="Matriz de Dispersão e Identificação de Outliers")
 
-            st.markdown("#### 🗺️ Torre de Controle Espacial (Densidade Populacional Corporativa)")
+                # Renderização Sincronizada
+                col_p1, col_p2, col_p3 = st.columns(3)
+                try: col_p1.altair_chart(chart_reg, use_container_width=True, on_select="rerun", key=f"dash_reg_{dk}")
+                except Exception: col_p1.altair_chart(chart_reg, use_container_width=True)
+                
+                try: col_p2.altair_chart(chart_uf, use_container_width=True, on_select="rerun", key=f"dash_uf_{dk}")
+                except Exception: col_p2.altair_chart(chart_uf, use_container_width=True)
+                
+                try: col_p3.altair_chart(chart_status, use_container_width=True, on_select="rerun", key=f"dash_status_{dk}")
+                except Exception: col_p3.altair_chart(chart_status, use_container_width=True)
+
+                st.divider()
+                
+                col_p4, col_p5 = st.columns(2)
+                try: col_p4.altair_chart(chart_muns, use_container_width=True, on_select="rerun", key=f"dash_mun_{dk}")
+                except Exception: col_p4.altair_chart(chart_muns, use_container_width=True)
+                
+                try: col_p5.altair_chart(chart_scatter, use_container_width=True, on_select="rerun", key=f"dash_scatter_{dk}")
+                except Exception: col_p5.altair_chart(chart_scatter, use_container_width=True)
+
+            st.markdown("#### 🗺️ Torre de Controle Espacial (Heatmap Filtrado)")
             with st.container(border=True):
                 col_m1, col_m2 = st.columns([80, 20])
                 with col_m2:
                     map_style_selection = st.radio("Tema Topológico:", ["Carto Dark Mode (Padrão)", "OpenStreetMap Clássico", "Satélite (Esri Imagens)"], index=0)
                 
-                df_mapa = df_filtrado.copy()
+                df_mapa = df_cf.copy()
                 df_mapa['Lat Destino'] = pd.to_numeric(df_mapa['Lat Destino'], errors='coerce')
                 df_mapa['Lon Destino'] = pd.to_numeric(df_mapa['Lon Destino'], errors='coerce')
                 df_mapa = df_mapa.dropna(subset=['Lat Destino', 'Lon Destino'])
@@ -2399,7 +2389,7 @@ with tab_analytics:
                             'Tempo_Medio': ':.1f',
                             'Score_Medio': False
                         },
-                        title="Heatmap Corporativo de Densidade de Rotas"
+                        title="Densidade Operacional da Seleção Ativa"
                     )
                     
                     if map_style_selection == "Satélite (Esri Imagens)":
@@ -2413,51 +2403,26 @@ with tab_analytics:
                     fig.update_layout(margin={"r":0,"t":40,"l":0,"b":0}, height=600)
                     st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.info("Nenhuma coordenada válida disponível no lote filtrado para projeção geográfica.")
+                    st.info("O filtro atual não retornou coordenadas válidas no Brasil para plotagem.")
 
-            st.markdown("#### 🥇 Rankings e Extremos Logísticos (Top 10)")
+            st.markdown("#### 🥇 Rankings e Extremos Logísticos da Seleção Atual (Top 10)")
             with st.container(border=True):
                 tab_dist_max, tab_dist_min, tab_tempo = st.tabs(["Maiores Distâncias (+)", "Menores Distâncias (-)", "Maiores Tempos (Gargalos)"])
                 
                 with tab_dist_max:
-                    st.dataframe(df_filtrado.nlargest(10, 'Distancia')[['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota']], use_container_width=True)
+                    st.dataframe(df_cf.nlargest(10, 'Distancia')[['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota']], use_container_width=True)
                 with tab_dist_min:
-                    st.dataframe(df_filtrado.nsmallest(10, 'Distancia')[['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota']], use_container_width=True)
+                    st.dataframe(df_cf.nsmallest(10, 'Distancia')[['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota']], use_container_width=True)
                 with tab_tempo:
-                    st.dataframe(df_filtrado.nlargest(10, 'Tempo_Minutos')[['Origem', 'Destino', 'Tempo', 'Distancia', 'Status da Rota']], use_container_width=True)
+                    st.dataframe(df_cf.nlargest(10, 'Tempo_Minutos')[['Origem', 'Destino', 'Tempo', 'Distancia', 'Status da Rota']], use_container_width=True)
 
-            st.markdown("#### 📋 Matriz de Dados Analíticos Drill-Down (Sincronizada aos Gráficos)")
+            st.markdown("#### 📋 Matriz de Dados Drill-Down da Seleção (Data Explorer)")
             with st.container(border=True):
-                st.caption("Esta tabela responde diretamente às seleções gráficas da Torre de Controle, atuando de maneira 100% responsiva à largura da tela corporativa.")
-                ufs_selecionadas = []
-                muns_selecionados = []
-                
-                if evento_uf and hasattr(evento_uf, 'selection'):
-                    sel_uf = evento_uf.selection.get('UF', [])
-                    for item in sel_uf:
-                        if isinstance(item, dict) and 'UF_Sintetica_Origem' in item: ufs_selecionadas.append(item['UF_Sintetica_Origem'])
-                
-                if evento_mun and hasattr(evento_mun, 'selection'):
-                    sel_mun = evento_mun.selection.get('Mun', [])
-                    for item in sel_mun:
-                        if isinstance(item, dict) and 'Municipio Origem' in item: muns_selecionados.append(item['Municipio Origem'])
-                        
-                if evento_brush and hasattr(evento_brush, 'selection'):
-                    b_uf = evento_brush.selection.get('UF', [])
-                    b_mun = evento_brush.selection.get('Mun', [])
-                    for item in b_uf:
-                        if isinstance(item, dict) and 'UF_Sintetica_Origem' in item: ufs_selecionadas.append(item['UF_Sintetica_Origem'])
-                    for item in b_mun:
-                        if isinstance(item, dict) and 'Municipio Origem' in item: muns_selecionados.append(item['Municipio Origem'])
-                
-                df_tabela = df_filtrado.copy()
-                if ufs_selecionadas: df_tabela = df_tabela[df_tabela['UF_Sintetica_Origem'].isin(ufs_selecionadas)]
-                if muns_selecionados: df_tabela = df_tabela[df_tabela['Municipio Origem'].isin(muns_selecionados)]
-                
-                tabela_h = min(800, max(300, len(df_tabela) * 35 + 43))
+                st.caption("Esta tabela exibe o nível atômico do recorte de dados selecionado nos gráficos acima.")
+                tabela_h = min(800, max(300, len(df_cf) * 35 + 43))
                 
                 st.dataframe(
-                    df_tabela[['Origem', 'Destino', 'Distancia', 'Linha Reta', 'Tempo', 'Status da Rota', 'Status Linha Reta', 'Link da Rota']],
+                    df_cf[['Origem', 'Destino', 'Distancia', 'Linha Reta', 'Tempo', 'Status da Rota', 'Status Linha Reta', 'Link da Rota']],
                     use_container_width=True,
                     height=tabela_h,
                     column_config={"Link da Rota": st.column_config.LinkColumn("🔗 Abrir no Maps")},
@@ -2466,55 +2431,16 @@ with tab_analytics:
 
             st.markdown("#### 🚨 Controle de Qualidade de Dados (Auditoria Geodésica e de Falhas)")
             with st.container(border=True):
-                df_suspeitas = df_filtrado[(df_filtrado['Score Final Global'] < 70) | (df_filtrado['Status da Rota'] == "Erro") | (df_filtrado['Confianca Origem'] == "BAIXA") | ((df_filtrado['Linha Reta'] == 0.0) & (df_filtrado['Origem'] != df_filtrado['Destino']))]
+                df_suspeitas = df_cf[(df_cf['Score Final Global'] < 70) | (df_cf['Status da Rota'] == "Erro") | (df_cf['Confianca Origem'] == "BAIXA") | ((df_cf['Linha Reta'] <= 0.01) & (df_cf['Origem'] != df_cf['Destino']))]
                 
                 if not df_suspeitas.empty:
-                    st.warning(f"Atenção: Foram identificadas {len(df_suspeitas)} rotas requerendo intervenção humana ou revisão de cadastro mestre.")
+                    st.warning(f"Atenção: Identificadas {len(df_suspeitas)} rotas requerendo revisão humana dentro do seu recorte atual.")
                     st.dataframe(df_suspeitas[['Origem', 'Destino', 'Linha Reta', 'Status Linha Reta', 'Score Final Global', 'Confianca Origem', 'Motivo Roteamento']], use_container_width=True)
                 else:
-                    st.success("🎉 Nenhuma anomalia encontrada. Todas as rotas neste recorte passaram no controle de qualidade geodésica rígida (Score >= 70 e Distância Matemática não-nula).")
-
-            st.markdown("#### ⚙️ Saúde e Performance de Infraestrutura (Lote Atual)")
-            with st.container(border=True):
-                col_h1, col_h2, col_h3 = st.columns(3)
-                
-                with col_h1:
-                    hist_dist = alt.Chart(df_filtrado).mark_bar(color='#3B82F6').encode(
-                        x=alt.X("Distancia:Q", bin=alt.Bin(maxbins=20), title="Faixas de Distância Viária (km)"),
-                        y=alt.Y('count():Q', title="Volume de Rotas")
-                    ).properties(height=250, title="Distribuição de Distâncias")
-                    st.altair_chart(hist_dist, use_container_width=True)
-                    
-                with col_h2:
-                    hist_tempo = alt.Chart(df_filtrado).mark_bar(color='#2563EB').encode(
-                        x=alt.X("Tempo_Horas:Q", bin=alt.Bin(maxbins=20), title="Faixas de Tempo (Horas)"),
-                        y=alt.Y('count():Q', title="Volume de Rotas")
-                    ).properties(height=250, title="Distribuição de Tempos Operacionais")
-                    st.altair_chart(hist_tempo, use_container_width=True)
-                    
-                with col_h3:
-                    hist_lr = alt.Chart(df_filtrado).mark_bar(color='#10B981').encode(
-                        x=alt.X("Linha Reta:Q", bin=alt.Bin(maxbins=20), title="Faixas Geodésicas (km)"),
-                        y=alt.Y('count():Q', title="Volume de Rotas")
-                    ).properties(height=250, title="Distribuição de Distância em Linha Reta")
-                    st.altair_chart(hist_lr, use_container_width=True)
-                    
-                st.divider()
-                col_p1, col_p2, col_p3 = st.columns(3)
-                col_p1.metric("Tempo Médio Geocoding / Rota (Busca Espacial)", f"{round(df_filtrado['Tempo Geocoding (s)'].mean(), 2)} s")
-                col_p2.metric("Tempo Médio Roteamento / Rota (API Asfalto)", f"{round(df_filtrado['Tempo Roteamento (s)'].mean(), 2)} s")
-                col_p3.metric("Tempo Global Total / Rota (Processamento Real)", f"{round(df_filtrado['Tempo Total (s)'].mean(), 2)} s")
+                    st.success("🎉 Excelente! Nenhuma anomalia geodésica ou operacional encontrada no recorte atual.")
 
     else:
         st.warning("Aguardando processamento de planilha corporativa na aba de Lotes (⚙️) para ativar e renderizar o Enterprise Data Analytics Engine.")
-        
-    st.markdown("---")
-    st.markdown("#### 📜 Trilha de Auditoria Corporativa Contínua (Histórico Persistente de Lotes)")
-    historico = [cache_historico_lotes[k] for k in cache_historico_lotes]
-    if historico:
-        st.dataframe(pd.DataFrame(historico).sort_values(by="Data/Hora", ascending=False).reset_index(drop=True), use_container_width=True)
-    else:
-        st.caption("Nenhum registro de lote persistido na base histórica até o momento.")
 
 with tab_enciclopedia:
     st.info("💡 **Objetivo desta aba:** Servir como o repositório mestre de conhecimento. Esta enciclopédia detalha toda a jornada técnica de um dado dentro do aplicativo, abordando 100% das funcionalidades corporativas, desde a limpeza gramatical até a validação geométrica extrema anti-colisão.")
@@ -2547,7 +2473,7 @@ with tab_enciclopedia:
     A Distância em Linha Reta (Aérea) é a âncora de segurança matemática da plataforma. Ela atua como juíza absoluta do motor asfáltico (Google Maps).
 
     ### O que é e Para que Serve?
-    A Linha Reta é a distância física verdadeira entre duas coordenadas globais, medida sobre a superfície curvada da Terra. Se o Google Maps afirma que a rota de asfalto tem 1.000 km, mas a Linha Reta atesta apenas 15 km, o motor identifica uma **Violação Geodésica** severa (como a ausência de uma ponte para atravessar um rio). Ela serve para identificar desvios operacionais invisíveis a olho nu.
+    A Linha Reta é a distância física verdadeira entre duas coordenadas globais, medida sobre a superfície curvada da Terra. Se o Google Maps afirma que a rota de asfalto tem 1.000 km, mas a Linha Reta atestou apenas 15 km, o motor identifica uma **Violação Geodésica** severa (como a ausência de uma ponte para atravessar um rio). Ela serve para identificar desvios operacionais invisíveis a olho nu.
     
     ### Fórmulas Matemáticas e as 5 Camadas de Segurança
     O sistema abriga a função blindada `calcular_distancia_linha_reta()`, que atua nas seguintes camadas operacionais para impedir qualquer retorno de "0 km" indevido:
@@ -2568,10 +2494,10 @@ with tab_enciclopedia:
     * **Alocação de Hubs (Roteamento Duplo e Vizinho Mais Próximo):** Em vez de calcular "A para B", a plataforma submete clientes contra centenas de Centros de Distribuição (CD's). O sistema roda `N * M` duelos espaciais na memória virtual calculando a Linha Reta de todos contra todos. Identificados os dois CDs finalistas fisicamente mais próximos do cliente, a API invoca o motor de asfalto do Google/OSRM para definir qual Base abastecerá o CEP, reduzindo severamente os custos logísticos de "Cross-Docking".
     * **Ferries / Modais Hídricos:** O Motor Open-Source Routing (OSRM) rastreia corpos hídricos no OpenStreetMap. Caso uma viagem terrestre seja forçada a usar balsa (ex: Manaus para Autazes), a API ativa a flag `"Ferry"`, mapeada pela interface em `Uso de Balsas: Sim`.
 
-    ## 7. Score de Explicabilidade (XAI) e Enterprise Analytics
-    * O modelo corporativo não omite decisões. Cada rota exibe um **Score Global (0 a 100)**: `(0.35 * Confiança Origem) + (0.35 * Confiança Destino) + (0.30 * Auditoria de Asfalto)`.
-    * O **Enterprise Analytics** é um submódulo visual renderizado por Altair/Plotly. Ele lê instantaneamente as saídas das planilhas, mapeando a base territorial e extraindo dados como *Share* Regional (%) e Distâncias Médias Nacionais.
-    * **Mapas de Densidade Híbridos:** A visualização não apenas plota pontos geográficos. Ela expande a bolha de mapeamento (Raio Visual) conforme a `Quantidade de Ocorrências` de rotas na mesma área, identificando zonas vermelhas de estrangulamento para Capex (Abertura de novos CDs baseados em volume auditado).
+    ## 7. Score de Explicabilidade (XAI) e Enterprise Analytics (Cross-Filtering)
+    * **Score Global:** Cada rota exibe um grau de saúde corporativo de 0 a 100: `(0.35 * Confiança Origem) + (0.35 * Confiança Destino) + (0.30 * Auditoria de Asfalto)`.
+    * **Cross-Filtering Engine:** O Enterprise Analytics não possui gráficos isolados. Se o gestor clicar no estado de São Paulo no gráfico de rosca, a base de dados subjacente (`df_cross_filtered`) reage instantaneamente cortando dados do Brasil inteiro, forçando os Mapas, Rankings e KPIs do topo da tela a exibirem somente os números e anomalias de São Paulo.
+    * **Mapas de Densidade Híbridos:** A visualização expande a bolha de mapeamento conforme a `Quantidade de Ocorrências` de rotas na mesma área, identificando zonas de estrangulamento para Capex (abertura de galpões).
     """)
 
 with tab_motores:
