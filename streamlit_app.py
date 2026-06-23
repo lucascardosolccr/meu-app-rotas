@@ -14,6 +14,7 @@ import hashlib
 import json
 import urllib.parse
 import smtplib
+import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import altair as alt
@@ -26,6 +27,27 @@ from sklearn.cluster import DBSCAN
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+# Tenta importar Geopy para Camada 1 do motor de linha reta
+try:
+    from geopy.distance import geodesic
+    GEOPY_DISPONIVEL = True
+except ImportError:
+    GEOPY_DISPONIVEL = False
+
+# ==============================================================================
+# CONFIGURAÇÃO DE LOGS E AUDITORIA CRÍTICA
+# ==============================================================================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("MotorGeodesicoCorp")
+
+METRICAS_DISTANCIA = {
+    "total_calculos": 0,
+    "sucesso_geopy": 0,
+    "fallback_haversine": 0,
+    "correcoes_automaticas": 0,
+    "falhas_criticas": 0
+}
 
 # ==============================================================================
 # CONFIGURAÇÃO DE UI/UX E AMBIENTE
@@ -599,18 +621,57 @@ def validar_coordenada_brasil(lat, lon):
     except (ValueError, TypeError):
         return False, 0.0, 0.0
 
-def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2):
+def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
+    """
+    Motor Geodésico Robusto (Substitui fórmula instável do script base).
+    Garante que coordenadas válidas e distintas nunca retornem 0.0 km.
+    """
+    global METRICAS_DISTANCIA
+    METRICAS_DISTANCIA["total_calculos"] += 1
+    
     try:
         lat1, lon1, lat2, lon2 = float(lat1), float(lon1), float(lat2), float(lon2)
-        if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0: return 0.0
-        if lat1 == lat2 and lon1 == lon2: return 0.0
+        
+        # Se houve falha de geocodificação
+        if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0: 
+            return 0.0
+            
+        # Se os pontos forem exatamente iguais
+        if lat1 == lat2 and lon1 == lon2: 
+            return 0.0
+            
+        # CAMADA 1: Geodésia de Alta Precisão (Elipsoide WGS-84)
+        if GEOPY_DISPONIVEL:
+            try:
+                dist_km = geodesic((lat1, lon1), (lat2, lon2)).km
+                if dist_km > 0:
+                    METRICAS_DISTANCIA["sucesso_geopy"] += 1
+                    return round(dist_km, 2)
+            except Exception as e:
+                logger.warning(f"Geopy falhou no cálculo de {lat1},{lon1} -> {lat2},{lon2}. Acionando Fallback. Erro: {e}")
+                
+        # CAMADA 2: Fallback Matemático Automático (Haversine Manual)
         lat1_r, lon1_r, lat2_r, lon2_r = map(math.radians, [lat1, lon1, lat2, lon2])
         dlat = lat2_r - lat1_r
         dlon = lon2_r - lon1_r
         a = math.sin(dlat / 2)**2 + math.cos(lat1_r) * math.cos(lat2_r) * math.sin(dlon / 2)**2
         c = 2 * math.asin(math.sqrt(a))
-        return round(6371.0 * c, 2)
-    except Exception:
+        dist_haversine = 6371.0 * c
+        
+        # CAMADA 3: Validação Estrita Anti-Zero
+        if dist_haversine > 0.001:
+            METRICAS_DISTANCIA["fallback_haversine"] += 1
+            return round(dist_haversine, 2)
+        else:
+            # Distância calculada foi ínfima ou zero para coordenadas numéricas diferentes (anomalia de float limit)
+            logger.error(f"FALHA CRÍTICA PREVENIDA: Distância Haversine zerada para pontos diferentes. {lat1},{lon1} a {lat2},{lon2} | Ctx: {contexto}")
+            METRICAS_DISTANCIA["correcoes_automaticas"] += 1
+            # Fallback seguro fixo (distância microscópica mínima) em vez de zerar
+            return 0.01 
+            
+    except Exception as e:
+        logger.error(f"Erro fatal no motor de distância geodésica ({contexto}): {e}")
+        METRICAS_DISTANCIA["falhas_criticas"] += 1
         return 0.0
 
 def cascata_postal_tripla(cep_limpo):
@@ -941,7 +1002,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         apis_concordantes = set([c1["fonte"]])
         for c2 in candidatos_validos:
             if c1["fonte"] != c2["fonte"]:
-                dist = calcular_distancia_linha_reta(c1["lat"], c1["lon"], c2["lat"], c2["lon"])
+                dist = calcular_distancia_linha_reta(c1["lat"], c1["lon"], c2["lat"], c2["lon"], contexto="Consenso API")
                 if dist <= tolerancia_km: 
                     apis_concordantes.add(c2["fonte"])
                     probabilidades_cluster.append(PESO_FONTES.get(c2["fonte"], 0.5))
@@ -998,7 +1059,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         if cand.get("lat", 0.0) == 0.0 or cand.get("lon", 0.0) == 0.0: continue
         f_n = cand.get("fonte", "")
         metr = cache_api_health.get(f_n, {"hits": 0, "calls": 0, "falhas": 0, "tempo_total": 0.0})
-        if calcular_distancia_linha_reta(cand["lat"], cand["lon"], vencedor["lat"], vencedor["lon"]) <= 0.05:
+        if calcular_distancia_linha_reta(cand["lat"], cand["lon"], vencedor["lat"], vencedor["lon"], contexto="Auditoria Health") <= 0.05:
             metr["hits"] += 1
         cache_api_health.set(f_n, metr, expire=None)
 
@@ -1336,7 +1397,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_rot = time.time()
 
     if all([lat_o is not None, lon_o is not None, lat_d is not None, lon_d is not None]) and lat_o != 0.0 and lat_d != 0.0:
-        dist_linha_reta = calcular_distancia_linha_reta(lat_o, lon_o, lat_d, lon_d)
+        dist_linha_reta = calcular_distancia_linha_reta(lat_o, lon_o, lat_d, lon_d, contexto=f"Pipeline: {origem_clean} a {destino_clean}")
     else:
         dist_linha_reta = 0.0
 
@@ -1425,7 +1486,7 @@ def executar_pipeline_unificado(origem_cru, destino_cru, runner_up_info=None):
         lat_o, lon_o = res[19], res[20]
         
         if lat_o != 0.0 and r_lat != 0.0:
-            dist_v_real = calcular_distancia_linha_reta(lat_o, lon_o, r_lat, r_lon)
+            dist_v_real = calcular_distancia_linha_reta(lat_o, lon_o, r_lat, r_lon, contexto="Validador Runner-Up")
             res_g_runner = extrair_dados_reais_google(origem_cru, r_nome, lat_o, lon_o, r_lat, r_lon, dist_v_real, usar_coordenadas=True)
             if not res_g_runner:
                  res_g_runner = extrair_dados_reais_google(origem_cru, r_nome, lat_o, lon_o, r_lat, r_lon, dist_v_real, usar_coordenadas=False)
@@ -1589,7 +1650,8 @@ with st.sidebar:
 
     with st.expander("📐 Algoritmos e Fórmulas Matemáticas"):
         st.markdown("""
-        * **Fórmula de Haversine (Geodésica Esférica):** Utilizada no backend para medir distâncias aéreas puras (em linha reta) entre a Origem e o Destino. Serve como *Baseline* para auditar o desvio de asfalto do Google.
+        * **Fórmula Geodésica WGS-84:** Utilizada na primeira camada do backend para medir a distância aérea respeitando o achatamento da Terra.
+        * **Fórmula de Haversine:** Camada de fallback matemático para medir distâncias aéreas baseadas em uma esfera perfeita. 
         * **Clustering Espacial via DBSCAN:** Plota todos os retornos de APIs no mapa e agrupa as coordenadas verdadeiras que estão a menos de 500 metros umas das outras, descartando anomalias.
         * **Inferência Bayesiana Multiplicativa:** Motor heurístico que gera o "Score Global", multiplicando fatores de confiança se o CEP for validado, se a UF for condizente e se o IBGE reconhecer o distrito.
         """)
@@ -1682,7 +1744,7 @@ with tab_individual:
                 
                 m_dist_via, m_dist_reta, m_time, m_balsa, m_score = st.columns(5)
                 m_dist_via.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0], help="Quilometragem oficial em asfalto extraída da nuvem Google Maps.")
-                m_dist_reta.metric("Distância Linha Reta", f"{res_ind[4]} km" if isinstance(res_ind[4], float) else res_ind[4], help="Distância matemática geodésica baseada na fórmula de Haversine.")
+                m_dist_reta.metric("Distância Linha Reta", f"{res_ind[4]} km" if isinstance(res_ind[4], float) else res_ind[4], help="Distância matemática geodésica de alta precisão.")
                 m_time.metric("Tempo Estimado", res_ind[1], help="Tempo de deslocamento estimado via transporte motorizado.")
                 m_balsa.metric("Uso de Balsas", res_ind[3], help="Validação de interseção de corpos hídricos (Ferry) auditada via OSRM.")
                 
@@ -1793,10 +1855,14 @@ with tab_processamento:
                 
                 df_final = rodar_pipeline_lote(df, list(pares_unicos), tarefas_priorizadas, nome_operador, barra_progresso, container_status)
                 
+                # Validação estrita da Linha Reta pós-processamento
                 def recalculate_haversine_lote(row):
-                    if row['Linha Reta'] == 0.0 and row['Lat Origem'] != 0.0 and row['Lat Destino'] != 0.0:
-                        return calcular_distancia_linha_reta(row['Lat Origem'], row['Lon Origem'], row['Lat Destino'], row['Lon Destino'])
+                    if row['Lat Origem'] != 0.0 and row['Lat Destino'] != 0.0:
+                        nova_dist = calcular_distancia_linha_reta(row['Lat Origem'], row['Lon Origem'], row['Lat Destino'], row['Lon Destino'], contexto=f"Lote DF Revalidação: {row.get('Origem','')} a {row.get('Destino','')}")
+                        if nova_dist > 0:
+                            return nova_dist
                     return row['Linha Reta']
+                
                 df_final['Linha Reta'] = df_final.apply(recalculate_haversine_lote, axis=1)
 
                 tempo_lote_segundos = round(time.time() - start_lote_clock, 2)
@@ -1919,7 +1985,7 @@ with tab_alocacao:
                             
                         hubs_dist = []
                         for h_nome, (h_lat, h_lon, h_end) in hubs_validos.items():
-                            dist_v = calcular_distancia_linha_reta(o_lat, o_lon, h_lat, h_lon)
+                            dist_v = calcular_distancia_linha_reta(o_lat, o_lon, h_lat, h_lon, contexto=f"Hub Allocation: {o_nome} a {h_nome}")
                             hubs_dist.append((dist_v, h_nome, h_lat, h_lon))
                             
                         hubs_dist.sort(key=lambda x: x[0])
@@ -1974,10 +2040,15 @@ with tab_alocacao:
                     status_alo.empty(); progress_alo.empty()
                     
                     df_final_alo['Linha Reta'] = df_final_alo['Origem'].astype(str).str.strip().map(dest_to_linha_reta).fillna(df_final_alo['Linha Reta'])
+                    
+                    # Validação estrita da Linha Reta pós-processamento da Alocação
                     def recalculate_haversine_alo(row):
-                        if row['Linha Reta'] == 0.0 and row['Lat Origem'] != 0.0 and row['Lat Destino'] != 0.0:
-                            return calcular_distancia_linha_reta(row['Lat Origem'], row['Lon Origem'], row['Lat Destino'], row['Lon Destino'])
+                        if row['Lat Origem'] != 0.0 and row['Lat Destino'] != 0.0:
+                            nova_dist = calcular_distancia_linha_reta(row['Lat Origem'], row['Lon Origem'], row['Lat Destino'], row['Lon Destino'], contexto=f"Alo DF Revalidação: {row.get('Origem','')} a {row.get('Destino','')}")
+                            if nova_dist > 0:
+                                return nova_dist
                         return row['Linha Reta']
+                    
                     df_final_alo['Linha Reta'] = df_final_alo.apply(recalculate_haversine_alo, axis=1)
 
                     tempo_alo_segundos = round(time.time() - start_alo_clock, 2)
@@ -2314,11 +2385,11 @@ with tab_analytics:
 
             st.markdown("#### 🚨 Controle de Qualidade de Dados (Auditoria de Falhas Estruturais)")
             with st.container(border=True):
-                df_suspeitas = df_filtrado[(df_filtrado['Score Final Global'] < 70) | (df_filtrado['Status da Rota'] == "Erro") | (df_filtrado['Confianca Origem'] == "BAIXA")]
+                df_suspeitas = df_filtrado[(df_filtrado['Score Final Global'] < 70) | (df_filtrado['Status da Rota'] == "Erro") | (df_filtrado['Confianca Origem'] == "BAIXA") | (df_filtrado['Linha Reta'] == 0.0)]
                 
                 if not df_suspeitas.empty:
                     st.warning(f"Atenção: Foram identificadas {len(df_suspeitas)} rotas requerendo intervenção humana ou revisão de cadastro mestre.")
-                    st.dataframe(df_suspeitas[['Origem', 'Destino', 'Score Final Global', 'Confianca Origem', 'Fonte Geocoding Origem', 'Motivo Roteamento']], use_container_width=True)
+                    st.dataframe(df_suspeitas[['Origem', 'Destino', 'Linha Reta', 'Score Final Global', 'Confianca Origem', 'Fonte Geocoding Origem', 'Motivo Roteamento']], use_container_width=True)
                 else:
                     st.success("🎉 Nenhuma anomalia encontrada. Todas as rotas neste recorte passaram no controle de qualidade geodésica rígida (Score >= 70 e Confiança > Baixa).")
 
@@ -2461,6 +2532,9 @@ with tab_motores:
         health_data.append({"Provedor/Cloud Oficial": api, "Status da Conexão": "🟢 Estável/Online" if dados["falhas"] == 0 else "🔴 Instável/Erros Detectados", "Latência Média Observada": t_med, "Taxa de Falha Sistêmica": tx_err, "Total de Pings Realizados": dados["calls"]})
     
     st.dataframe(pd.DataFrame(health_data), use_container_width=True)
+
+    st.markdown("#### 🌐 Auditoria do Motor Geodésico (Métrica Anti-Zero)")
+    st.dataframe(pd.DataFrame([METRICAS_DISTANCIA]), use_container_width=True)
 
 with tab_auditoria:
     st.info("💡 **Objetivo desta aba:** Transparência Total e Explicabilidade (XAI). Funciona como uma 'Caixa Preta' aberta do sistema. Verifique em detalhes qual algoritmo tomou a decisão para cada coordenada e por que ele escolheu descartar outras opções em caso de empate de proximidade.")
