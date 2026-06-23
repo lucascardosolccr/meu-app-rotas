@@ -2511,57 +2511,71 @@ with tab_classificacao:
     if 'df_cf_master' in st.session_state and not st.session_state['df_cf_master'].empty:
         df_base_class = st.session_state['df_cf_master'].copy()
         
+        st.markdown("#### ⚙️ Parâmetro Base de Classificação")
+        metrica_classificacao = st.radio(
+            "Selecione a métrica que definirá as faixas territoriais:",
+            ["Distância Total (km)", "Distância Média (km)", "Ocorrências (Volume)"],
+            index=0,
+            horizontal=True,
+            help="A métrica selecionada será utilizada para enquadrar os municípios nas faixas configuradas abaixo."
+        )
+        
+        col_metrica = "Distância_Total" if metrica_classificacao == "Distância Total (km)" else "Distância_Media" if metrica_classificacao == "Distância Média (km)" else "Ocorrências"
+
         st.markdown("#### 1️⃣ Editor Dinâmico de Faixas e Divisores")
-        st.caption("Você pode alterar os limites Mínimos e Máximos, mudar os nomes dos Rótulos e alterar o Divisor. A classificação é refeita instantaneamente.")
+        st.caption(f"Configure os limites Mínimos e Máximos considerando a métrica base escolhida: **{metrica_classificacao}**.")
         
         if 'class_bins' not in st.session_state:
             st.session_state['class_bins'] = pd.DataFrame([
-                {"Min": 1, "Max": 20, "Divisor": 50, "Rótulo": "🟢 Operação Normal", "Cor": "#2ECC71"},
-                {"Min": 21, "Max": 100, "Divisor": 150, "Rótulo": "🟠 Alerta Laranja", "Cor": "#F39C12"},
-                {"Min": 101, "Max": 99999, "Divisor": 300, "Rótulo": "🔴 Volume Crítico", "Cor": "#E74C3C"}
+                {"Min": 1, "Max": 500, "Divisor": 500, "Rótulo": "🟢 Operação Normal", "Cor": "#2ECC71"},
+                {"Min": 501, "Max": 2000, "Divisor": 2000, "Rótulo": "🟠 Alerta Laranja", "Cor": "#F39C12"},
+                {"Min": 2001, "Max": 999999, "Divisor": 5000, "Rótulo": "🔴 Volume Crítico", "Cor": "#E74C3C"}
             ])
             
         edited_bins = st.data_editor(st.session_state['class_bins'], num_rows="dynamic", use_container_width=True, hide_index=True)
         
         with st.spinner("Reagrupando e Classificando Malha Territorial..."):
-            # Garantindo conversão robusta para agrupamento geográfico
             df_base_class['Lat Origem'] = pd.to_numeric(df_base_class['Lat Origem'], errors='coerce')
             df_base_class['Lon Origem'] = pd.to_numeric(df_base_class['Lon Origem'], errors='coerce')
+            df_base_class['Distancia'] = pd.to_numeric(df_base_class['Distancia'], errors='coerce').fillna(0)
             
             df_agg_class = df_base_class.groupby(['Municipio Origem', 'UF_Sintetica_Origem', 'Regiao_Sintetica_Origem']).agg(
                 Ocorrências=('Origem', 'count'),
+                Distância_Total=('Distancia', 'sum'),
+                Distância_Media=('Distancia', 'mean'),
                 Lat_Media=('Lat Origem', 'mean'),
                 Lon_Media=('Lon Origem', 'mean')
             ).reset_index()
             
             df_agg_class = df_agg_class[df_agg_class['Municipio Origem'] != "Não Identificado"]
             
-            def classificar_ocorrencia(qtd):
+            def classificar_ocorrencia(valor):
                 for _, row in edited_bins.iterrows():
                     try:
                         vmin, vmax = float(row['Min']), float(row['Max'])
-                        if vmin <= qtd <= vmax:
+                        if vmin <= valor <= vmax:
                             divisor = float(row['Divisor']) if row['Divisor'] > 0 else 1
-                            pct = round((qtd / divisor) * 100, 2)
+                            pct = round((valor / divisor) * 100, 2)
                             return row['Rótulo'], pct, row['Cor']
                     except: pass
                 return "⚪ Não Classificado", 0.0, "#95A5A6"
                 
-            resultados_clas = df_agg_class['Ocorrências'].apply(classificar_ocorrencia)
+            resultados_clas = df_agg_class[col_metrica].apply(classificar_ocorrencia)
             df_agg_class['Rótulo'] = [r[0] for r in resultados_clas]
             df_agg_class['Percentual (%)'] = [r[1] for r in resultados_clas]
             df_agg_class['Cor Hex'] = [r[2] for r in resultados_clas]
             
-            df_agg_class = df_agg_class.sort_values(by='Ocorrências', ascending=False)
+            df_agg_class = df_agg_class.sort_values(by=col_metrica, ascending=False)
             
             st.markdown("#### 2️⃣ Indicadores e Extremos da Malha")
             cc_k1, cc_k2, cc_k3, cc_k4 = st.columns(4)
             cc_k1.metric("Municípios Analisados", df_agg_class.shape[0])
-            cc_k2.metric("Total de Ocorrências (Volume)", df_agg_class['Ocorrências'].sum())
+            valor_total_metrica = df_agg_class[col_metrica].sum() if col_metrica != "Distância_Media" else df_agg_class[col_metrica].mean()
+            cc_k2.metric(f"Total: {metrica_classificacao}", round(valor_total_metrica, 1))
             cc_k3.metric("Percentual Médio Aplicado", f"{round(df_agg_class['Percentual (%)'].mean(), 1)}%")
             if not df_agg_class.empty:
                 m_critico = df_agg_class.iloc[0]['Municipio Origem']
-                v_critico = df_agg_class.iloc[0]['Ocorrências']
+                v_critico = round(df_agg_class.iloc[0][col_metrica], 1)
                 cc_k4.metric("Polo Mais Crítico", f"{m_critico} ({v_critico})")
             
             st.markdown("#### 3️⃣ Ecossistema Visual Temático")
@@ -2570,24 +2584,23 @@ with tab_classificacao:
             
             t_col1, t_col2 = st.columns([60, 40])
             with t_col1:
-                fig_bar_clas = px.bar(df_agg_class.head(20), x='Municipio Origem', y='Ocorrências', color='Rótulo', color_discrete_map=map_colors, title="Top 20 Cidades por Ocorrências", text='Percentual (%)')
+                fig_bar_clas = px.bar(df_agg_class.head(20), x='Municipio Origem', y=col_metrica, color='Rótulo', color_discrete_map=map_colors, title=f"Top 20 Cidades por {metrica_classificacao}", text='Percentual (%)')
                 fig_bar_clas.update_traces(texttemplate='%{text}%', textposition='outside')
                 st.plotly_chart(fig_bar_clas, use_container_width=True)
             with t_col2:
-                fig_pie_clas = px.pie(df_agg_class, names='Rótulo', values='Ocorrências', color='Rótulo', color_discrete_map=map_colors, hole=0.4, title="Distribuição por Nível Crítico")
+                fig_pie_clas = px.pie(df_agg_class, names='Rótulo', values=col_metrica, color='Rótulo', color_discrete_map=map_colors, hole=0.4, title="Distribuição por Nível Crítico")
                 st.plotly_chart(fig_pie_clas, use_container_width=True)
                 
-            fig_tree = px.treemap(df_agg_class, path=[px.Constant("Brasil"), 'Regiao_Sintetica_Origem', 'UF_Sintetica_Origem', 'Municipio Origem'], values='Ocorrências', color='Rótulo', color_discrete_map=map_colors, title="Volumetria Hierárquica por Rótulo Territorial")
+            fig_tree = px.treemap(df_agg_class, path=[px.Constant("Brasil"), 'Regiao_Sintetica_Origem', 'UF_Sintetica_Origem', 'Municipio Origem'], values=col_metrica, color='Rótulo', color_discrete_map=map_colors, title="Volumetria Hierárquica por Rótulo Territorial")
             st.plotly_chart(fig_tree, use_container_width=True)
 
-            # Mapa Scatter Georreferenciado Temático
             df_mapa_clas = df_agg_class.dropna(subset=['Lat_Media', 'Lon_Media'])
             df_mapa_clas = df_mapa_clas[(df_mapa_clas['Lat_Media'] != 0.0) & (df_mapa_clas['Lon_Media'] != 0.0)]
             if not df_mapa_clas.empty:
                 fig_mapa_clas = px.scatter_mapbox(
-                    df_mapa_clas, lat='Lat_Media', lon='Lon_Media', size='Ocorrências', color='Rótulo', color_discrete_map=map_colors,
+                    df_mapa_clas, lat='Lat_Media', lon='Lon_Media', size=col_metrica, color='Rótulo', color_discrete_map=map_colors,
                     size_max=35, zoom=3.5, mapbox_style="carto-darkmatter", hover_name='Municipio Origem',
-                    hover_data={'Lat_Media': False, 'Lon_Media': False, 'UF_Sintetica_Origem': True, 'Ocorrências': True, 'Percentual (%)': True, 'Rótulo': False},
+                    hover_data={'Lat_Media': False, 'Lon_Media': False, 'UF_Sintetica_Origem': True, col_metrica: True, 'Percentual (%)': True, 'Rótulo': False},
                     title="Mapeamento Temático Pós-Classificação"
                 )
                 fig_mapa_clas.update_layout(margin={"r":0,"t":40,"l":0,"b":0}, height=550)
