@@ -1,6 +1,8 @@
 structlog
 prometheus-client
 plotly
+xlsxwriter
+kaleido
 
 streamlit>=1.46.0
 
