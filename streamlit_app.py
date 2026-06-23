@@ -1669,7 +1669,7 @@ def sync_altair_to_widgets():
     check_update('uf', 'widget_uf', 'Todas')
     check_update('status', 'widget_status', 'Todos')
     
-    # Priority for municipality selection (from any chart)
+    # Prioridade para seleção de município de qualquer gráfico
     if sel['mun'] != prev_sel['mun']:
         st.session_state['widget_mun'] = sel['mun'][0] if sel['mun'] else 'Todos'
     elif sel['linha_mun'] != prev_sel['linha_mun']:
@@ -1713,6 +1713,58 @@ def renderizar_indicador_filtros(brush_active):
         
     if active_html:
         st.markdown(f"<div style='background:#1E232F; padding:15px; border-radius:8px; border: 1px solid #3B82F6; margin-bottom:15px'><b>🔍 Filtros Ativos no Dashboard:</b><br><br> {active_html}</div>", unsafe_allow_html=True)
+
+# ==============================================================================
+# GLOBAL CROSS-FILTER SETUP
+# ==============================================================================
+# Processamento de df_cf na raiz para disponibilizar a todas as abas dinamicamente
+df_cf_global = None
+
+if 'df_processado' in st.session_state:
+    sel_global = extrair_selecoes_altair()
+    
+    if 'widget_regiao' not in st.session_state: st.session_state['widget_regiao'] = 'Todas'
+    if 'widget_uf' not in st.session_state: st.session_state['widget_uf'] = 'Todas'
+    if 'widget_mun' not in st.session_state: st.session_state['widget_mun'] = 'Todos'
+    if 'widget_status' not in st.session_state: st.session_state['widget_status'] = 'Todos'
+    if 'widget_fonte' not in st.session_state: st.session_state['widget_fonte'] = 'Todas'
+
+    sync_altair_to_widgets()
+    
+    df_kpi_global = st.session_state['df_processado'].copy()
+    df_kpi_global['Distancia'] = pd.to_numeric(df_kpi_global['Distancia'], errors='coerce').fillna(0)
+    df_kpi_global['Linha Reta'] = pd.to_numeric(df_kpi_global['Linha Reta'], errors='coerce').fillna(0)
+    df_kpi_global['Tempo_Minutos'] = df_kpi_global['Tempo'].apply(parse_tempo_minutos)
+    df_kpi_global['Tempo_Horas'] = df_kpi_global['Tempo_Minutos'] / 60.0
+    
+    MAPA_ESTADOS_FULL = {
+        "ACRE": "AC", "ALAGOAS": "AL", "AMAPA": "AP", "AMAZONAS": "AM", "BAHIA": "BA", "CEARA": "CE", "DISTRITO FEDERAL": "DF", 
+        "ESPIRITO SANTO": "ES", "GOIAS": "GO", "MARANHAO": "MA", "MATO GROSSO": "MT", "MATO GROSSO DO SUL": "MS", "MINAS GERAIS": "MG", 
+        "PARA": "PA", "PARAIBA": "PB", "PARANA": "PR", "PERNAMBUCO": "PE", "PIAUI": "PI", "RIO DE JANEIRO": "RJ", "RIO GRANDE DO NORTE": "RN",
+        "RIO GRANDE DO SUL": "RS", "RONDONIA": "RO", "RORAIMA": "RR", "SANTA CATARINA": "SC", "SAO PAULO": "SP", "SERGIPE": "SE", "TOCANTINS": "TO"
+    }
+
+    REGIOES_BRASIL = {
+        "Norte": ["AC", "AP", "AM", "PA", "RO", "RR", "TO"], "Nordeste": ["AL", "BA", "CE", "MA", "PB", "PE", "PI", "RN", "SE"],
+        "Centro-Oeste": ["DF", "GO", "MT", "MS"], "Sudeste": ["ES", "MG", "RJ", "SP"], "Sul": ["PR", "RS", "SC"]
+    }
+    
+    def extrair_uf_precisa_global(endereco):
+        if not isinstance(endereco, str): return "Indefinido"
+        end_upper = unidecode(endereco.upper())
+        for nome, sigla in MAPA_ESTADOS_FULL.items():
+            if f" {nome} " in f" {end_upper} " or end_upper.endswith(nome) or f", {nome}," in end_upper: return sigla
+        padrao_uf = r'\b(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\b'
+        partes = [p.strip() for p in end_upper.split(',')]
+        for p in reversed(partes):
+            match = re.search(padrao_uf, p)
+            if match: return match.group(1)
+        return "Indefinido"
+        
+    df_kpi_global['UF_Sintetica_Origem'] = df_kpi_global['Endereco Oficial Origem'].apply(extrair_uf_precisa_global)
+    df_kpi_global['Regiao_Sintetica_Origem'] = df_kpi_global['UF_Sintetica_Origem'].apply(lambda uf: next((regiao for regiao, ufs in REGIOES_BRASIL.items() if uf in ufs), "Indefinido"))
+    
+    df_cf_global = aplicar_filtro_global(df_kpi_global, sel_global)
 
 # ==============================================================================
 # INTERFACE STREAMLIT COM ENGINE DE SIDEBAR MANUAL E ABAS DE AUDITORIA
@@ -1820,8 +1872,8 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"Erro ao tentar transmitir a solicitação via SMTP: {str(e)}")
 
-tab_individual, tab_processamento, tab_alocacao, tab_analytics, tab_enciclopedia, tab_motores, tab_auditoria = st.tabs([
-    "📍 Geocodificação Rápida", "⚙️ Processamento em Lote", "📦 Alocação de Hubs", "📊 Enterprise Analytics", "📚 Enciclopédia Core", "🔌 Monitor de APIs", "🕵️ Trilha de Auditoria"
+tab_individual, tab_processamento, tab_alocacao, tab_analytics, tab_calculadora, tab_enciclopedia, tab_motores, tab_auditoria = st.tabs([
+    "📍 Geocodificação Rápida", "⚙️ Processamento em Lote", "📦 Alocação de Hubs", "📊 Enterprise Analytics", "🧮 Calculadora Analítica", "📚 Enciclopédia Core", "🔌 Monitor de APIs", "🕵️ Trilha de Auditoria"
 ])
 
 with tab_individual:
@@ -2206,67 +2258,22 @@ with tab_analytics:
                     del st.session_state[k]
             st.rerun()
 
-    if 'df_processado' in st.session_state:
-        # Extração Estável de Filtros (Sem Chaves Dinâmicas)
-        sel = extrair_selecoes_altair()
-        
-        # Inicialização Segura das Chaves de Filtro Bidirecional
-        if 'widget_regiao' not in st.session_state: st.session_state['widget_regiao'] = 'Todas'
-        if 'widget_uf' not in st.session_state: st.session_state['widget_uf'] = 'Todas'
-        if 'widget_mun' not in st.session_state: st.session_state['widget_mun'] = 'Todos'
-        if 'widget_status' not in st.session_state: st.session_state['widget_status'] = 'Todos'
-        if 'widget_fonte' not in st.session_state: st.session_state['widget_fonte'] = 'Todas'
-
-        sync_altair_to_widgets()
-        
-        df_kpi = st.session_state['df_processado'].copy()
-        
-        df_kpi['Distancia'] = pd.to_numeric(df_kpi['Distancia'], errors='coerce').fillna(0)
-        df_kpi['Linha Reta'] = pd.to_numeric(df_kpi['Linha Reta'], errors='coerce').fillna(0)
-        df_kpi['Tempo_Minutos'] = df_kpi['Tempo'].apply(parse_tempo_minutos)
-        df_kpi['Tempo_Horas'] = df_kpi['Tempo_Minutos'] / 60.0
-        
-        MAPA_ESTADOS_FULL = {
-            "ACRE": "AC", "ALAGOAS": "AL", "AMAPA": "AP", "AMAZONAS": "AM", "BAHIA": "BA", "CEARA": "CE", "DISTRITO FEDERAL": "DF", 
-            "ESPIRITO SANTO": "ES", "GOIAS": "GO", "MARANHAO": "MA", "MATO GROSSO": "MT", "MATO GROSSO DO SUL": "MS", "MINAS GERAIS": "MG", 
-            "PARA": "PA", "PARAIBA": "PB", "PARANA": "PR", "PERNAMBUCO": "PE", "PIAUI": "PI", "RIO DE JANEIRO": "RJ", "RIO GRANDE DO NORTE": "RN",
-            "RIO GRANDE DO SUL": "RS", "RONDONIA": "RO", "RORAIMA": "RR", "SANTA CATARINA": "SC", "SAO PAULO": "SP", "SERGIPE": "SE", "TOCANTINS": "TO"
-        }
-
-        REGIOES_BRASIL = {
-            "Norte": ["AC", "AP", "AM", "PA", "RO", "RR", "TO"], "Nordeste": ["AL", "BA", "CE", "MA", "PB", "PE", "PI", "RN", "SE"],
-            "Centro-Oeste": ["DF", "GO", "MT", "MS"], "Sudeste": ["ES", "MG", "RJ", "SP"], "Sul": ["PR", "RS", "SC"]
-        }
-        
-        def extrair_uf_precisa(endereco):
-            if not isinstance(endereco, str): return "Indefinido"
-            end_upper = unidecode(endereco.upper())
-            for nome, sigla in MAPA_ESTADOS_FULL.items():
-                if f" {nome} " in f" {end_upper} " or end_upper.endswith(nome) or f", {nome}," in end_upper: return sigla
-            padrao_uf = r'\b(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\b'
-            partes = [p.strip() for p in end_upper.split(',')]
-            for p in reversed(partes):
-                match = re.search(padrao_uf, p)
-                if match: return match.group(1)
-            return "Indefinido"
-            
-        df_kpi['UF_Sintetica_Origem'] = df_kpi['Endereco Oficial Origem'].apply(extrair_uf_precisa)
-        df_kpi['Regiao_Sintetica_Origem'] = df_kpi['UF_Sintetica_Origem'].apply(lambda uf: next((regiao for regiao, ufs in REGIOES_BRASIL.items() if uf in ufs), "Indefinido"))
+    if df_cf_global is not None:
         
         # Integridade das listas de Selectbox
-        lista_regioes = ["Todas"] + sorted([x for x in df_kpi['Regiao_Sintetica_Origem'].unique() if pd.notna(x)])
+        lista_regioes = ["Todas"] + sorted([x for x in df_kpi_global['Regiao_Sintetica_Origem'].unique() if pd.notna(x)])
         if st.session_state['widget_regiao'] not in lista_regioes: st.session_state['widget_regiao'] = 'Todas'
         
-        lista_ufs = ["Todas"] + sorted([x for x in df_kpi['UF_Sintetica_Origem'].unique() if pd.notna(x)])
+        lista_ufs = ["Todas"] + sorted([x for x in df_kpi_global['UF_Sintetica_Origem'].unique() if pd.notna(x)])
         if st.session_state['widget_uf'] not in lista_ufs: st.session_state['widget_uf'] = 'Todas'
         
-        lista_municipios = ["Todos"] + sorted([str(x) for x in df_kpi['Municipio Origem'].unique() if pd.notna(x)])
+        lista_municipios = ["Todos"] + sorted([str(x) for x in df_kpi_global['Municipio Origem'].unique() if pd.notna(x)])
         if st.session_state['widget_mun'] not in lista_municipios: st.session_state['widget_mun'] = 'Todos'
         
-        lista_status = ["Todos"] + sorted([str(x) for x in df_kpi['Status da Rota'].unique() if pd.notna(x)])
+        lista_status = ["Todos"] + sorted([str(x) for x in df_kpi_global['Status da Rota'].unique() if pd.notna(x)])
         if st.session_state['widget_status'] not in lista_status: st.session_state['widget_status'] = 'Todos'
         
-        lista_fontes = ["Todas"] + sorted([str(x) for x in df_kpi['Fonte Geocoding Origem'].unique() if pd.notna(x)])
+        lista_fontes = ["Todas"] + sorted([str(x) for x in df_kpi_global['Fonte Geocoding Origem'].unique() if pd.notna(x)])
         if st.session_state['widget_fonte'] not in lista_fontes: st.session_state['widget_fonte'] = 'Todas'
         
         st.markdown("#### 🎛️ Painel de Controle de Filtros Avançados (Bidirecional)")
@@ -2281,33 +2288,25 @@ with tab_analytics:
             
             col_f5, col_f6, col_f7 = st.columns(3)
             
-            min_dist_val, max_dist_val = float(df_kpi['Distancia'].min()), float(df_kpi['Distancia'].max())
+            min_dist_val, max_dist_val = float(df_kpi_global['Distancia'].min()), float(df_kpi_global['Distancia'].max())
             if max_dist_val <= min_dist_val: max_dist_val = min_dist_val + 1.0
             dist_range = col_f5.slider("Faixa de Distância Viária (km)", min_value=0.0, max_value=max_dist_val, value=(0.0, max_dist_val))
             
-            min_time_val, max_time_val = float(df_kpi['Tempo_Horas'].min()), float(df_kpi['Tempo_Horas'].max())
+            min_time_val, max_time_val = float(df_kpi_global['Tempo_Horas'].min()), float(df_kpi_global['Tempo_Horas'].max())
             if max_time_val <= min_time_val: max_time_val = min_time_val + 1.0
             time_range = col_f6.slider("Faixa de Tempo Estimado (Horas)", min_value=0.0, max_value=max_time_val, value=(0.0, max_time_val))
             
-            min_score_val, max_score_val = float(df_kpi['Score Final Global'].min()), float(df_kpi['Score Final Global'].max())
+            min_score_val, max_score_val = float(df_kpi_global['Score Final Global'].min()), float(df_kpi_global['Score Final Global'].max())
             if max_score_val <= min_score_val: max_score_val = min_score_val + 1.0
             score_range = col_f7.slider("Score de Integridade Geodésica", min_value=0.0, max_value=100.0, value=(min_score_val, 100.0))
 
-        # Motor de Filtragem Global Centralizado
-        df_cf = aplicar_filtro_global(df_kpi, extrair_selecoes_altair())
-        
-        # Filtros de Slider
+        # Re-aplicando o filtro final da tela após as seleções de Range
+        df_cf = df_cf_global.copy()
         df_cf = df_cf[(df_cf['Distancia'] >= dist_range[0]) & (df_cf['Distancia'] <= dist_range[1])]
         df_cf = df_cf[(df_cf['Tempo_Horas'] >= time_range[0]) & (df_cf['Tempo_Horas'] <= time_range[1])]
         df_cf = df_cf[(df_cf['Score Final Global'] >= score_range[0]) & (df_cf['Score Final Global'] <= score_range[1])]
         
-        has_any_filter = bool(regiao_selecionada != "Todas" or uf_selecionada != "Todas" or mun_selecionado != "Todos" or status_selecionado != "Todos" or fonte_selecionada != "Todas" or extrair_selecoes_altair()['brush'])
-        if has_any_filter:
-            df_kpi['_is_selected'] = np.where(df_kpi.index.isin(df_cf.index), 1, 0)
-        else:
-            df_kpi['_is_selected'] = 1
-
-        renderizar_indicador_filtros(extrair_selecoes_altair()['brush'])
+        renderizar_indicador_filtros(sel_global['brush'])
 
         if df_cf.empty:
             st.warning("A combinação de filtros cruzados selecionada não retornou nenhum registro neste lote. Limpe os filtros.")
@@ -2337,7 +2336,7 @@ with tab_analytics:
                     
                     col_k7, col_k8, col_k9, col_k10, col_k11, col_k12 = st.columns(6)
                     muns_atendidos = df_cf['Municipio Destino'].nunique()
-                    ufs_atendidas = df_cf['Endereco Oficial Destino'].apply(extrair_uf_precisa).nunique()
+                    ufs_atendidas = df_cf['Endereco Oficial Destino'].apply(extrair_uf_precisa_global).nunique()
                     rotas_balsa = len(df_cf[df_cf['Balsas'] == 'Sim'])
                     taxa_sucesso = round((len(df_sucesso) / len(df_cf)) * 100, 1) if len(df_cf) > 0 else 0
                     
@@ -2350,7 +2349,6 @@ with tab_analytics:
                     
             with tab_kpi_regional:
                 with st.container(border=True):
-                    # Agregação Regional obedecendo o cross-filter (df_cf)
                     df_regioes = df_cf.groupby('Regiao_Sintetica_Origem').agg(
                         Rotas=('Origem', 'count'),
                         Dist_Media=('Distancia', 'mean'),
@@ -2377,7 +2375,7 @@ with tab_analytics:
                         st.info("Não há dados regionais válidos mapeados neste lote/recorte.")
             
             st.markdown("#### 📈 Análise Operacional e Motor Interativo de Filtros")
-            st.caption("✨ **DICA DE OURO INTERATIVA:** Clique nos gráficos abaixo para segmentar automaticamente todo o ecossistema analítico.")
+            st.caption("✨ **DICA DE OURO INTERATIVA:** Clique nos gráficos abaixo para segmentar automaticamente todo o ecossistema analítico. O comportamento de Drill-Down é estrito ao DataFrame filtrado.")
             
             with st.container(border=True):
                 click_reg = alt.selection_point(fields=['Regiao_Sintetica_Origem'], name='Reg')
@@ -2388,48 +2386,35 @@ with tab_analytics:
                 click_scatter = alt.selection_point(fields=['Municipio Origem'], name='ScatterMun')
                 brush = alt.selection_interval(name='Brush')
 
-                base_chart = alt.Chart(df_kpi)
+                # Base Chart usando df_cf garante que os gráficos só plotam a seleção estrita, obedecendo regras de BI corporativo.
+                base_chart = alt.Chart(df_cf)
 
                 chart_reg = base_chart.mark_bar(cornerRadiusEnd=4).encode(
                     x=alt.X('count():Q', title='Volume de Rotas', axis=alt.Axis(grid=False)),
                     y=alt.Y('Regiao_Sintetica_Origem:N', sort='-x', title='Região'),
                     color=alt.value('#60A5FA'),
-                    opacity=alt.condition(click_reg & (alt.datum._is_selected == 1), alt.value(1.0), alt.value(0.2)),
                     tooltip=['Regiao_Sintetica_Origem', 'count()']
                 ).add_params(click_reg).properties(height=320, title="Volume de Demanda por Região")
 
                 chart_uf = base_chart.mark_arc(innerRadius=60).encode(
                     theta=alt.Theta("count():Q", stack=True),
                     color=alt.Color("UF_Sintetica_Origem:N", legend=alt.Legend(title="Estados (UF)", orient='bottom')),
-                    opacity=alt.condition(click_uf & (alt.datum._is_selected == 1), alt.value(1.0), alt.value(0.2)),
                     tooltip=['UF_Sintetica_Origem', 'count()']
                 ).add_params(click_uf).properties(height=320, title="Market Share por Estado")
 
-                status_palette = alt.Scale(domain=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro'], range=['#2ECC71', '#3498DB', '#F1C40F', '#E67E22', '#E74C3C'])
-                chart_status = base_chart.mark_bar(cornerRadiusEnd=4).encode(
-                    x=alt.X('Status da Rota:N', title='Status de Confiança', sort=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro']),
-                    y=alt.Y('count():Q', title='Volume'),
-                    color=alt.Color('Status da Rota:N', scale=status_palette, legend=None),
-                    opacity=alt.condition(click_status & (alt.datum._is_selected == 1), alt.value(1.0), alt.value(0.2)),
-                    tooltip=['Status da Rota', 'count()']
-                ).add_params(click_status).properties(height=320, title="Monitor de Qualidade Geodésica")
-
-                # Melhoria 05 - Evolução da Distância em Linha Reta por Município
-                df_linha = df_kpi.groupby('Municipio Origem').agg(
+                df_linha = df_cf.groupby('Municipio Origem').agg(
                     Média=('Linha Reta', 'mean'),
                     Mediana=('Linha Reta', 'median'),
                     Minimo=('Linha Reta', 'min'),
                     Maximo=('Linha Reta', 'max'),
                     Desvio_Padrao=('Linha Reta', 'std'),
-                    Qtd=('Origem', 'count'),
-                    _is_selected=('_is_selected', 'max')
+                    Qtd=('Origem', 'count')
                 ).reset_index()
                 df_linha['Desvio_Padrao'] = df_linha['Desvio_Padrao'].fillna(0)
                 
                 chart_lr_mun = alt.Chart(df_linha).mark_line(point=True, color='#10B981').encode(
                     x=alt.X('Municipio Origem:N', title='Município', sort='-y'),
                     y=alt.Y('Média:Q', title='Distância Média (km)'),
-                    opacity=alt.condition(click_linha & (alt.datum._is_selected == 1), alt.value(1.0), alt.value(0.2)),
                     tooltip=[
                         alt.Tooltip('Municipio Origem:N', title='Município'),
                         alt.Tooltip('Média:Q', title='Média (km)', format='.2f'),
@@ -2441,12 +2426,11 @@ with tab_analytics:
                     ]
                 ).add_params(click_linha).properties(height=320, title="Evolução da Qualidade Geodésica por Município")
 
-                top_muns = df_kpi['Municipio Origem'].value_counts().head(15).index.tolist()
+                top_muns = df_cf['Municipio Origem'].value_counts().head(15).index.tolist()
                 bar_base = base_chart.transform_filter(alt.FieldOneOfPredicate(field='Municipio Origem', oneOf=top_muns))
                 bar_mun = bar_base.mark_bar(color='#3B82F6', cornerRadiusEnd=4).encode(
                     x=alt.X('count():Q', title='Volume de Rotas', axis=alt.Axis(tickMinStep=1)),
                     y=alt.Y('Municipio Origem:N', title='Município', sort=alt.EncodingSortField(field='Municipio Origem', op='count', order='descending')),
-                    opacity=alt.condition(click_mun & (alt.datum._is_selected == 1), alt.value(1.0), alt.value(0.2)),
                     tooltip=['Municipio Origem', 'count()']
                 ).add_params(click_mun)
                 text_bar = bar_base.mark_text(align='right', dx=-5, color='white', fontWeight='bold').encode(
@@ -2454,11 +2438,12 @@ with tab_analytics:
                 )
                 chart_muns = alt.layer(bar_mun, text_bar).properties(height=350, title="Top 15 Municípios de Despacho Operacional")
 
+                status_palette = alt.Scale(domain=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro'], range=['#2ECC71', '#3498DB', '#F1C40F', '#E67E22', '#E74C3C'])
                 chart_scatter = base_chart.mark_circle(size=80).encode(
                     x=alt.X('Distancia:Q', title='Distância Viária Oficial (km)', scale=alt.Scale(zero=False, nice=True, padding=10)),
                     y=alt.Y('Tempo_Horas:Q', title='Tempo Estimado (Horas)', scale=alt.Scale(zero=False, nice=True, padding=10)),
                     color=alt.Color('Status da Rota:N', scale=status_palette),
-                    opacity=alt.condition(brush & click_scatter & (alt.datum._is_selected == 1), alt.value(0.9), alt.value(0.1)),
+                    opacity=alt.condition(brush, alt.value(0.9), alt.value(0.1)),
                     tooltip=['Municipio Origem', 'Origem', 'Destino', 'Distancia', 'Tempo_Horas', 'Status da Rota', 'Score Final Global']
                 ).add_params(brush, click_scatter).properties(height=350, title="Matriz de Dispersão e Identificação de Outliers")
 
@@ -2466,15 +2451,13 @@ with tab_analytics:
                 col_p1, col_p2, col_p3 = st.columns(3)
                 col_p1.altair_chart(chart_reg, use_container_width=True, on_select="rerun", key="dash_reg")
                 col_p2.altair_chart(chart_uf, use_container_width=True, on_select="rerun", key="dash_uf")
-                col_p3.altair_chart(chart_status, use_container_width=True, on_select="rerun", key="dash_status")
+                col_p3.altair_chart(chart_lr_mun, use_container_width=True, on_select="rerun", key="dash_lr")
 
                 st.divider()
                 
                 col_p4, col_p5 = st.columns(2)
-                col_p4.altair_chart(chart_lr_mun, use_container_width=True, on_select="rerun", key="dash_lr")
-                col_p5.altair_chart(chart_muns, use_container_width=True, on_select="rerun", key="dash_mun")
-
-                st.altair_chart(chart_scatter, use_container_width=True, on_select="rerun", key="dash_scatter")
+                col_p4.altair_chart(chart_muns, use_container_width=True, on_select="rerun", key="dash_mun")
+                col_p5.altair_chart(chart_scatter, use_container_width=True, on_select="rerun", key="dash_scatter")
 
             st.markdown("#### 🗺️ Torre de Controle Espacial (Heatmap Dinâmico)")
             with st.container(border=True):
@@ -2579,6 +2562,77 @@ with tab_analytics:
 
     else:
         st.warning("Aguardando processamento de planilha corporativa na aba de Lotes (⚙️) para ativar e renderizar o Enterprise Data Analytics Engine.")
+
+with tab_calculadora:
+    st.info("💡 **Objetivo desta aba:** Motor Dinâmico de Pivotamento. Realize análises estatísticas profundas sobre o dataset estritamente filtrado na sua visualização principal.")
+    st.markdown("### 🧮 Calculadora Analítica Universal")
+    
+    if 'df_processado' in st.session_state and df_cf_global is not None:
+        
+        with st.container(border=True):
+            cols_calc1, cols_calc2, cols_calc3 = st.columns(3)
+            
+            colunas_numericas = ['Distancia', 'Linha Reta', 'Tempo_Horas', 'Tempo_Minutos', 'Score Final Global', 'Score Num Origem', 'Score Num Destino']
+            colunas_categoricas = ['Nenhum', 'Regiao_Sintetica_Origem', 'UF_Sintetica_Origem', 'Municipio Origem', 'Status da Rota', 'Balsas', 'Fonte Geocoding Origem', 'Fonte da Rota', 'Confianca Origem']
+            
+            campo_calc = cols_calc1.selectbox("1. Métrica Base (Eixo Y)", colunas_numericas, help="O valor matemático numérico sobre o qual a operação atuará.")
+            operacao_calc = cols_calc2.selectbox("2. Operação Estatística", ["Contagem", "Contagem Única", "Soma", "Média", "Min", "Max", "Mediana", "Moda", "Desvio Padrão", "Variância", "Percentil 25", "Percentil 50", "Percentil 75"])
+            agrupamento_calc = cols_calc3.selectbox("3. Fator de Agrupamento (Eixo X)", colunas_categoricas, help="Ao agrupar, o sistema gera o gráfico dinâmico e o peso percentual na amostra filtrada.")
+            
+            if st.button("▶ Processar Lógica Analítica", type="primary", use_container_width=True):
+                df_calc = df_cf_global.copy()
+                
+                def aplicar_operacao(series, op):
+                    if op == "Contagem": return series.count()
+                    if op == "Contagem Única": return series.nunique()
+                    if op == "Soma": return series.sum()
+                    if op == "Média": return series.mean()
+                    if op == "Min": return series.min()
+                    if op == "Max": return series.max()
+                    if op == "Mediana": return series.median()
+                    if op == "Desvio Padrão": return series.std()
+                    if op == "Variância": return series.var()
+                    if op == "Percentil 25": return series.quantile(0.25)
+                    if op == "Percentil 50": return series.quantile(0.50)
+                    if op == "Percentil 75": return series.quantile(0.75)
+                    if op == "Moda":
+                        m = series.mode()
+                        return m.iloc[0] if not m.empty else np.nan
+
+                if agrupamento_calc == "Nenhum":
+                    resultado_unico = aplicar_operacao(df_calc[campo_calc], operacao_calc)
+                    st.metric(label=f"📊 {operacao_calc} Global de {campo_calc}", value=f"{resultado_unico:,.2f}")
+                else:
+                    df_grouped = df_calc.groupby(agrupamento_calc)[campo_calc].apply(lambda x: aplicar_operacao(x, operacao_calc)).reset_index(name='Resultado Consolidado')
+                    df_grouped = df_grouped.sort_values(by='Resultado Consolidado', ascending=False)
+                    
+                    if operacao_calc in ["Soma", "Contagem"]:
+                        soma_total = df_grouped['Resultado Consolidado'].sum()
+                        if soma_total != 0:
+                            df_grouped['% Share (Participação)'] = (df_grouped['Resultado Consolidado'] / soma_total) * 100
+                            df_grouped['% Acumulado'] = df_grouped['% Share (Participação)'].cumsum()
+                            
+                    col_res1, col_res2 = st.columns([40, 60])
+                    
+                    with col_res1:
+                        st.write("Tabela de Resultados")
+                        st.dataframe(df_grouped, use_container_width=True, hide_index=True)
+                        
+                    with col_res2:
+                        fig_calc = px.bar(
+                            df_grouped, 
+                            x=agrupamento_calc, 
+                            y='Resultado Consolidado', 
+                            text='Resultado Consolidado', 
+                            title=f"Dashboard Dinâmico: {operacao_calc} de {campo_calc} por {agrupamento_calc}", 
+                            color='Resultado Consolidado', 
+                            color_continuous_scale=px.colors.sequential.Blues
+                        )
+                        fig_calc.update_traces(texttemplate='%{text:.2s}', textposition='outside')
+                        fig_calc.update_layout(height=400)
+                        st.plotly_chart(fig_calc, use_container_width=True)
+    else:
+        st.warning("Motor Pivot inoperante: Aguardando processamento de Lote Mestre e/ou carregamento do Dataframe Base.")
 
 with tab_enciclopedia:
     st.info("💡 **Objetivo desta aba:** Servir como o repositório mestre de conhecimento. Esta enciclopédia detalha toda a jornada técnica de um dado dentro do aplicativo, abordando 100% das funcionalidades corporativas, desde a limpeza gramatical até a validação geométrica extrema anti-colisão.")
