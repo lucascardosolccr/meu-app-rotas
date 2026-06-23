@@ -54,7 +54,8 @@ METRICAS_DISTANCIA = {
     "fallback_haversine": 0,
     "correcoes_automaticas": 0,
     "falhas_criticas": 0,
-    "cache_unpoisoned": 0
+    "cache_unpoisoned": 0,
+    "barreira_territorial": 0
 }
 
 # ==============================================================================
@@ -216,10 +217,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v54" not in st.session_state:
+if "cache_limpo_v55" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v54"] = True
+    st.session_state["cache_limpo_v55"] = True
     st.session_state['dash_key'] = 0
 
 def realizar_manutencao_logs_google():
@@ -606,8 +607,8 @@ def validar_coordenada_brasil(lat, lon):
 
 def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
     """
-    Motor Geodésico Robusto com 4 Camadas.
-    Garante que coordenadas válidas e distintas nunca retornem 0.0 km.
+    Motor Geodésico Robusto com 5 Camadas (Incluindo Bounding Box Territorial).
+    Garante que coordenadas válidas e distintas nunca retornem 0.0 km e não estrapolem os limites do Brasil.
     Retorna Tuple(distancia_float, status_linha_reta_string)
     """
     global METRICAS_DISTANCIA
@@ -615,6 +616,8 @@ def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
     
     try:
         lat1, lon1, lat2, lon2 = float(lat1), float(lon1), float(lat2), float(lon2)
+        dist_final = 0.0
+        status_final = ""
         
         # Cenário 1: Falha Geográfica Real (Uma das pontas não foi geocodificada)
         if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0: 
@@ -625,45 +628,55 @@ def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
             return 0.0, "Calculada Normalmente (Pontos Coincidentes)"
             
         # CAMADA 1: GeographicLib (Mais preciso, modelo WGS-84)
+        calculado_sucesso = False
         if GEOGRAPHICLIB_DISPONIVEL:
             try:
                 dist_metros = Geodesic.WGS84.Inverse(lat1, lon1, lat2, lon2)['s12']
                 dist_km = dist_metros / 1000.0
                 if dist_km > 0:
                     METRICAS_DISTANCIA["sucesso_geographiclib"] += 1
-                    return round(dist_km, 2), "Calculada via GeographicLib WGS-84"
+                    dist_final, status_final = round(dist_km, 2), "Calculada via GeographicLib WGS-84"
+                    calculado_sucesso = True
             except Exception as e:
                 logger.warning(f"GeographicLib falhou: {e}")
                 
         # CAMADA 2: Geopy Geodesic
-        if GEOPY_DISPONIVEL:
+        if not calculado_sucesso and GEOPY_DISPONIVEL:
             try:
                 dist_km = geodesic((lat1, lon1), (lat2, lon2)).km
                 if dist_km > 0:
                     METRICAS_DISTANCIA["sucesso_geopy"] += 1
-                    return round(dist_km, 2), "Calculada via Geopy Geodesic"
+                    dist_final, status_final = round(dist_km, 2), "Calculada via Geopy Geodesic"
+                    calculado_sucesso = True
             except Exception as e:
                 logger.warning(f"Geopy falhou: {e}")
 
         # CAMADA 3: Fallback Matemático Automático (Haversine Manual)
-        lat1_r, lon1_r, lat2_r, lon2_r = map(math.radians, [lat1, lon1, lat2, lon2])
-        dlat = lat2_r - lat1_r
-        dlon = lon2_r - lon1_r
-        a = math.sin(dlat / 2)**2 + math.cos(lat1_r) * math.cos(lat2_r) * math.sin(dlon / 2)**2
-        c = 2 * math.asin(math.sqrt(a))
-        dist_haversine = 6371.0 * c
-        
-        # CAMADA 4: Validação Estrita Anti-Zero
-        if dist_haversine >= 0.01:
-            METRICAS_DISTANCIA["fallback_haversine"] += 1
-            return round(dist_haversine, 2), "Calculada via Fallback Haversine"
-        else:
-            # Distância calculada foi ínfima ou zero para coordenadas numéricas diferentes (anomalia de float/rounding)
-            logger.error(f"FALHA CRÍTICA PREVENIDA: Distância zerada para pontos diferentes. {lat1},{lon1} a {lat2},{lon2} | Ctx: {contexto}")
-            METRICAS_DISTANCIA["correcoes_automaticas"] += 1
-            # Fallback seguro fixo (distância microscópica mínima) em vez de zerar indevidamente
-            return 0.01, "Calculada após reprocessamento (Correção Anti-Zero)"
+        if not calculado_sucesso:
+            lat1_r, lon1_r, lat2_r, lon2_r = map(math.radians, [lat1, lon1, lat2, lon2])
+            dlat = lat2_r - lat1_r
+            dlon = lon2_r - lon1_r
+            a = math.sin(dlat / 2)**2 + math.cos(lat1_r) * math.cos(lat2_r) * math.sin(dlon / 2)**2
+            c = 2 * math.asin(math.sqrt(a))
+            dist_haversine = 6371.0 * c
             
+            # CAMADA 4: Validação Estrita Anti-Zero
+            if dist_haversine >= 0.01:
+                METRICAS_DISTANCIA["fallback_haversine"] += 1
+                dist_final, status_final = round(dist_haversine, 2), "Calculada via Fallback Haversine"
+            else:
+                logger.error(f"FALHA CRÍTICA PREVENIDA: Distância zerada para pontos diferentes. {lat1},{lon1} a {lat2},{lon2} | Ctx: {contexto}")
+                METRICAS_DISTANCIA["correcoes_automaticas"] += 1
+                dist_final, status_final = 0.01, "Calculada após reprocessamento (Correção Anti-Zero)"
+
+        # CAMADA 5: Validação Territorial (Bounding Box Brasil Máximo ~ 4500km aéreo)
+        if dist_final > 5000.0:
+            logger.error(f"ANOMALIA TERRITORIAL: Distância de {dist_final}km excede fisicamente os limites do Brasil. Ctx: {contexto}")
+            METRICAS_DISTANCIA["barreira_territorial"] += 1
+            return 0.01, "Falha de Bounding Box (Distância Transcontinental Impossível)"
+
+        return dist_final, status_final
+
     except Exception as e:
         logger.error(f"Erro fatal no motor de distância geodésica ({contexto}): {e}")
         METRICAS_DISTANCIA["falhas_criticas"] += 1
@@ -1391,7 +1404,6 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     
     chave_rota_cache = f"ROTA_V54_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     
-    # UNPOISONING DE CACHE (Correção Definitiva da Causa Raiz)
     if chave_rota_cache in cache_rotas: 
         ret_cache = cache_rotas[chave_rota_cache]
         if len(ret_cache) >= 30:
@@ -1399,7 +1411,6 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
             lat_o_cache, lon_o_cache = ret_cache[19], ret_cache[20]
             lat_d_cache, lon_d_cache = ret_cache[21], ret_cache[22]
             
-            # Identificando o "Cache Poisoning" onde a distância foi zerada indevidamente no passado
             if dist_cache == 0.0 and lat_o_cache != 0.0 and lat_d_cache != 0.0 and (lat_o_cache != lat_d_cache or lon_o_cache != lon_d_cache):
                 global METRICAS_DISTANCIA
                 METRICAS_DISTANCIA["cache_unpoisoned"] += 1
@@ -1407,7 +1418,6 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
                 nova_dist, novo_status = calcular_distancia_linha_reta(lat_o_cache, lon_o_cache, lat_d_cache, lon_d_cache, contexto="Unpoisoning de Cache")
                 retorno_mutavel = list(ret_cache)
                 retorno_mutavel[4] = nova_dist
-                # Garante tamanho 31 (nova coluna)
                 if len(retorno_mutavel) == 30:
                     retorno_mutavel.append(novo_status)
                 else:
@@ -1416,7 +1426,6 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
                 cache_rotas.set(chave_rota_cache, retorno_novo, expire=2592000)
                 return retorno_novo
                 
-            # Adiciona fallback para caches que não tem o item 30 ainda (Status Linha Reta)
             if len(ret_cache) == 30:
                 return (*ret_cache, "Calculada via Cache Hit Estável")
             return ret_cache
@@ -1664,71 +1673,73 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("📖 Documentação Corporativa", help="Diretrizes estruturais, matemáticas e logísticas do motor corporativo.")
+    st.header("📖 Documentação Corporativa", help="Diretrizes estruturais, matemáticas e logísticas completas do motor corporativo.")
     
-    with st.expander("📊 Visão Geral da Arquitetura"):
+    with st.expander("📊 Visão Geral e Filosofia"):
         st.markdown("""
-        O **Motor Nacional de Roteirização Inteligente** é um sistema corporativo B2B projetado para operações logísticas extremas. Ele processa entradas de texto não estruturadas (endereços sujos), transforma-as em coordenadas rigorosas e calcula desvios viários reais.
+        O **Motor Nacional de Roteirização Inteligente** é o sistema core de inteligência logística B2B da operação. Diferente de sistemas comuns que dependem de uma única API comercial (correndo risco de indisponibilidade e falsos positivos topológicos), esta plataforma foi projetada com a arquitetura de **Pipeline Híbrido Multimotor**.
         
-        Sua premissa é atuar sob um **Pipeline Híbrido Multimotor**: nunca depender de uma única API, garantindo alta disponibilidade (SLA) e eliminando falsos positivos topológicos por meio de consenso matemático e inteligência geográfica em nuvem.
+        O sistema processa texto "sujo" (endereços não estruturados, nomes de prédios, caixas postais, POIs logísticos) e aplica algoritmos de Processamento de Linguagem Natural (NLP) e Distância de Levenshtein (RapidFuzz) para extrair o valor canônico antes mesmo de acessar a internet. O objetivo é evitar o "Street Snapping" (fenômeno onde o motor tenta "adivinhar" uma rua aleatória ao invés de fixar o caminhão no centro logístico da cidade solicitada).
         """)
 
-    with st.expander("🌐 Inteligência de Busca e Motores"):
+    with st.expander("🌐 Inteligência de Busca e Componentes do Ensemble"):
         st.markdown("""
-        O sistema dispara procuras simultâneas e paralelas contra múltiplos provedores globais:
+        O sistema atua sob o princípio do **Ensemble Espacial Geográfico**. Em vez de confiar em um motor, ele consulta paralelamente (`ThreadPoolExecutor`):
         
-        * **ArcGIS (ESRI):** Considerado o padrão-ouro no geocoding corporativo. Possui a melhor malha predial urbana do Brasil e é prioritário para rotas contendo logradouros e CEPs.
-        * **Nominatim & Photon (OSM):** Motores baseados no OpenStreetMap. Desempenham com altíssima excelência em localizações rurais e assentamentos ignorados pelas plataformas comerciais.
-        * **TomTom Logistics:** Focado estritamente na malha rodoviária B2B.
-        * **Google Maps Engine:** Motor oficial de roteamento viário. Extrai em tempo real a *Quilometragem Viária Exata* e o tempo de trânsito em asfalto.
-        * **OSRM (Open Source Routing Machine):** Atua paralelamente como um validador de manobras logísticas, assegurando a detecção de balsas e rios.
+        * **ArcGIS (ESRI):** Considerado o padrão-ouro em cadastros prediais corporativos. Acesso direto a servidores REST para resolução de ruas precisas e numerações complexas.
+        * **Nominatim & Photon (OSM):** Baseados no OpenStreetMap. São insubstituíveis para o interior do Brasil Central, Norte e Nordeste, pois localizam assentamentos, glebas e rodovias rurais (BRs/MTs) ignorados por ferramentas puramente urbanas.
+        * **TomTom Logistics:** Base fundamental B2B de tráfego pesado e bloqueios viários.
+        * **BrasilAPI/ViaCEP/OpenCEP:** Cascata "Postal-Tripla". Todo CEP identificado é submetido a uma bateria local antes de ser mapeado.
+        * **Base Nacional Offline (IBGE):** Cache em memória contendo o centróide matemático de todas as 5.570 cidades e distritos do Brasil. Permite roteamento em tempo zero (0.0ms) se a nuvem cair.
         """)
 
-    with st.expander("📐 Algoritmos e Fórmulas Matemáticas"):
+    with st.expander("📐 Matemática, Geodésia e Linha Reta"):
         st.markdown("""
-        * **Fórmula Geodésica WGS-84 (GeographicLib):** Camada de elite no backend para medir a distância aérea (linha reta) considerando o achatamento oblato da Terra (padrão aeronáutico).
-        * **Geopy e Haversine:** Sistemas de *Fallback Automático* acionados caso o motor principal detecte instabilidade, blindando o cálculo contra o erro "0 km".
-        * **Clustering Espacial via DBSCAN:** Plota todos os retornos de APIs no mapa e agrupa as coordenadas verdadeiras que estão a menos de 500 metros umas das outras, descartando anomalias.
-        * **Inferência Bayesiana Multiplicativa:** Motor heurístico que gera o "Score Global", multiplicando fatores de confiança se o CEP for validado, se a UF for condizente e se o IBGE reconhecer o distrito.
+        A integridade de uma rota não pode confiar apenas no asfalto reportado. O motor implementa **5 Camadas Estritas** para calcular a verdadeira distância física separando os pontos:
+        
+        * **GeographicLib (Padrão Ouro WGS-84):** Fórmula de Karney adotada na aviação e balística para o elipsoide oblatório terrestre.
+        * **Geopy (Geodesic):** Motor de contingência para cálculos elipsoidais nativos do Python.
+        * **Haversine (Fallback):** Medição de distância trigonométrica baseada em uma esfera perfeita de raio 6371 km.
+        * **Validação Anti-Zero:** Previne *overflows* na casa dos centímetros que forçavam a linha reta a ser registrada como 0.0 km indevidamente.
+        * **Bounding Box Territorial:** Bloqueia automaticamente coordenadas fora do limite geográfico brasileiro (> 5000 km).
         """)
 
-    with st.expander("🧭 Guia Rápido das Abas de Operação"):
+    with st.expander("🧭 Orquestrador: Roteamento Duplo e Alocação"):
         st.markdown("""
-        * **Geocodificação Rápida:** Modo para testar e inspecionar rotas uma a uma.
-        * **Processamento em Lote:** O núcleo do sistema. Envie tabelas massivas e ele devolverá os dados processados e auditados em alta velocidade.
-        * **Alocação de Hubs:** A inteligência competitiva. Descobre automaticamente qual é a sua Base Logística mais próxima de cada cliente da lista.
-        * **Enterprise Analytics:** Visualização de KPIs Regionais e Densidade Operacional.
-        * **Enciclopédia do Sistema:** Detalhamento arquitetural completo do aplicativo.
-        * **Motores & APIs:** Monitor de infraestrutura de rede e Geodésia.
-        * **Auditoria:** Acesso à árvore de decisões (Caixa Preta) do algoritmo.
-        """)
-
-    with st.expander("🛡️ Pré-Processamento Anti-Fantasma"):
-        st.markdown("""
-        * **Fast-Track IBGE:** Localidades contendo apenas "Nome da Cidade + UF" bypassam a nuvem, pegando a coordenada centróide perfeita direto do IBGE sem latência.
-        * **Fuzzy Léxico:** Algoritmos de correção ortográfica consertam digitações equivocadas automaticamente (Ex: `RIB CASCALH` corrigido para `RIBEIRAO CASCALHEIRA`).
+        A inteligência competitiva se encontra na aba **Alocação de Hubs (Nearest Neighbor)**. 
+        A plataforma não roteia apenas "A para B". Ela recebe milhares de clientes (Origem) e dezenas de CD's (Destinos). 
+        O Algoritmo avalia o *Duelo Espacial*: Traça a Linha Reta WGS-84 entre um cliente e todos os CD's. Identifica os finalistas. Joga ambos no motor viário do Google Maps e decide se o "Vencedor Aéreo" é de fato o "Vencedor Asfáltico", justificando economicamente cada km rodado a mais.
         """)
         
-    with st.expander("📚 Referências Bibliográficas"):
+    with st.expander("🛡️ Auditoria XAI e Score Global"):
         st.markdown("""
-        * **GeographicLib / Geodesics on an ellipsoid:** Karney, C. F. F. (2013). "Algorithms for geodesics". Journal of Geodesy.
+        Para abrir a "Caixa Preta" da IA, o modelo adota **XAI (Explainable AI) via Inferência Bayesiana Multiplicativa**.
+        
+        * Cada motor traz uma resposta. Elas são agrupadas com **DBSCAN** para remover *Outliers* (ex: 4 motores em SP, 1 no AM).
+        * A coordenada sobrevivente recebe multiplicadores: O IBGE confirmou o Estado? O CEP é validado? A rua bate lexicalmente?
+        * O resultado gera o **Score Global (0 a 100)** e o **Status (Excelente a Erro)**. Tudo gravado e visível na aba de Trilha de Auditoria.
+        """)
+
+    with st.expander("📚 Referências Bibliográficas e Acadêmicas"):
+        st.markdown("""
+        * **GeographicLib:** Karney, C. F. F. (2013). "Algorithms for geodesics". Journal of Geodesy.
         * **Haversine Formula:** Sinnott, R.W. (1984). "Virtues of the Haversine". Sky and Telescope 68 (2): 159.
         * **DBSCAN Clustering:** Ester, M., Kriegel, H. P., Sander, J., & Xu, X. (1996). "A density-based algorithm for discovering clusters in large spatial databases with noise". In KDD.
-        * **Teorema de Bayes:** Implementação algorítmica para consolidação de Ensembles e Motores de Decisão (XAI).
+        * **Teorema de Bayes:** Utilizado estocasticamente no `MotorEnderecoCanonico`.
         """)
 
     st.markdown("---")
     st.subheader("💡 Suporte e Feedback")
-    st.caption("Envie uma sugestão diretamente pelo sistema (Requer configuração de SMTP).")
+    st.caption("Envie uma solicitação diretamente para a equipe de Engenharia (Requer SMTP).")
     
     with st.form(key="form_sugestao"):
-        sugestao_texto = st.text_area("Descreva a solicitação ou melhoria:", height=100)
+        sugestao_texto = st.text_area("Descreva a anomalia ou melhoria:", height=100)
         remetente_email = st.text_input("Seu e-mail corporativo (opcional):")
-        submit_button = st.form_submit_button("🚀 Enviar Ticket de Melhoria")
+        submit_button = st.form_submit_button("🚀 Enviar Ticket de Manutenção")
         
         if submit_button:
             if sugestao_texto.strip() == "":
-                st.warning("A sugestão não pode estar vazia.")
+                st.warning("O ticket não pode estar vazio.")
             else:
                 try:
                     smtp_server = "smtp.gmail.com"
@@ -1737,14 +1748,14 @@ with st.sidebar:
                     smtp_pass = st.secrets.get("SENHA_APP", "sua_senha_de_aplicativo")
                     
                     if smtp_user == "seu_email_de_envio@gmail.com":
-                        st.info("⚠️ Modo de Demonstração: Para o envio direto funcionar silenciosamente, configure as variáveis 'EMAIL_SISTEMA' e 'SENHA_APP' no seu ambiente (Streamlit Secrets) utilizando uma Senha de Aplicativo do Google.")
+                        st.info("⚠️ Modo de Demonstração: Configure 'EMAIL_SISTEMA' e 'SENHA_APP' nas variáveis de ambiente.")
                     else:
                         msg = MIMEMultipart()
                         msg['From'] = smtp_user
                         msg['To'] = "lucas.c.cruz@gmail.com"
-                        msg['Subject'] = "Sugestão de Melhoria - Motor Corporativo de Rotas"
+                        msg['Subject'] = "Ticket de Manutenção - Motor Corporativo de Rotas"
                         
-                        corpo = f"Nova sugestão enviada via painel:\n\nRemetente: {remetente_email}\n\nSugestão:\n{sugestao_texto}"
+                        corpo = f"Novo Ticket gerado no painel UX:\n\nRemetente: {remetente_email}\n\nDescrição:\n{sugestao_texto}"
                         msg.attach(MIMEText(corpo, 'plain'))
                         
                         server = smtplib.SMTP(smtp_server, smtp_port)
@@ -1753,9 +1764,9 @@ with st.sidebar:
                         server.send_message(msg)
                         server.quit()
                         
-                        st.success("✅ Sugestão enviada com sucesso em background!")
+                        st.success("✅ Ticket transmitido com sucesso via backbone!")
                 except Exception as e:
-                    st.error(f"Erro ao tentar enviar o e-mail: {str(e)}")
+                    st.error(f"Erro ao tentar transmitir a solicitação via SMTP: {str(e)}")
 
 tab_individual, tab_processamento, tab_alocacao, tab_analytics, tab_enciclopedia, tab_motores, tab_auditoria = st.tabs([
     "📍 Geocodificação Rápida", "⚙️ Processamento em Lote", "📦 Alocação de Hubs", "📊 Enterprise Analytics", "📚 Enciclopédia Core", "🔌 Monitor de APIs", "🕵️ Trilha de Auditoria"
@@ -1892,7 +1903,6 @@ with tab_processamento:
                 
                 # Validação Final de Coerção do DataFrame para Linha Reta
                 def recalculate_haversine_lote(row):
-                    # Forçar verificação matemática no fim do loop sobre variáveis formatadas corretamente
                     lat_o_f = float(row.get('Lat Origem', 0.0))
                     lon_o_f = float(row.get('Lon Origem', 0.0))
                     lat_d_f = float(row.get('Lat Destino', 0.0))
@@ -2087,7 +2097,7 @@ with tab_alocacao:
                     df_final_alo['Linha Reta'] = df_final_alo['Origem'].astype(str).str.strip().map(dest_to_linha_reta).fillna(df_final_alo['Linha Reta'])
                     df_final_alo['Status Linha Reta'] = df_final_alo['Origem'].astype(str).str.strip().map(dest_to_status_lr).fillna(df_final_alo['Status Linha Reta'])
                     
-                    # Validação Post-Sweep
+                    # Validação Post-Sweep Territorial
                     def recalculate_haversine_alo(row):
                         lat_o_f = float(row.get('Lat Origem', 0.0))
                         lon_o_f = float(row.get('Lon Origem', 0.0))
@@ -2396,7 +2406,7 @@ with tab_analytics:
                         lat='Lat_Media',
                         lon='Lon_Media',
                         size='Qtd_Rotas',
-                        color='Qtd_Rotas', # NOVA REGRA: Coloração reflete o volume físico / densidade
+                        color='Qtd_Rotas',
                         color_continuous_scale=px.colors.sequential.Blues,
                         size_max=45,
                         zoom=3.5,
@@ -2480,7 +2490,6 @@ with tab_analytics:
 
             st.markdown("#### 🚨 Controle de Qualidade de Dados (Auditoria Geodésica e de Falhas)")
             with st.container(border=True):
-                # Inclui agora a regra dura de auditoria da Linha Reta
                 df_suspeitas = df_filtrado[(df_filtrado['Score Final Global'] < 70) | (df_filtrado['Status da Rota'] == "Erro") | (df_filtrado['Confianca Origem'] == "BAIXA") | ((df_filtrado['Linha Reta'] == 0.0) & (df_filtrado['Origem'] != df_filtrado['Destino']))]
                 
                 if not df_suspeitas.empty:
@@ -2532,58 +2541,58 @@ with tab_analytics:
         st.caption("Nenhum registro de lote persistido na base histórica até o momento.")
 
 with tab_enciclopedia:
-    st.info("💡 **Objetivo desta aba:** Servir como o repositório mestre de conhecimento. Esta enciclopédia detalha toda a jornada técnica de um dado dentro do aplicativo, desde a limpeza gramatical até a validação geométrica em nuvem.")
+    st.info("💡 **Objetivo desta aba:** Servir como o repositório mestre de conhecimento. Esta enciclopédia detalha toda a jornada técnica de um dado dentro do aplicativo, abordando 100% das funcionalidades corporativas, desde a limpeza gramatical até a validação geométrica extrema.")
     st.markdown("""
-    # 📚 Enciclopédia do Sistema de Roteirização Inteligente
+    # 📚 Enciclopédia Operacional e Base de Conhecimento Core
     
-    Bem-vindo ao Atlas da Arquitetura do Motor de Roteamento Corporativo. Este documento serve como um guia profundo sobre o funcionamento das engrenagens lógicas, dos motores de inteligência artificial e dos cruzamentos geográficos que operam invisíveis aos olhos do usuário em cada busca.
+    Este documento é o manual definitivo da Arquitetura do Motor de Roteamento Corporativo. Ele detalha as decisões, algoritmos, métodos de integração e auditorias que garantem a segurança de todas as rotas logísticas despachadas pelo sistema.
 
     ---
 
-    ## 1. A Filosofia Híbrida e o Problema do *Street Snapping*
-    A geocodificação tradicional costuma sofrer de um viés mercadológico grave: as APIs tentam "adivinhar" ruas e números mesmo quando o usuário só digitou o nome de uma cidade. Isso resulta em caminhões sendo enviados para ruas aleatórias no centro de uma cidade, em vez do verdadeiro destino regional.
+    ## 1. Geocodificação e Tratamento Lexical (Parser)
+    A geocodificação é a conversão de um texto livre em uma coordenada (Latitude/Longitude).
+    * **Limpeza Lexical:** O sistema aciona o `MotorEnderecoCanonico`, que aplica *Regex* (Expressões Regulares) para limpar acentos, padronizar rodovias (ex: convertendo `BR 060 km 15` para `BR-060 KM 15`) e extrair o CEP estruturado.
+    * **Anti-Fantasma (Street Snapping):** Evita que o sistema invente ruas falsas em cidades vazias. Isso é garantido via `RapidFuzz` (Distância de Levenshtein), que corrige nomes de cidades grafados incorretamente e barra preenchimentos se o limite de semelhança for baixo (< 85%).
+    * **Consenso Espacial (DBSCAN):** Nunca se confia em apenas 1 API. 5 Motores são chamados. Se 3 concordam (distância métrica próxima) e 2 discordam, o `DBSCAN` (Clustering de Machine Learning) exclui as 2 coordenadas anômalas, garantindo que o caminhão vá para a coordenada validada por *crowd-consensus*.
+    * **APIs Utilizadas:** ArcGIS (Padrão Ouro para ruas/CEP), Nominatim/Photon (Padrão Ouro para área rural/interior), TomTom (Malha rodoviária B2B).
     
-    Este sistema contorna o problema empregando a **Abordagem de Entendimento Lexical (NLP)** combinada com um **Filtro Anti-Fantasma**. Antes de qualquer API de rede ser chamada, o aplicativo aplica Expressões Regulares (`Regex`) para fatiar o texto: separa CEP, tira as abreviações ("Av.", "R.", "Qd.") e classifica a intenção da busca (Ex: `MUNICIPIO`, `CONDOMINIO`, `RURAL`, `ENDERECO_COMPLETO`).
+    ## 2. Reverse Geocoding
+    * **Finalidade:** Identificar a qual cidade e rua exata pertence uma coordenada isolada.
+    * **Fluxo:** Após a geocodificação ser concluída (ou quando o usuário envia apenas os números de Lat/Lon), a coordenada é reenviada para Nominatim e ArcGIS de forma reversa.
+    * **Auditoria:** Se o usuário pediu a cidade "A" e a geocodificação reversa diz que o ponto físico caiu na cidade "B", o Score do trajeto é duramente penalizado, evitando fraudes de roteamento.
 
-    ## 2. Fast-Track Offline e o IBGE
-    Para buscas estritamente em nível de cidade/município, o sistema não aciona internet. Ele consulta um banco de dados estático gigantesco persistido na memória (`Cache`) gerado a partir do **Serviço de Dados do IBGE**. 
-    * **Vantagem:** O tempo de geocodificação cai de 1.5s para 0.00s.
-    * **Exatidão:** A coordenada devolvida é o Centróide Oficial delimitado pelo Governo Federal, não uma aproximação de motor estrangeiro.
+    ## 3. O Motor Geodésico e a Distância em Linha Reta
+    A Distância em Linha Reta (Aérea) é o pilar de integridade matemática do sistema, atuando como auditor incancelável do motor asfáltico (Google/OSRM).
 
-    ## 3. O Dilema dos Múltiplos Motores (Ensemble Geográfico)
-    Se o endereço precisa ser buscado na internet, em quem confiar? Google? TomTom? OpenStreetMap? O sistema adota a postura de que **nenhum motor isolado é dono da verdade absoluta**. Ele envia a busca paralelamente (`ThreadPoolExecutor`) para até 5 provedores simultâneos:
+    ### O que é?
+    Geograficamente, é o traçado ideal e mais curto ligando dois pontos topológicos, considerando a curvatura oblata do planeta (Elipsoide Terrestre). Em roteamento asfáltico, você depende de pontes, rodovias curvas e barreiras físicas; na linha reta matemática, o trajeto é perfeito.
     
-    1. **ArcGIS (ESRI):** Maior especialista em malhas prediais do mundo.
-    2. **Nominatim / Photon:** Tecnologias do OpenStreetMap, perfeitas para achar fazendas, chácaras e estradas de terra no Brasil central.
-    3. **TomTom Logistics:** Especialista em roteamento B2B e rodovias pesadas.
-
-    ## 4. Clustering Espacial: A Reunião das Coordenadas (DBSCAN)
-    Quando os 5 motores retornam suas coordenadas, o sistema aplica o algoritmo de Machine Learning não supervisionado chamado **DBSCAN** (*Density-Based Spatial Clustering of Applications with Noise*).
+    ### Para que serve?
+    * **Validação Operacional e Auditoria:** Serve como "Baseline". Se a Linha Reta entre um Cliente e um Hub for 10 km, mas a Rota Asfáltica for de 60 km, o sistema sinaliza um gargalo geográfico gravíssimo (ex: montanha, rio sem ponte ou rodovia inexistente).
+    * **Segurança Anti-Fraude:** Protege contra erros da API. Se a distância da Linha Reta acusar 0 km para cidades diferentes, trata-se de um erro crítico de *Overflow* computacional.
     
-    Ele plota os 5 pontos em um mapa virtual em branco. Se 3 motores apontarem para a mesma quadra em São Paulo, e 2 motores apontarem para Manaus (Falsos Positivos causados por ruas com mesmo nome), o algoritmo de Clusterização agrupa apenas os pontos que estão a distâncias curtas entre si, eliminando instantaneamente o "ruído" geográfico.
+    ### Fórmulas Matemáticas Utilizadas (As 5 Camadas de Segurança)
+    Para garantir que essa métrica vital nunca fique zerada ou cause "Envenenamento de Cache" (*Cache Poisoning*), a função `calcular_distancia_linha_reta()` aplica a seguinte escalada:
+    * **Camada 1 (Cálculo Principal - GeographicLib):** Biblioteca oficial baseada nos algoritmos aeronáuticos de *Charles Karney* usando o modelo elipsoide `WGS-84`. Precisão nanométrica.
+    * **Camada 2 (Fallback - Geopy Geodesic):** Motor auxiliar baseado nos cálculos elipsoidais de Vincenty, ativado se a biblioteca primária falhar em compilação C++.
+    * **Camada 3 (Fallback Secundário - Haversine):** Método estritamente trigonométrico em Python puro, assumindo uma terra esférica ideal. Mais rápido, erro em torno de 0.3%.
+    * **Camada 4 (Correção Automática Anti-Zero):** Se, por anomalia de conversão binária float, todas as fórmulas derem `0.0` para latitudes distintas, o sistema aplica um desvio seguro de `0.01 km` para impedir falhas de divisão nos Dashboards.
+    * **Camada 5 (Validação Territorial Continental):** Se a distância de Linha Reta for superior a `5000 km`, o sistema rejeita o valor, pois é fisicamente impossível estar dentro do Brasil (distância N-S e L-O máximas ~ 4390km). A rota recebe flag de falha espacial imediata.
 
-    ## 5. Inferência Bayesiana e o Score Global
-    Dos candidatos que sobraram no Cluster verdadeiro, qual deles será eleito o "Vencedor Oficial"? Entra em cena a Matemática de Decisão: O Teorema de Bayes.
-    O sistema confere bônus multiplicativos se os motores confirmarem as assinaturas originais do cliente:
-    
-    * A UF da coordenada bate com a UF que o cliente digitou? `(Score x 1.3)`
-    * O CEP bate milimetricamente com o BrasilAPI? `(Score x 4.0)`
-    * O nome da rua resultante tem distância de Levenshtein > 90% em relação ao que o usuário digitou inicialmente? `(Score x 1.5)`
-    
-    O candidato que atingir a maior probabilidade se torna a coordenada de Origem ou Destino que passará para a fase de Roteamento asfáltico.
+    ## 4. O Sistema de Cache Duplo
+    * **Cache Físico (Diskcache):** Toda geocodificação e rota passa por SQLite e é serializada no disco via hashes MD5. `cache_rotas` guarda trajetos; `cache_geo` guarda coordenadas. Isso zera o tempo de resposta em requisições repetidas e economiza faturamento da API (Google).
+    * **Cache de Aprendizado / Unpoisoning:** Se um cálculo errado foi para o cache (ex: Linha reta igual a 0.0), a "Camada 4" de Unpoisoning atua de forma forense. Se ela lê do cache uma anomalia matemática, ela destrói o registro antigo em tempo de execução, reprocessa usando WGS-84 e regrava silenciosamente para que o Dashboard fique perfeito.
 
-    ## 6. Validação Geodésica Corporativa (A Marreta Matemática)
-    Com o Ponto A e o Ponto B em mãos, o aplicativo efetua um cálculo matemático puro no sub-módulo `calcular_distancia_linha_reta`. Ele é regido por **4 Camadas de Contingência**:
-    1. A **GeographicLib** calcula a distância em um elipsoide perfeito modelo WGS-84 (altíssima precisão).
-    2. Fallback para API `Geopy Geodesic`.
-    3. Fallback manual matemático para a *Fórmula de Haversine*.
-    4. Varredura final do DataFrame forçando reprocessamento de anomalias (Cache Unpoisoning).
-    
-    Só então o motor do Google Maps é acionado. Se o Google disser que a viagem de asfalto tem 1.000 km, mas a Linha Reta matemática atestou que a distância é de apenas 15 km, o motor "rebela-se" contra o Google Maps, entendendo que ocorreu uma **Violação Geodésica**, rejeita o caminho do asfalto falso e adota lógicas e heurísticas de correção.
+    ## 5. Roteamento em Lote (Batch), Alocação Competitiva e Balsas
+    * **Paralelismo Assíncrono:** O Processamento O(U) utiliza `ThreadPoolExecutor`. Se você insere 5.000 linhas, ele não faz fila indiana. Ele cria dezenas de instâncias paralelas e resolve tudo ao mesmo tempo.
+    * **Alocação de Hubs (Roteamento Duplo):** Na aba de Alocação, o motor aplica a matriz de *Nearest Neighbor*. Para 10 Hubs e 1.000 clientes, ele gera 10.000 *Duelos de Linha Reta* virtuais. Aquele que matematicamente está mais perto segue para asfalto. Se houver um Vice-Líder muito próximo, o *Roteamento Duplo* roda ambos no Google Maps e coroa o vencedor.
+    * **Ferries / Balsas:** O OSRM (Motor Open-Source Routing) mapeia todos os contornos azuis (Corpos Hídricos) do OpenStreetMap. Quando o caminhão precisa trocar para modal marítimo, a API levanta a flag `ferry`, e o sistema crava um alerta logístico.
 
-    ## 7. A Matriz de Alocação de Hubs (Competição Geográfica)
-    A aba de Alocação não mede apenas "De A para B". Ela aplica a estratégia logística de *Nearest Neighbor*.
-    Se você possui 10 Centros de Distribuição e envia 1.000 clientes, o sistema roda o fluxo acima 10.000 vezes na memória virtual, traçando a linha reta de todos os clientes para todos os CD's, listando do mais próximo ao mais distante. Após eleger o vencedor natural (aquele fisicamente mais perto), aciona os motores asfálticos (Google/OSRM) e consolida a planilha de modo hermético e autônomo, dispensando qualquer interferência do operador.
+    ## 6. Score Global, Analytics e Mapas de Calor Regionais
+    * **Como é calculado o Score Global?** `(0.35 * Score Origem) + (0.35 * Score Destino) + (0.30 * Score da Rota Google)`.
+    * **Score de Geocodificação:** É penalizado se a UF original for diferente do geocoder, ou se o motor precisar apelar para o IBGE offline por falha sistêmica das nuvens comerciais.
+    * **Enterprise Analytics:** Painel integrado de BI. Mapeia a densidade do volume populacional logístico e agrega em KPIs como Distância Média e Volumes por **Regiões** (Norte, Nordeste, Centro-Oeste, Sul, Sudeste) e Estados.
+    * **Mapa de Calor por Volume Físico:** Atuando como um software *ArcGIS Enterprise*, o mapa não apenas coloriza pontos, ele escala os círculos (`size_max=45`) com base na **Quantidade Ocorrente de Entregas (`Qtd_Rotas`)**. Estados densos ficam intensos; periferias esparsas ficam translúcidas, permitindo decisões rápidas de *Capex* para abertura de novos galpões logísticos baseadas estritamente em volume comprovado.
     """)
 
 with tab_motores:
@@ -2632,9 +2641,9 @@ with tab_motores:
     
     st.dataframe(pd.DataFrame(health_data), use_container_width=True)
 
-    st.markdown("#### 🌐 Auditoria do Motor Geodésico Contínuo (Métricas de Integridade)")
+    st.markdown("#### 🌐 Auditoria do Motor Geodésico Contínuo (Métricas de Integridade Matemática)")
     df_metricas_lr = pd.DataFrame([METRICAS_DISTANCIA])
-    df_metricas_lr.columns = ["Total de Cálculos de Linha Reta", "Sucesso: GeographicLib (WGS84)", "Sucesso: Geopy", "Fallback: Haversine", "Correções Automáticas (Anti-Zero)", "Falhas Críticas", "Rotas Unpoisoned (Cache Reparado)"]
+    df_metricas_lr.columns = ["Total de Cálculos de Linha Reta", "Sucesso: GeographicLib (WGS84)", "Sucesso: Geopy", "Fallback: Haversine", "Correções Automáticas (Anti-Zero)", "Falhas Críticas", "Rotas Unpoisoned (Cache Reparado)", "Barreiras Territoriais (Bounding Box)"]
     st.dataframe(df_metricas_lr, use_container_width=True)
 
 with tab_auditoria:
