@@ -28,7 +28,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Tenta importar Geopy para Camada 1 do motor de linha reta
+# Motores Geodésicos Estratificados
+try:
+    from geographiclib.geodesic import Geodesic
+    GEOGRAPHICLIB_DISPONIVEL = True
+except ImportError:
+    GEOGRAPHICLIB_DISPONIVEL = False
+
 try:
     from geopy.distance import geodesic
     GEOPY_DISPONIVEL = True
@@ -43,10 +49,12 @@ logger = logging.getLogger("MotorGeodesicoCorp")
 
 METRICAS_DISTANCIA = {
     "total_calculos": 0,
+    "sucesso_geographiclib": 0,
     "sucesso_geopy": 0,
     "fallback_haversine": 0,
     "correcoes_automaticas": 0,
-    "falhas_criticas": 0
+    "falhas_criticas": 0,
+    "cache_unpoisoned": 0
 }
 
 # ==============================================================================
@@ -567,7 +575,7 @@ class MotorEnderecoCanônico:
 semantica = MotorEnderecoCanônico()
 
 # ==============================================================================
-# 🧮 VALIDADOR PRÉ-GEOCODING E LÓGICA GEODÉSICA
+# 🧮 VALIDADOR PRÉ-GEOCODING E LÓGICA GEODÉSICA CORPORATIVA (MULTI-CAMADA)
 # ==============================================================================
 
 def parse_tempo_minutos(t_str):
@@ -585,31 +593,6 @@ def parse_tempo_minutos(t_str):
     except Exception:
         return 999999
 
-def validar_coordenadas_mapa(lat, lon):
-    try:
-        if pd.isna(lat) or pd.isna(lon): return False
-        lat_f, float(lat), float(lon)
-        if math.isnan(lat_f) or math.isnan(float(lon)) or math.isinf(lat_f) or math.isinf(float(lon)): return False
-        if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= float(lon) <= 180.0): return False
-        if lat_f == 0.0 and float(lon) == 0.0: return False
-        return True
-    except Exception:
-        return False
-
-def validar_json_mapa(dados):
-    try:
-        json.dumps(dados)
-        return True
-    except (TypeError, OverflowError):
-        return False
-
-def obedience_base_local(contexto_estruturado):
-    if contexto_estruturado["logradouro"] and contexto_estruturado["municipio"] and contexto_estruturado["uf"]:
-        chave_cnefe = f"{contexto_estruturado['logradouro']}_{contexto_estruturado['municipio']}_{contexto_estruturado['uf']}"
-        if chave_cnefe in cache_base_local:
-            return cache_base_local[chave_cnefe]
-    return None
-
 def validar_coordenada_brasil(lat, lon):
     try:
         lat_f, lon_f = float(lat), float(lon)
@@ -623,8 +606,9 @@ def validar_coordenada_brasil(lat, lon):
 
 def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
     """
-    Motor Geodésico Robusto (Substitui fórmula instável do script base).
+    Motor Geodésico Robusto com 4 Camadas.
     Garante que coordenadas válidas e distintas nunca retornem 0.0 km.
+    Retorna Tuple(distancia_float, status_linha_reta_string)
     """
     global METRICAS_DISTANCIA
     METRICAS_DISTANCIA["total_calculos"] += 1
@@ -632,25 +616,36 @@ def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
     try:
         lat1, lon1, lat2, lon2 = float(lat1), float(lon1), float(lat2), float(lon2)
         
-        # Se houve falha de geocodificação
+        # Cenário 1: Falha Geográfica Real (Uma das pontas não foi geocodificada)
         if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0: 
-            return 0.0
+            return 0.0, "Falha Operacional (Coordenadas Ausentes)"
             
-        # Se os pontos forem exatamente iguais
+        # Cenário 2: Pontos Topológicos Idênticos (Mesma Coordenada)
         if lat1 == lat2 and lon1 == lon2: 
-            return 0.0
+            return 0.0, "Calculada Normalmente (Pontos Coincidentes)"
             
-        # CAMADA 1: Geodésia de Alta Precisão (Elipsoide WGS-84)
+        # CAMADA 1: GeographicLib (Mais preciso, modelo WGS-84)
+        if GEOGRAPHICLIB_DISPONIVEL:
+            try:
+                dist_metros = Geodesic.WGS84.Inverse(lat1, lon1, lat2, lon2)['s12']
+                dist_km = dist_metros / 1000.0
+                if dist_km > 0:
+                    METRICAS_DISTANCIA["sucesso_geographiclib"] += 1
+                    return round(dist_km, 2), "Calculada via GeographicLib WGS-84"
+            except Exception as e:
+                logger.warning(f"GeographicLib falhou: {e}")
+                
+        # CAMADA 2: Geopy Geodesic
         if GEOPY_DISPONIVEL:
             try:
                 dist_km = geodesic((lat1, lon1), (lat2, lon2)).km
                 if dist_km > 0:
                     METRICAS_DISTANCIA["sucesso_geopy"] += 1
-                    return round(dist_km, 2)
+                    return round(dist_km, 2), "Calculada via Geopy Geodesic"
             except Exception as e:
-                logger.warning(f"Geopy falhou no cálculo de {lat1},{lon1} -> {lat2},{lon2}. Acionando Fallback. Erro: {e}")
-                
-        # CAMADA 2: Fallback Matemático Automático (Haversine Manual)
+                logger.warning(f"Geopy falhou: {e}")
+
+        # CAMADA 3: Fallback Matemático Automático (Haversine Manual)
         lat1_r, lon1_r, lat2_r, lon2_r = map(math.radians, [lat1, lon1, lat2, lon2])
         dlat = lat2_r - lat1_r
         dlon = lon2_r - lon1_r
@@ -658,21 +653,21 @@ def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
         c = 2 * math.asin(math.sqrt(a))
         dist_haversine = 6371.0 * c
         
-        # CAMADA 3: Validação Estrita Anti-Zero
-        if dist_haversine > 0.001:
+        # CAMADA 4: Validação Estrita Anti-Zero
+        if dist_haversine >= 0.01:
             METRICAS_DISTANCIA["fallback_haversine"] += 1
-            return round(dist_haversine, 2)
+            return round(dist_haversine, 2), "Calculada via Fallback Haversine"
         else:
-            # Distância calculada foi ínfima ou zero para coordenadas numéricas diferentes (anomalia de float limit)
-            logger.error(f"FALHA CRÍTICA PREVENIDA: Distância Haversine zerada para pontos diferentes. {lat1},{lon1} a {lat2},{lon2} | Ctx: {contexto}")
+            # Distância calculada foi ínfima ou zero para coordenadas numéricas diferentes (anomalia de float/rounding)
+            logger.error(f"FALHA CRÍTICA PREVENIDA: Distância zerada para pontos diferentes. {lat1},{lon1} a {lat2},{lon2} | Ctx: {contexto}")
             METRICAS_DISTANCIA["correcoes_automaticas"] += 1
-            # Fallback seguro fixo (distância microscópica mínima) em vez de zerar
-            return 0.01 
+            # Fallback seguro fixo (distância microscópica mínima) em vez de zerar indevidamente
+            return 0.01, "Calculada após reprocessamento (Correção Anti-Zero)"
             
     except Exception as e:
         logger.error(f"Erro fatal no motor de distância geodésica ({contexto}): {e}")
         METRICAS_DISTANCIA["falhas_criticas"] += 1
-        return 0.0
+        return 0.0, "Falha Operacional Crítica no Motor Geodésico"
 
 def cascata_postal_tripla(cep_limpo):
     if cep_limpo in cache_cep:
@@ -746,6 +741,13 @@ def obter_coordenada_centroide_supremo(mun_nome, uf_nome):
             if validar_coordenada_brasil(lat_c, lon_c)[0]: return lat_c, lon_c, "NOMINATIM_CENTROIDE_SUPREMO"
     except: pass
     return 0.0, 0.0, None
+
+def obedience_base_local(contexto_estruturado):
+    if contexto_estruturado["logradouro"] and contexto_estruturado["municipio"] and contexto_estruturado["uf"]:
+        chave_cnefe = f"{contexto_estruturado['logradouro']}_{contexto_estruturado['municipio']}_{contexto_estruturado['uf']}"
+        if chave_cnefe in cache_base_local:
+            return cache_base_local[chave_cnefe]
+    return None
 
 # ==============================================================================
 # 🗺️ MÓDULOS DE GEOCODIFICAÇÃO COM TELEMETRIA (CONTRATO LISTA TOP-K)
@@ -1002,7 +1004,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         apis_concordantes = set([c1["fonte"]])
         for c2 in candidatos_validos:
             if c1["fonte"] != c2["fonte"]:
-                dist = calcular_distancia_linha_reta(c1["lat"], c1["lon"], c2["lat"], c2["lon"], contexto="Consenso API")
+                dist, _ = calcular_distancia_linha_reta(c1["lat"], c1["lon"], c2["lat"], c2["lon"], contexto="Consenso API")
                 if dist <= tolerancia_km: 
                     apis_concordantes.add(c2["fonte"])
                     probabilidades_cluster.append(PESO_FONTES.get(c2["fonte"], 0.5))
@@ -1059,7 +1061,8 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         if cand.get("lat", 0.0) == 0.0 or cand.get("lon", 0.0) == 0.0: continue
         f_n = cand.get("fonte", "")
         metr = cache_api_health.get(f_n, {"hits": 0, "calls": 0, "falhas": 0, "tempo_total": 0.0})
-        if calcular_distancia_linha_reta(cand["lat"], cand["lon"], vencedor["lat"], vencedor["lon"], contexto="Auditoria Health") <= 0.05:
+        dist_auditoria, _ = calcular_distancia_linha_reta(cand["lat"], cand["lon"], vencedor["lat"], vencedor["lon"], contexto="Auditoria Health")
+        if dist_auditoria <= 0.05:
             metr["hits"] += 1
         cache_api_health.set(f_n, metr, expire=None)
 
@@ -1387,7 +1390,36 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
     chave_rota_cache = f"ROTA_V54_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
-    if chave_rota_cache in cache_rotas: return cache_rotas[chave_rota_cache]
+    
+    # UNPOISONING DE CACHE (Correção Definitiva da Causa Raiz)
+    if chave_rota_cache in cache_rotas: 
+        ret_cache = cache_rotas[chave_rota_cache]
+        if len(ret_cache) >= 30:
+            dist_cache = ret_cache[4]
+            lat_o_cache, lon_o_cache = ret_cache[19], ret_cache[20]
+            lat_d_cache, lon_d_cache = ret_cache[21], ret_cache[22]
+            
+            # Identificando o "Cache Poisoning" onde a distância foi zerada indevidamente no passado
+            if dist_cache == 0.0 and lat_o_cache != 0.0 and lat_d_cache != 0.0 and (lat_o_cache != lat_d_cache or lon_o_cache != lon_d_cache):
+                global METRICAS_DISTANCIA
+                METRICAS_DISTANCIA["cache_unpoisoned"] += 1
+                logger.warning(f"♻️ Cache Poisoning Interceptado em: {origem_clean} -> {destino_clean}. Recalculando Linha Reta.")
+                nova_dist, novo_status = calcular_distancia_linha_reta(lat_o_cache, lon_o_cache, lat_d_cache, lon_d_cache, contexto="Unpoisoning de Cache")
+                retorno_mutavel = list(ret_cache)
+                retorno_mutavel[4] = nova_dist
+                # Garante tamanho 31 (nova coluna)
+                if len(retorno_mutavel) == 30:
+                    retorno_mutavel.append(novo_status)
+                else:
+                    retorno_mutavel[30] = novo_status
+                retorno_novo = tuple(retorno_mutavel)
+                cache_rotas.set(chave_rota_cache, retorno_novo, expire=2592000)
+                return retorno_novo
+                
+            # Adiciona fallback para caches que não tem o item 30 ainda (Status Linha Reta)
+            if len(ret_cache) == 30:
+                return (*ret_cache, "Calculada via Cache Hit Estável")
+            return ret_cache
     
     start_geo = time.time()
     lat_o, lon_o, end_oficial_o, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, xai_o = obter_coordenadas_e_endereco_oficial(origem_clean)
@@ -1397,9 +1429,10 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_rot = time.time()
 
     if all([lat_o is not None, lon_o is not None, lat_d is not None, lon_d is not None]) and lat_o != 0.0 and lat_d != 0.0:
-        dist_linha_reta = calcular_distancia_linha_reta(lat_o, lon_o, lat_d, lon_d, contexto=f"Pipeline: {origem_clean} a {destino_clean}")
+        dist_linha_reta, status_linha_reta = calcular_distancia_linha_reta(lat_o, lon_o, lat_d, lon_d, contexto=f"Pipeline Principal: {origem_clean} a {destino_clean}")
     else:
         dist_linha_reta = 0.0
+        status_linha_reta = "Falha de Geocodificação (Coordenadas Nulas)"
 
     orig_param_fb = requests.utils.quote(end_oficial_o) if end_oficial_o else f"{lat_o},{lon_o}"
     dest_param_fb = requests.utils.quote(end_oficial_d) if end_oficial_d else f"{lat_d},{lon_d}"
@@ -1449,7 +1482,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
             motivo_roteamento = f"Fallback Operacional: Google Maps indisponível (Timeout). Traçado exato ({km_rota}km) calculado matematicamente pela malha OSRM."
             
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
-        retorno = (km_rota, tempo_rota, link_rota, balsa_rota, dist_linha_reta, fonte_rota, score_rota, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento, link_embed)
+        retorno = (km_rota, tempo_rota, link_rota, balsa_rota, dist_linha_reta, fonte_rota, score_rota, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento, link_embed, status_linha_reta)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
         return retorno
 
@@ -1460,7 +1493,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
     motivo_fallback = "Alerta Crítico: Motores viários em Nuvem e Open-Source rejeitaram a rota (Timeout ou Coordenadas Inválidas). Projeção Geodésica Adaptativa acionada baseada na Linha Reta."
     
-    retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 50, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback, link_embed_fallback)
+    retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 50, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback, link_embed_fallback, status_linha_reta)
     cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
     return retorno
 
@@ -1474,19 +1507,19 @@ def executar_pipeline_unificado(origem_cru, destino_cru, runner_up_info=None):
     justificativa = "N/A"
     
     if orig == "FALHA_GEO_ORIGEM" or dest == "NENHUM_HUB_VALIDO":
-        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ["Falha Espacial Origem"], ["Falha Espacial Destino"], "Falha de Roteamento: Hub Base ou Endereço Destino foi incapaz de resolver latitude/longitude em nuvem.", "N/A", concorrente, dist_conc, link_conc, justificativa)
+        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ["Falha Espacial Origem"], ["Falha Espacial Destino"], "Falha de Roteamento: Hub Base ou Endereço Destino foi incapaz de resolver latitude/longitude em nuvem.", "N/A", "Falha Operacional (Input Inválido)", concorrente, dist_conc, link_conc, justificativa)
         
     if orig.lower() in ['nan', 'none', 'null', ''] or dest.lower() in ['nan', 'none', 'null', '']:
-        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha na leitura da célula (Campo Vazio).", "N/A", concorrente, dist_conc, link_conc, justificativa)
+        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha na leitura da célula (Campo Vazio).", "N/A", "Falha Operacional (Célula Vazia)", concorrente, dist_conc, link_conc, justificativa)
     
     res = calcular_pipeline_logistico(orig, dest, perfil_rota="shortest")
     
-    if runner_up_info and res and len(res) >= 30:
+    if runner_up_info and res and len(res) >= 31:
         dist_v_runner, r_nome, r_lat, r_lon = runner_up_info
         lat_o, lon_o = res[19], res[20]
         
         if lat_o != 0.0 and r_lat != 0.0:
-            dist_v_real = calcular_distancia_linha_reta(lat_o, lon_o, r_lat, r_lon, contexto="Validador Runner-Up")
+            dist_v_real, _ = calcular_distancia_linha_reta(lat_o, lon_o, r_lat, r_lon, contexto="Runner-Up Validation")
             res_g_runner = extrair_dados_reais_google(origem_cru, r_nome, lat_o, lon_o, r_lat, r_lon, dist_v_real, usar_coordenadas=True)
             if not res_g_runner:
                  res_g_runner = extrair_dados_reais_google(origem_cru, r_nome, lat_o, lon_o, r_lat, r_lon, dist_v_real, usar_coordenadas=False)
@@ -1517,12 +1550,12 @@ def embrulhar_task_paralela(item):
         
     try: 
         res = executar_pipeline_unificado(orig, dest, r_info)
-        if res and isinstance(res, tuple) and len(res) < 34:
-            res = tuple(list(res) + ["N/A"] * (34 - len(res)))
+        if res and isinstance(res, tuple) and len(res) < 35:
+            res = tuple(list(res) + ["N/A"] * (35 - len(res)))
         return par_id, res
     except Exception as e: 
         msg_erro = f"FALHA INTERNA: {str(e)}"
-        fallback = (0.0, "0 min", "Link Indisponível", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], msg_erro, "N/A", "N/A", 0.0, "N/A", "N/A")
+        fallback = (0.0, "0 min", "Link Indisponível", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], msg_erro, "N/A", "Falha de Processamento Multithread", "N/A", 0.0, "N/A", "N/A")
         return par_id, fallback
 
 def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, progress_bar, status_container, runner_up_map=None):
@@ -1570,7 +1603,7 @@ def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, pr
                     df.at[idx, 'Tempo Total (s)'] = float(res[25]) if res[25] is not None else 0.0
                     
                     if runner_up_map:
-                        df.at[idx, 'Distancia Concorrente'] = float(res[31]) if res[31] != "N/A" else 0.0
+                        df.at[idx, 'Distancia Concorrente'] = float(res[32]) if res[32] != "N/A" else 0.0
                 except (ValueError, TypeError): pass
 
                 df.at[idx, 'Tempo'] = res[1] if res[1] is not None else "0 min"
@@ -1589,10 +1622,12 @@ def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, pr
                 df.at[idx, 'Endereco Oficial Destino'] = res[18] if res[18] is not None else "Endereço Não Identificado"
                 df.at[idx, 'Motivo Roteamento'] = res[28] if len(res) > 28 and res[28] is not None else "Sem Justificativa"
                 
+                df.at[idx, 'Status Linha Reta'] = res[30] if len(res) > 30 and res[30] is not None else "Não Mapeado"
+                
                 if runner_up_map:
-                    df.at[idx, 'Concorrente Analisado'] = res[30] if res[30] is not None else "N/A"
-                    df.at[idx, 'Link Rota Concorrente'] = res[32] if res[32] is not None else "N/A"
-                    df.at[idx, 'Justificativa de Alocacao'] = res[33] if res[33] is not None else "N/A"
+                    df.at[idx, 'Concorrente Analisado'] = res[31] if len(res) > 31 and res[31] is not None else "N/A"
+                    df.at[idx, 'Link Rota Concorrente'] = res[33] if len(res) > 33 and res[33] is not None else "N/A"
+                    df.at[idx, 'Justificativa de Alocacao'] = res[34] if len(res) > 34 and res[34] is not None else "N/A"
                 
                 try:
                     if float(res[19]) == 0.0 and float(res[21]) == 0.0:
@@ -1614,6 +1649,7 @@ def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, pr
                 })
             else:
                 df.at[idx, 'Status da Rota'] = "Erro Crítico de Processamento"
+                df.at[idx, 'Status Linha Reta'] = "Omitida por Erro Estrutural"
                 
     return df
 
@@ -1650,8 +1686,8 @@ with st.sidebar:
 
     with st.expander("📐 Algoritmos e Fórmulas Matemáticas"):
         st.markdown("""
-        * **Fórmula Geodésica WGS-84:** Utilizada na primeira camada do backend para medir a distância aérea respeitando o achatamento da Terra.
-        * **Fórmula de Haversine:** Camada de fallback matemático para medir distâncias aéreas baseadas em uma esfera perfeita. 
+        * **Fórmula Geodésica WGS-84 (GeographicLib):** Camada de elite no backend para medir a distância aérea (linha reta) considerando o achatamento oblato da Terra (padrão aeronáutico).
+        * **Geopy e Haversine:** Sistemas de *Fallback Automático* acionados caso o motor principal detecte instabilidade, blindando o cálculo contra o erro "0 km".
         * **Clustering Espacial via DBSCAN:** Plota todos os retornos de APIs no mapa e agrupa as coordenadas verdadeiras que estão a menos de 500 metros umas das outras, descartando anomalias.
         * **Inferência Bayesiana Multiplicativa:** Motor heurístico que gera o "Score Global", multiplicando fatores de confiança se o CEP for validado, se a UF for condizente e se o IBGE reconhecer o distrito.
         """)
@@ -1661,9 +1697,9 @@ with st.sidebar:
         * **Geocodificação Rápida:** Modo para testar e inspecionar rotas uma a uma.
         * **Processamento em Lote:** O núcleo do sistema. Envie tabelas massivas e ele devolverá os dados processados e auditados em alta velocidade.
         * **Alocação de Hubs:** A inteligência competitiva. Descobre automaticamente qual é a sua Base Logística mais próxima de cada cliente da lista.
-        * **Analytics & Dashboards:** Visualização de KPIs para as localidades logísticas do último lote processado.
+        * **Enterprise Analytics:** Visualização de KPIs Regionais e Densidade Operacional.
         * **Enciclopédia do Sistema:** Detalhamento arquitetural completo do aplicativo.
-        * **Motores & APIs:** Monitor de infraestrutura de rede.
+        * **Motores & APIs:** Monitor de infraestrutura de rede e Geodésia.
         * **Auditoria:** Acesso à árvore de decisões (Caixa Preta) do algoritmo.
         """)
 
@@ -1675,12 +1711,10 @@ with st.sidebar:
         
     with st.expander("📚 Referências Bibliográficas"):
         st.markdown("""
+        * **GeographicLib / Geodesics on an ellipsoid:** Karney, C. F. F. (2013). "Algorithms for geodesics". Journal of Geodesy.
         * **Haversine Formula:** Sinnott, R.W. (1984). "Virtues of the Haversine". Sky and Telescope 68 (2): 159.
         * **DBSCAN Clustering:** Ester, M., Kriegel, H. P., Sander, J., & Xu, X. (1996). "A density-based algorithm for discovering clusters in large spatial databases with noise". In KDD.
         * **Teorema de Bayes:** Implementação algorítmica para consolidação de Ensembles e Motores de Decisão (XAI).
-        * **RapidFuzz:** Módulo C++ de Distância de Levenshtein para Python (MaxBachmann).
-        * **Bibliotecas Analíticas e Visuais:** Streamlit (App Framework), Altair & Vega-Lite (Grammar of Graphics), Plotly Express (Geo Intelligence).
-        * **Malhas de Dados Geográficos:** IBGE (Serviços de Dados), ArcGIS REST Services (ESRI), Nominatim/Photon (OpenStreetMap Foundation), OSRM (Project-OSRM), Google Maps Platform.
         """)
 
     st.markdown("---")
@@ -1728,7 +1762,7 @@ tab_individual, tab_processamento, tab_alocacao, tab_analytics, tab_enciclopedia
 ])
 
 with tab_individual:
-    st.info("💡 **Objetivo desta aba:** Validar rapidamente uma única rota. Digite a Origem e o Destino para obter a distância viária oficial do Google Maps, o desvio em relação a linha reta geodésica e a explicabilidade do motor de geocodificação.")
+    st.info("💡 **Objetivo desta aba:** Validar rapidamente uma única rota. Digite a Origem e o Destino para obter a distância viária oficial do Google Maps, o desvio geodésico rigoroso e a explicabilidade do motor de geocodificação.")
     st.markdown("### 🔍 Validador Rápido de Rota (Single-Shot)")
     col_ind1, col_ind2 = st.columns(2)
     with col_ind1: orig_ind = st.text_input("Origem (Endereço, POI ou Coordenadas)", "Ribeirão Cascalheira , MT, Brasil", help="Insira o local de partida. O sistema bloqueará a busca apenas para o Estado cuja sigla for identificada.")
@@ -1744,7 +1778,7 @@ with tab_individual:
                 
                 m_dist_via, m_dist_reta, m_time, m_balsa, m_score = st.columns(5)
                 m_dist_via.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0], help="Quilometragem oficial em asfalto extraída da nuvem Google Maps.")
-                m_dist_reta.metric("Distância Linha Reta", f"{res_ind[4]} km" if isinstance(res_ind[4], float) else res_ind[4], help="Distância matemática geodésica de alta precisão.")
+                m_dist_reta.metric("Distância Linha Reta", f"{res_ind[4]} km" if isinstance(res_ind[4], float) else res_ind[4], help="Distância matemática geodésica de alta precisão baseada na GeographicLib (WGS84).")
                 m_time.metric("Tempo Estimado", res_ind[1], help="Tempo de deslocamento estimado via transporte motorizado.")
                 m_balsa.metric("Uso de Balsas", res_ind[3], help="Validação de interseção de corpos hídricos (Ferry) auditada via OSRM.")
                 
@@ -1752,6 +1786,7 @@ with tab_individual:
                 m_score.metric("Score Global", f"{score_g} / 100", help="Grau de certeza e integridade dos dados obtidos no processamento.")
                 
                 st.info(f"🧠 **Estratégia de Roteamento (XAI):** {res_ind[28]}")
+                st.caption(f"🔧 **Status da Linha Reta:** {res_ind[30] if len(res_ind) > 30 else 'Não Mapeado'}")
                 
                 with st.expander("🕵️ Auditoria Detalhada da Geocodificação e Consenso", expanded=False):
                     st.caption(f"Status da Base IBGE Local: {'Ativa e Carregada' if len(IBGE_MUNICIPIOS) > 1000 else '⚠️ CORROMPIDA/FALHA DE API'}")
@@ -1811,7 +1846,7 @@ with tab_processamento:
                 start_lote_clock = time.time()
                 
                 novas_colunas = [
-                    'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Motivo Roteamento', 'Linha Reta', 'Fonte da Rota', 'Score da Rota', 
+                    'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Motivo Roteamento', 'Status Linha Reta', 'Linha Reta', 'Fonte da Rota', 'Score da Rota', 
                     'Confianca Origem', 'Score Num Origem', 'Distrito Origem', 'Municipio Origem', 'Fonte Geocoding Origem', 'Endereco Oficial Origem',
                     'Confianca Destino', 'Score Num Destino', 'Distrito Destino', 'Municipio Destino', 'Fonte Geocoding Destino', 'Endereco Oficial Destino',
                     'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Status da Rota'
@@ -1855,15 +1890,21 @@ with tab_processamento:
                 
                 df_final = rodar_pipeline_lote(df, list(pares_unicos), tarefas_priorizadas, nome_operador, barra_progresso, container_status)
                 
-                # Validação estrita da Linha Reta pós-processamento
+                # Validação Final de Coerção do DataFrame para Linha Reta
                 def recalculate_haversine_lote(row):
-                    if row['Lat Origem'] != 0.0 and row['Lat Destino'] != 0.0:
-                        nova_dist = calcular_distancia_linha_reta(row['Lat Origem'], row['Lon Origem'], row['Lat Destino'], row['Lon Destino'], contexto=f"Lote DF Revalidação: {row.get('Origem','')} a {row.get('Destino','')}")
+                    # Forçar verificação matemática no fim do loop sobre variáveis formatadas corretamente
+                    lat_o_f = float(row.get('Lat Origem', 0.0))
+                    lon_o_f = float(row.get('Lon Origem', 0.0))
+                    lat_d_f = float(row.get('Lat Destino', 0.0))
+                    lon_d_f = float(row.get('Lon Destino', 0.0))
+                    
+                    if lat_o_f != 0.0 and lat_d_f != 0.0:
+                        nova_dist, novo_status = calcular_distancia_linha_reta(lat_o_f, lon_o_f, lat_d_f, lon_d_f, contexto=f"DF Lote Post-Sweep: {row.get('Origem','')} a {row.get('Destino','')}")
                         if nova_dist > 0:
-                            return nova_dist
-                    return row['Linha Reta']
+                            return pd.Series([nova_dist, novo_status])
+                    return pd.Series([row['Linha Reta'], row['Status Linha Reta']])
                 
-                df_final['Linha Reta'] = df_final.apply(recalculate_haversine_lote, axis=1)
+                df_final[['Linha Reta', 'Status Linha Reta']] = df_final.apply(recalculate_haversine_lote, axis=1)
 
                 tempo_lote_segundos = round(time.time() - start_lote_clock, 2)
                 cache_historico_lotes.set(f"lote_{start_lote_clock}", {
@@ -1881,7 +1922,7 @@ with tab_processamento:
                 
                 st.session_state['df_processado'] = df_final
                 container_status.empty(); barra_progresso.empty()
-                st.success("✨ Processamento em lote corporativo concluído com êxito!")
+                st.success("✨ Processamento em lote corporativo concluído com êxito e Linhas Retas Auditadas!")
                 
                 output_buffer = io.BytesIO()
                 with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: df_final.to_excel(writer, index=False)
@@ -1976,34 +2017,38 @@ with tab_alocacao:
                     
                     dest_to_hub = {}
                     dest_to_linha_reta = {}
+                    dest_to_status_lr = {}
                     runner_up_map = {}
                     
                     for o_nome, (o_lat, o_lon, o_end) in dest_coords.items():
                         if o_lat == 0.0 or o_lon == 0.0:
                             dest_to_hub[o_nome] = "FALHA_GEO_ORIGEM"
+                            dest_to_status_lr[o_nome] = "Falha Espacial"
                             continue
                             
                         hubs_dist = []
                         for h_nome, (h_lat, h_lon, h_end) in hubs_validos.items():
-                            dist_v = calcular_distancia_linha_reta(o_lat, o_lon, h_lat, h_lon, contexto=f"Hub Allocation: {o_nome} a {h_nome}")
-                            hubs_dist.append((dist_v, h_nome, h_lat, h_lon))
+                            dist_v, stat_v = calcular_distancia_linha_reta(o_lat, o_lon, h_lat, h_lon, contexto=f"Hub Allocation: {o_nome} a {h_nome}")
+                            hubs_dist.append((dist_v, h_nome, h_lat, h_lon, stat_v))
                             
                         hubs_dist.sort(key=lambda x: x[0])
                         
                         if hubs_dist:
                             dest_to_hub[o_nome] = hubs_dist[0][1]
                             dest_to_linha_reta[o_nome] = hubs_dist[0][0]
+                            dest_to_status_lr[o_nome] = hubs_dist[0][4]
                             if len(hubs_dist) > 1:
-                                runner_up_map[o_nome] = hubs_dist[1]
+                                runner_up_map[o_nome] = (hubs_dist[1][0], hubs_dist[1][1], hubs_dist[1][2], hubs_dist[1][3])
                         else:
                             dest_to_hub[o_nome] = "NENHUM_HUB_VALIDO"
+                            dest_to_status_lr[o_nome] = "Falha Estrutural de Hubs"
                     
                     df_pares = df_dest.copy()
                     df_pares['Origem'] = df_pares[dest_col_name].astype(str).str.strip()
                     df_pares['Destino'] = df_pares['Origem'].map(dest_to_hub).fillna("FALHA_GEO_ORIGEM")
                     
                     novas_colunas = [
-                        'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Motivo Roteamento', 'Linha Reta', 'Fonte da Rota', 'Score da Rota', 
+                        'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Motivo Roteamento', 'Status Linha Reta', 'Linha Reta', 'Fonte da Rota', 'Score da Rota', 
                         'Confianca Origem', 'Score Num Origem', 'Distrito Origem', 'Municipio Origem', 'Fonte Geocoding Origem', 'Endereco Oficial Origem',
                         'Confianca Destino', 'Score Num Destino', 'Distrito Destino', 'Municipio Destino', 'Fonte Geocoding Destino', 'Endereco Oficial Destino',
                         'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Status da Rota',
@@ -2040,16 +2085,22 @@ with tab_alocacao:
                     status_alo.empty(); progress_alo.empty()
                     
                     df_final_alo['Linha Reta'] = df_final_alo['Origem'].astype(str).str.strip().map(dest_to_linha_reta).fillna(df_final_alo['Linha Reta'])
+                    df_final_alo['Status Linha Reta'] = df_final_alo['Origem'].astype(str).str.strip().map(dest_to_status_lr).fillna(df_final_alo['Status Linha Reta'])
                     
-                    # Validação estrita da Linha Reta pós-processamento da Alocação
+                    # Validação Post-Sweep
                     def recalculate_haversine_alo(row):
-                        if row['Lat Origem'] != 0.0 and row['Lat Destino'] != 0.0:
-                            nova_dist = calcular_distancia_linha_reta(row['Lat Origem'], row['Lon Origem'], row['Lat Destino'], row['Lon Destino'], contexto=f"Alo DF Revalidação: {row.get('Origem','')} a {row.get('Destino','')}")
+                        lat_o_f = float(row.get('Lat Origem', 0.0))
+                        lon_o_f = float(row.get('Lon Origem', 0.0))
+                        lat_d_f = float(row.get('Lat Destino', 0.0))
+                        lon_d_f = float(row.get('Lon Destino', 0.0))
+                        
+                        if lat_o_f != 0.0 and lat_d_f != 0.0:
+                            nova_dist, novo_status = calcular_distancia_linha_reta(lat_o_f, lon_o_f, lat_d_f, lon_d_f, contexto=f"Alo DF Revalidação: {row.get('Origem','')} a {row.get('Destino','')}")
                             if nova_dist > 0:
-                                return nova_dist
-                        return row['Linha Reta']
+                                return pd.Series([nova_dist, novo_status])
+                        return pd.Series([row['Linha Reta'], row['Status Linha Reta']])
                     
-                    df_final_alo['Linha Reta'] = df_final_alo.apply(recalculate_haversine_alo, axis=1)
+                    df_final_alo[['Linha Reta', 'Status Linha Reta']] = df_final_alo.apply(recalculate_haversine_alo, axis=1)
 
                     tempo_alo_segundos = round(time.time() - start_alo_clock, 2)
                     cache_historico_lotes.set(f"alocacao_{start_alo_clock}", {
@@ -2076,7 +2127,7 @@ with tab_alocacao:
                     st.download_button(label="📥 Baixar Planilha de Alocação Competitiva (.xlsx)", data=output_buffer.getvalue(), file_name="matriz_alocacao_competitiva.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, help="O download traz todas as colunas de sua planilha original inalteradas e preenchidas.")
 
 with tab_analytics:
-    st.info("💡 **Objetivo desta aba:** Visualizar graficamente a distribuição geográfica e os indicadores logísticos das *localidades e entregas* do seu último lote. Monitore volume por Estado (UF), Municípios mais procurados e a densidade viária.")
+    st.info("💡 **Objetivo desta aba:** Visualizar graficamente a distribuição geográfica e os indicadores logísticos das *localidades e entregas* do seu último lote processado.")
     
     col_d_title, col_d_btn = st.columns([80, 20])
     with col_d_title:
@@ -2104,6 +2155,14 @@ with tab_analytics:
             "SAO PAULO": "SP", "SERGIPE": "SE", "TOCANTINS": "TO"
         }
 
+        REGIOES_BRASIL = {
+            "Norte": ["AC", "AP", "AM", "PA", "RO", "RR", "TO"],
+            "Nordeste": ["AL", "BA", "CE", "MA", "PB", "PE", "PI", "RN", "SE"],
+            "Centro-Oeste": ["DF", "GO", "MT", "MS"],
+            "Sudeste": ["ES", "MG", "RJ", "SP"],
+            "Sul": ["PR", "RS", "SC"]
+        }
+        
         def extrair_uf_precisa(endereco):
             if not isinstance(endereco, str): return "Indefinido"
             end_upper = unidecode(endereco.upper())
@@ -2119,9 +2178,19 @@ with tab_analytics:
             
         df_kpi['UF_Sintetica_Origem'] = df_kpi['Endereco Oficial Origem'].apply(extrair_uf_precisa)
         
+        def obter_regiao(uf):
+            for regiao, ufs in REGIOES_BRASIL.items():
+                if uf in ufs: return regiao
+            return "Indefinido"
+            
+        df_kpi['Regiao_Sintetica_Origem'] = df_kpi['UF_Sintetica_Origem'].apply(obter_regiao)
+        
         st.markdown("#### 🎛️ Painel de Controle de Filtros Avançados")
         with st.expander("Filtros Segmentados Globais (Recalcula todos os Dashboards)", expanded=False):
-            col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+            col_f0, col_f1, col_f2, col_f3, col_f4 = st.columns(5)
+            
+            lista_regioes = ["Todas"] + sorted(list(df_kpi['Regiao_Sintetica_Origem'].unique()))
+            regiao_selecionada = col_f0.selectbox("Região do Brasil", lista_regioes)
             
             lista_ufs = ["Todas"] + sorted(list(df_kpi['UF_Sintetica_Origem'].unique()))
             uf_selecionada = col_f1.selectbox("UF de Origem", lista_ufs)
@@ -2150,6 +2219,7 @@ with tab_analytics:
             score_range = col_f7.slider("Score Geodésico", min_value=0.0, max_value=100.0, value=(min_score_val, 100.0))
             
         df_filtrado = df_kpi.copy()
+        if regiao_selecionada != "Todas": df_filtrado = df_filtrado[df_filtrado['Regiao_Sintetica_Origem'] == regiao_selecionada]
         if uf_selecionada != "Todas": df_filtrado = df_filtrado[df_filtrado['UF_Sintetica_Origem'] == uf_selecionada]
         if mun_selecionado != "Todos": df_filtrado = df_filtrado[df_filtrado['Municipio Origem'] == mun_selecionado]
         if status_selecionado != "Todos": df_filtrado = df_filtrado[df_filtrado['Status da Rota'] == status_selecionado]
@@ -2164,43 +2234,71 @@ with tab_analytics:
         else:
             df_sucesso = df_filtrado[df_filtrado["Status da Rota"].str.contains("Erro") == False]
             
-            st.markdown("#### 🏆 Visão Executiva Macro (KPIs)")
-            with st.container(border=True):
-                col_k1, col_k2, col_k3, col_k4, col_k5, col_k6 = st.columns(6)
-                total_distancia = df_sucesso['Distancia'].sum()
-                total_tempo_mins = df_sucesso['Tempo_Minutos'].sum()
-                tempo_total_str = f"{total_tempo_mins // 60}h {total_tempo_mins % 60}m"
-                dist_media = total_distancia / len(df_sucesso) if len(df_sucesso) > 0 else 0
-                tempo_medio = total_tempo_mins / len(df_sucesso) if len(df_sucesso) > 0 else 0
-                tempo_medio_str = f"{int(tempo_medio // 60)}h {int(tempo_medio % 60)}m"
-                
-                col_k1.metric("Rotas Processadas", f"{len(df_filtrado)}")
-                col_k2.metric("Distância Acumulada", f"{round(total_distancia, 1)} km")
-                col_k3.metric("Tempo Acumulado", f"{tempo_total_str}")
-                col_k4.metric("Distância Média/Rota", f"{round(dist_media, 1)} km")
-                col_k5.metric("Tempo Médio/Rota", f"{tempo_medio_str}")
-                col_k6.metric("Score Geodésico Médio", f"{round(df_sucesso['Score Final Global'].mean(), 1) if not df_sucesso.empty else 0}/100")
+            tab_kpi_nacional, tab_kpi_regional = st.tabs(["🌎 Visão Nacional Macro", "📍 Análise Regionalizada (Nova Função)"])
+            
+            with tab_kpi_nacional:
+                with st.container(border=True):
+                    col_k1, col_k2, col_k3, col_k4, col_k5, col_k6 = st.columns(6)
+                    total_distancia = df_sucesso['Distancia'].sum()
+                    total_tempo_mins = df_sucesso['Tempo_Minutos'].sum()
+                    tempo_total_str = f"{total_tempo_mins // 60}h {total_tempo_mins % 60}m"
+                    dist_media = total_distancia / len(df_sucesso) if len(df_sucesso) > 0 else 0
+                    tempo_medio = total_tempo_mins / len(df_sucesso) if len(df_sucesso) > 0 else 0
+                    tempo_medio_str = f"{int(tempo_medio // 60)}h {int(tempo_medio % 60)}m"
+                    
+                    col_k1.metric("Rotas Processadas", f"{len(df_filtrado)}")
+                    col_k2.metric("Distância Acumulada", f"{round(total_distancia, 1)} km")
+                    col_k3.metric("Tempo Acumulado", f"{tempo_total_str}")
+                    col_k4.metric("Distância Média/Rota", f"{round(dist_media, 1)} km")
+                    col_k5.metric("Tempo Médio/Rota", f"{tempo_medio_str}")
+                    col_k6.metric("Score Geodésico Médio", f"{round(df_sucesso['Score Final Global'].mean(), 1) if not df_sucesso.empty else 0}/100")
 
-                st.divider()
-                
-                col_k7, col_k8, col_k9, col_k10, col_k11, col_k12 = st.columns(6)
-                muns_atendidos = df_filtrado['Municipio Destino'].nunique()
-                ufs_atendidas = df_filtrado['Endereco Oficial Destino'].apply(extrair_uf_precisa).nunique()
-                rotas_balsa = len(df_filtrado[df_filtrado['Balsas'] == 'Sim'])
-                taxa_sucesso = round((len(df_sucesso) / len(df_filtrado)) * 100, 1) if len(df_filtrado) > 0 else 0
-                
-                col_k7.metric("Cidades Alcançadas", f"{muns_atendidos}")
-                col_k8.metric("Estados Alcançados (UFs)", f"{ufs_atendidas}")
-                col_k9.metric("Maior Viagem Mapeada", f"{round(df_filtrado['Distancia'].max(), 1)} km")
-                col_k10.metric("Rotas Fluviais (Balsa)", f"{rotas_balsa}")
-                col_k11.metric("Taxa de Sucesso (Roteamento)", f"{taxa_sucesso}%")
-                col_k12.metric("Confiança 'Altíssima'", f"{len(df_filtrado[df_filtrado['Confianca Destino'] == 'ALTISSIMA'])}")
+                    st.divider()
+                    
+                    col_k7, col_k8, col_k9, col_k10, col_k11, col_k12 = st.columns(6)
+                    muns_atendidos = df_filtrado['Municipio Destino'].nunique()
+                    ufs_atendidas = df_filtrado['Endereco Oficial Destino'].apply(extrair_uf_precisa).nunique()
+                    rotas_balsa = len(df_filtrado[df_filtrado['Balsas'] == 'Sim'])
+                    taxa_sucesso = round((len(df_sucesso) / len(df_filtrado)) * 100, 1) if len(df_filtrado) > 0 else 0
+                    
+                    col_k7.metric("Cidades Alcançadas", f"{muns_atendidos}")
+                    col_k8.metric("Estados Alcançados (UFs)", f"{ufs_atendidas}")
+                    col_k9.metric("Maior Viagem Mapeada", f"{round(df_filtrado['Distancia'].max(), 1)} km")
+                    col_k10.metric("Rotas Fluviais (Balsa)", f"{rotas_balsa}")
+                    col_k11.metric("Taxa de Sucesso (Roteamento)", f"{taxa_sucesso}%")
+                    col_k12.metric("Confiança 'Altíssima'", f"{len(df_filtrado[df_filtrado['Confianca Destino'] == 'ALTISSIMA'])}")
+                    
+            with tab_kpi_regional:
+                with st.container(border=True):
+                    df_regioes = df_filtrado.groupby('Regiao_Sintetica_Origem').agg(
+                        Rotas=('Origem', 'count'),
+                        Dist_Media=('Distancia', 'mean'),
+                        Tempo_Medio_Horas=('Tempo_Horas', 'mean'),
+                        Score_Medio=('Score Final Global', 'mean'),
+                        Muns_Unicos=('Municipio Origem', 'nunique')
+                    ).reset_index()
+                    df_regioes = df_regioes[df_regioes['Regiao_Sintetica_Origem'] != "Indefinido"]
+                    df_regioes['Participacao_Nacional'] = round((df_regioes['Rotas'] / len(df_filtrado)) * 100, 1)
+                    
+                    if not df_regioes.empty:
+                        col_r1, col_r2 = st.columns(2)
+                        with col_r1:
+                            bar_regiao = alt.Chart(df_regioes).mark_bar(color='#3B82F6').encode(
+                                x=alt.X('Rotas:Q', title='Volume de Rotas'),
+                                y=alt.Y('Regiao_Sintetica_Origem:N', sort='-x', title='Região do Brasil'),
+                                tooltip=['Regiao_Sintetica_Origem', 'Rotas', 'Participacao_Nacional', 'Dist_Media', 'Muns_Unicos']
+                            ).properties(height=280, title="Ranking de Volume por Região Nacional")
+                            st.altair_chart(bar_regiao, use_container_width=True)
+                        with col_r2:
+                            st.write("Tabela Mestre Regional")
+                            st.dataframe(df_regioes.rename(columns={'Regiao_Sintetica_Origem': 'Região Geográfica', 'Dist_Media': 'Distância Média (km)', 'Tempo_Medio_Horas': 'Tempo Médio (h)', 'Score_Medio': 'Score Médio', 'Muns_Unicos': 'Municípios Atendidos', 'Participacao_Nacional': 'Share Nacional (%)'}), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("Não há dados regionais válidos mapeados neste lote.")
             
-            st.markdown("#### 📈 Análise Operacional (Gráficos Interativos Cross-Filtering)")
-            st.caption("✨ **DICA DE OURO INTERATIVA:** Clique em uma fatia da rosca ou em uma barra de município. A matriz de dispersão E a tabela mestre reagirão automaticamente. Desenhar um retângulo na Matriz de Dispersão também atualizará os demais gráficos (Cross-filter bidirecional).")
+            st.markdown("#### 📈 Análise Operacional de Micro-Regiões (Cross-Filtering)")
+            st.caption("✨ **DICA DE OURO INTERATIVA:** Clique em uma fatia da rosca ou barra de município. A matriz de dispersão E a tabela mestre reagirão automaticamente.")
             
             with st.container(border=True):
-                # Inicialização correta de parâmetros independentes para o Streamlit
                 click_uf = alt.selection_point(fields=['UF_Sintetica_Origem'], name='UF')
                 click_mun = alt.selection_point(fields=['Municipio Origem'], name='Mun')
                 brush = alt.selection_interval(name='Brush')
@@ -2208,7 +2306,6 @@ with tab_analytics:
                 top_muns = df_filtrado['Municipio Origem'].value_counts().head(15).index.tolist()
                 base_chart = alt.Chart(df_filtrado)
 
-                # CORREÇÃO: Aplicar .add_params e condicional exclusiva a este gráfico
                 chart_pie = base_chart.mark_arc(innerRadius=60).encode(
                     theta=alt.Theta("count():Q", stack=True),
                     color=alt.Color("UF_Sintetica_Origem:N", legend=alt.Legend(title="Estados (UF)", orient='bottom')),
@@ -2216,7 +2313,6 @@ with tab_analytics:
                     tooltip=['UF_Sintetica_Origem', 'count()']
                 ).add_params(click_uf).properties(height=350, title="Volume de Demanda por Estado (UF)")
 
-                # CORREÇÃO: Aplicar .add_params e condicional exclusiva a este gráfico
                 bar_base = base_chart.transform_filter(alt.FieldOneOfPredicate(field='Municipio Origem', oneOf=top_muns))
                 bar = bar_base.mark_bar(color='#3B82F6').encode(
                     x=alt.X('count():Q', title='Volume de Rotas', axis=alt.Axis(tickMinStep=1)),
@@ -2252,7 +2348,6 @@ with tab_analytics:
                 
                 status_palette = alt.Scale(domain=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro'], range=['#2ECC71', '#3498DB', '#F1C40F', '#E67E22', '#E74C3C'])
                 
-                # CORREÇÃO: Aplicar .add_params e condicional exclusiva a este gráfico
                 scatter = base_chart.mark_circle(size=80).encode(
                     x=alt.X('Distancia:Q', title='Distância Viária Oficial (km)', scale=alt.Scale(zero=False, nice=True, padding=10)),
                     y=alt.Y('Tempo_Horas:Q', title='Tempo Estimado (Horas)', scale=alt.Scale(zero=False, nice=True, padding=10)),
@@ -2267,7 +2362,7 @@ with tab_analytics:
                     evento_brush = None
                     st.altair_chart(scatter, use_container_width=True)
 
-            st.markdown("#### 🗺️ Análise Geográfica Avançada (Torre de Controle Espacial)")
+            st.markdown("#### 🗺️ Torre de Controle Espacial (Densidade Populacional Corporativa)")
             with st.container(border=True):
                 col_m1, col_m2 = st.columns([80, 20])
                 with col_m2:
@@ -2280,7 +2375,7 @@ with tab_analytics:
                 df_mapa = df_mapa[(df_mapa['Lat Destino'] != 0.0) & (df_mapa['Lon Destino'] != 0.0)]
                 
                 if not df_mapa.empty:
-                    df_agg = df_mapa.groupby(['Municipio Destino', 'Endereco Oficial Destino', 'UF_Sintetica_Origem']).agg(
+                    df_agg = df_mapa.groupby(['Municipio Destino', 'Endereco Oficial Destino', 'UF_Sintetica_Origem', 'Regiao_Sintetica_Origem']).agg(
                         Qtd_Rotas=('Origem', 'count'),
                         Lat_Media=('Lat Destino', 'mean'),
                         Lon_Media=('Lon Destino', 'mean'),
@@ -2290,7 +2385,7 @@ with tab_analytics:
                     ).reset_index()
 
                     total_rotas_mapa = df_agg['Qtd_Rotas'].sum()
-                    df_agg['% do Total'] = (df_agg['Qtd_Rotas'] / total_rotas_mapa) * 100
+                    df_agg['Participacao_Nacional_%'] = (df_agg['Qtd_Rotas'] / total_rotas_mapa) * 100
                     
                     estilo_mapbox = "carto-darkmatter"
                     if map_style_selection == "OpenStreetMap Clássico": estilo_mapbox = "open-street-map"
@@ -2301,8 +2396,8 @@ with tab_analytics:
                         lat='Lat_Media',
                         lon='Lon_Media',
                         size='Qtd_Rotas',
-                        color='Score_Medio',
-                        color_continuous_scale=px.colors.sequential.Plasma,
+                        color='Qtd_Rotas', # NOVA REGRA: Coloração reflete o volume físico / densidade
+                        color_continuous_scale=px.colors.sequential.Blues,
                         size_max=45,
                         zoom=3.5,
                         mapbox_style=estilo_mapbox,
@@ -2311,13 +2406,14 @@ with tab_analytics:
                             'Lat_Media': False,
                             'Lon_Media': False,
                             'UF_Sintetica_Origem': True,
+                            'Regiao_Sintetica_Origem': True,
                             'Qtd_Rotas': True,
-                            '% do Total': ':.1f',
+                            'Participacao_Nacional_%': ':.2f',
                             'Dist_Media': ':.1f',
                             'Tempo_Medio': ':.1f',
-                            'Score_Medio': ':.1f'
+                            'Score_Medio': False
                         },
-                        title="Mapa de Calor Municipal por Demanda de Rota"
+                        title="Heatmap Corporativo de Densidade de Rotas"
                     )
                     
                     if map_style_selection == "Satélite (Esri Imagens)":
@@ -2350,7 +2446,6 @@ with tab_analytics:
                 ufs_selecionadas = []
                 muns_selecionados = []
                 
-                # A lógica de filtro Python permanece intocada, consumindo os objetos capturados pelo Streamlit on_select
                 if evento_uf and hasattr(evento_uf, 'selection'):
                     sel_uf = evento_uf.selection.get('UF', [])
                     for item in sel_uf:
@@ -2376,22 +2471,23 @@ with tab_analytics:
                 tabela_h = min(800, max(300, len(df_tabela) * 35 + 43))
                 
                 st.dataframe(
-                    df_tabela[['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota', 'Score Final Global', 'Link da Rota']],
+                    df_tabela[['Origem', 'Destino', 'Distancia', 'Linha Reta', 'Tempo', 'Status da Rota', 'Status Linha Reta', 'Link da Rota']],
                     use_container_width=True,
                     height=tabela_h,
                     column_config={"Link da Rota": st.column_config.LinkColumn("🔗 Abrir no Maps")},
                     hide_index=True
                 )
 
-            st.markdown("#### 🚨 Controle de Qualidade de Dados (Auditoria de Falhas Estruturais)")
+            st.markdown("#### 🚨 Controle de Qualidade de Dados (Auditoria Geodésica e de Falhas)")
             with st.container(border=True):
-                df_suspeitas = df_filtrado[(df_filtrado['Score Final Global'] < 70) | (df_filtrado['Status da Rota'] == "Erro") | (df_filtrado['Confianca Origem'] == "BAIXA") | (df_filtrado['Linha Reta'] == 0.0)]
+                # Inclui agora a regra dura de auditoria da Linha Reta
+                df_suspeitas = df_filtrado[(df_filtrado['Score Final Global'] < 70) | (df_filtrado['Status da Rota'] == "Erro") | (df_filtrado['Confianca Origem'] == "BAIXA") | ((df_filtrado['Linha Reta'] == 0.0) & (df_filtrado['Origem'] != df_filtrado['Destino']))]
                 
                 if not df_suspeitas.empty:
                     st.warning(f"Atenção: Foram identificadas {len(df_suspeitas)} rotas requerendo intervenção humana ou revisão de cadastro mestre.")
-                    st.dataframe(df_suspeitas[['Origem', 'Destino', 'Linha Reta', 'Score Final Global', 'Confianca Origem', 'Fonte Geocoding Origem', 'Motivo Roteamento']], use_container_width=True)
+                    st.dataframe(df_suspeitas[['Origem', 'Destino', 'Linha Reta', 'Status Linha Reta', 'Score Final Global', 'Confianca Origem', 'Motivo Roteamento']], use_container_width=True)
                 else:
-                    st.success("🎉 Nenhuma anomalia encontrada. Todas as rotas neste recorte passaram no controle de qualidade geodésica rígida (Score >= 70 e Confiança > Baixa).")
+                    st.success("🎉 Nenhuma anomalia encontrada. Todas as rotas neste recorte passaram no controle de qualidade geodésica rígida (Score >= 70 e Distância Matemática não-nula).")
 
             st.markdown("#### ⚙️ Saúde e Performance de Infraestrutura (Lote Atual)")
             with st.container(border=True):
@@ -2399,7 +2495,7 @@ with tab_analytics:
                 
                 with col_h1:
                     hist_dist = alt.Chart(df_filtrado).mark_bar(color='#3B82F6').encode(
-                        x=alt.X("Distancia:Q", bin=alt.Bin(maxbins=20), title="Faixas de Distância (km)"),
+                        x=alt.X("Distancia:Q", bin=alt.Bin(maxbins=20), title="Faixas de Distância Viária (km)"),
                         y=alt.Y('count():Q', title="Volume de Rotas")
                     ).properties(height=250, title="Distribuição de Distâncias")
                     st.altair_chart(hist_dist, use_container_width=True)
@@ -2408,20 +2504,20 @@ with tab_analytics:
                     hist_tempo = alt.Chart(df_filtrado).mark_bar(color='#2563EB').encode(
                         x=alt.X("Tempo_Horas:Q", bin=alt.Bin(maxbins=20), title="Faixas de Tempo (Horas)"),
                         y=alt.Y('count():Q', title="Volume de Rotas")
-                    ).properties(height=250, title="Distribuição de Tempos")
+                    ).properties(height=250, title="Distribuição de Tempos Operacionais")
                     st.altair_chart(hist_tempo, use_container_width=True)
                     
                 with col_h3:
-                    hist_score = alt.Chart(df_filtrado).mark_bar(color='#1D4ED8').encode(
-                        x=alt.X("Score Final Global:Q", bin=alt.Bin(maxbins=20), title="Faixas de Score Geodésico"),
+                    hist_lr = alt.Chart(df_filtrado).mark_bar(color='#10B981').encode(
+                        x=alt.X("Linha Reta:Q", bin=alt.Bin(maxbins=20), title="Faixas Geodésicas (km)"),
                         y=alt.Y('count():Q', title="Volume de Rotas")
-                    ).properties(height=250, title="Distribuição de Confiabilidade (Qualidade)")
-                    st.altair_chart(hist_score, use_container_width=True)
+                    ).properties(height=250, title="Distribuição de Distância em Linha Reta")
+                    st.altair_chart(hist_lr, use_container_width=True)
                     
                 st.divider()
                 col_p1, col_p2, col_p3 = st.columns(3)
-                col_p1.metric("Tempo Médio Geocoding / Rota (Motor de Busca)", f"{round(df_filtrado['Tempo Geocoding (s)'].mean(), 2)} s")
-                col_p2.metric("Tempo Médio Roteamento / Rota (API de Asfalto)", f"{round(df_filtrado['Tempo Roteamento (s)'].mean(), 2)} s")
+                col_p1.metric("Tempo Médio Geocoding / Rota (Busca Espacial)", f"{round(df_filtrado['Tempo Geocoding (s)'].mean(), 2)} s")
+                col_p2.metric("Tempo Médio Roteamento / Rota (API Asfalto)", f"{round(df_filtrado['Tempo Roteamento (s)'].mean(), 2)} s")
                 col_p3.metric("Tempo Global Total / Rota (Processamento Real)", f"{round(df_filtrado['Tempo Total (s)'].mean(), 2)} s")
 
     else:
@@ -2476,11 +2572,14 @@ with tab_enciclopedia:
     
     O candidato que atingir a maior probabilidade se torna a coordenada de Origem ou Destino que passará para a fase de Roteamento asfáltico.
 
-    ## 6. Validação Geodésica e Roteamento (A Marreta Matemática)
-    Com o Ponto A e o Ponto B em mãos, o aplicativo efetua um cálculo matemático puro: A **Fórmula de Haversine**. 
-    Ela mede, respeitando a curvatura da Terra, a distância exata em Linha Reta entre os dois pontos.
+    ## 6. Validação Geodésica Corporativa (A Marreta Matemática)
+    Com o Ponto A e o Ponto B em mãos, o aplicativo efetua um cálculo matemático puro no sub-módulo `calcular_distancia_linha_reta`. Ele é regido por **4 Camadas de Contingência**:
+    1. A **GeographicLib** calcula a distância em um elipsoide perfeito modelo WGS-84 (altíssima precisão).
+    2. Fallback para API `Geopy Geodesic`.
+    3. Fallback manual matemático para a *Fórmula de Haversine*.
+    4. Varredura final do DataFrame forçando reprocessamento de anomalias (Cache Unpoisoning).
     
-    Só então o motor do Google Maps é acionado. Se o Google disser que a viagem de asfalto tem 1.000 km, mas a Linha Reta matemática de Haversine atestou que a distância é de apenas 15 km, o motor "rebela-se" contra o Google Maps, entendendo que ocorreu uma **Violação Geodésica**, rejeita o caminho do asfalto falso e adota lógicas e heurísticas de correção.
+    Só então o motor do Google Maps é acionado. Se o Google disser que a viagem de asfalto tem 1.000 km, mas a Linha Reta matemática atestou que a distância é de apenas 15 km, o motor "rebela-se" contra o Google Maps, entendendo que ocorreu uma **Violação Geodésica**, rejeita o caminho do asfalto falso e adota lógicas e heurísticas de correção.
 
     ## 7. A Matriz de Alocação de Hubs (Competição Geográfica)
     A aba de Alocação não mede apenas "De A para B". Ela aplica a estratégia logística de *Nearest Neighbor*.
@@ -2533,8 +2632,10 @@ with tab_motores:
     
     st.dataframe(pd.DataFrame(health_data), use_container_width=True)
 
-    st.markdown("#### 🌐 Auditoria do Motor Geodésico (Métrica Anti-Zero)")
-    st.dataframe(pd.DataFrame([METRICAS_DISTANCIA]), use_container_width=True)
+    st.markdown("#### 🌐 Auditoria do Motor Geodésico Contínuo (Métricas de Integridade)")
+    df_metricas_lr = pd.DataFrame([METRICAS_DISTANCIA])
+    df_metricas_lr.columns = ["Total de Cálculos de Linha Reta", "Sucesso: GeographicLib (WGS84)", "Sucesso: Geopy", "Fallback: Haversine", "Correções Automáticas (Anti-Zero)", "Falhas Críticas", "Rotas Unpoisoned (Cache Reparado)"]
+    st.dataframe(df_metricas_lr, use_container_width=True)
 
 with tab_auditoria:
     st.info("💡 **Objetivo desta aba:** Transparência Total e Explicabilidade (XAI). Funciona como uma 'Caixa Preta' aberta do sistema. Verifique em detalhes qual algoritmo tomou a decisão para cada coordenada e por que ele escolheu descartar outras opções em caso de empate de proximidade.")
