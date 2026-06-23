@@ -55,7 +55,8 @@ METRICAS_DISTANCIA = {
     "correcoes_automaticas": 0,
     "falhas_criticas": 0,
     "cache_unpoisoned": 0,
-    "barreira_territorial": 0
+    "barreira_territorial": 0,
+    "desambiguacoes_estritas": 0
 }
 
 # ==============================================================================
@@ -63,9 +64,6 @@ METRICAS_DISTANCIA = {
 # ==============================================================================
 st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="wide")
 
-# ==============================================================================
-# 🎨 INJEÇÃO DE CSS CORPORATIVO (UI/UX POWER BI / TABLEAU STYLE)
-# ==============================================================================
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
@@ -74,25 +72,22 @@ st.markdown("""
         font-family: 'Inter', sans-serif !important;
     }
     
-    /* Backgrounds e Superfícies */
     .stApp {
         background-color: #0E1117;
     }
     
-    /* Sidebar Modernizada */
     [data-testid="stSidebar"] {
         background-color: #161A25;
         border-right: 1px solid #2D3342;
     }
     
-    /* Cards KPI Executivos */
     [data-testid="stMetric"] {
         background-color: #1E232F;
         border: 1px solid #2D3342;
         padding: 1.2rem;
         border-radius: 8px;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-        border-left: 4px solid #3B82F6; /* Accent Blue */
+        border-left: 4px solid #3B82F6;
         transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
     }
     [data-testid="stMetric"]:hover {
@@ -114,7 +109,6 @@ st.markdown("""
         font-size: 0.85rem;
     }
     
-    /* Estilização de Tabs (Abas) */
     [data-baseweb="tab-list"] {
         gap: 8px;
         background-color: transparent;
@@ -139,7 +133,6 @@ st.markdown("""
         border-color: #3B82F6;
     }
     
-    /* Botões Principais */
     .stButton > button {
         border-radius: 6px;
         font-weight: 600;
@@ -155,7 +148,6 @@ st.markdown("""
         box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.5);
     }
     
-    /* Containers e Expansores */
     [data-testid="stExpander"] {
         background-color: #1E232F;
         border: 1px solid #2D3342;
@@ -166,14 +158,12 @@ st.markdown("""
         color: #E5E7EB;
     }
     
-    /* DataFrames (Tabelas) */
     [data-testid="stDataFrame"] {
         border: 1px solid #2D3342;
         border-radius: 8px;
         overflow: hidden;
     }
     
-    /* Headers de Estilização Customizada */
     .corporate-header {
         background: linear-gradient(135deg, #161A25 0%, #1E232F 100%);
         padding: 24px;
@@ -217,10 +207,10 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v55" not in st.session_state:
+if "cache_limpo_v56" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v55"] = True
+    st.session_state["cache_limpo_v56"] = True
     st.session_state['dash_key'] = 0
 
 def realizar_manutencao_logs_google():
@@ -259,12 +249,6 @@ EXECUTOR_APIS = ThreadPoolExecutor(max_workers=16)
 # ==============================================================================
 # 🎛️ DADOS GLOBAIS THREAD-SAFE, HUB B2B E EXPANSÃO SEMÂNTICA
 # ==============================================================================
-BASE_POIS_LOGISTICOS = {
-    "CD MAGAZINE LUIZA CAXIAS": {"lat": -22.7853, "lon": -43.3121, "endereco": "Centro de Distribuição Magazine Luiza, Duque de Caxias, RJ, BRASIL", "municipio": "DUQUE DE CAXIAS", "uf": "RJ"},
-    "CD MERCADO LIVRE CAJAMAR": {"lat": -23.3541, "lon": -46.8852, "endereco": "Centro de Distribuição Mercado Livre, Cajamar, SP, BRASIL", "municipio": "CAJAMAR", "uf": "SP"},
-    "CD AMAZON CAJAMAR": {"lat": -23.3600, "lon": -46.8900, "endereco": "Centro de Distribuição Amazon, Cajamar, SP, BRASIL", "municipio": "CAJAMAR", "uf": "SP"}
-}
-
 SINONIMOS_SEMANTICOS = {
     "UNB": "UNIVERSIDADE DE BRASILIA", "CATOLICA": "UNIVERSIDADE CATOLICA",
     "JK": "JUSCELINO KUBITSCHEK", "HBDF": "HOSPITAL DE BASE DO DISTRITO FEDERAL",
@@ -391,24 +375,6 @@ class MotorEnderecoCanônico:
             "SQN", "SQS", "SHIS", "SHIN", "SCRN", "SCS", "SRTVN", "CLS", "CLN",
             "QNL", "QNM", "QNN", "QNG", "QNJ", "QNK", "QI", "QE", "QC", "QR", "QS", "QSC"
         ]
-        
-        self.mapa_contexto_df = {
-            "TAGUATINGA": "TAGUATINGA", "GAMA": "GAMA", "PONTE ALTA": "GAMA", "PONTE ALTA NORTE": "GAMA",
-            "PONTE ALTA SUL": "GAMA", "CEILANDIA": "CEILANDIA", "SOL NASCENTE": "CEILANDIA", 
-            "POR DO SOL": "CEILANDIA", "AGUAS CLARAS": "AGUAS CLARAS", "ARNIQUEIRAS": "AGUAS CLARAS", 
-            "SAMAMBAIA": "SAMAMBAIA", "GUARA": "GUARA", "PLANALTINA": "PLANALTINA", 
-            "SOBRADINHO": "SOBRADINHO", "VICENTE PIRES": "VICENTE PIRES", "SANTA MARIA": "SANTA MARIA",
-            "RECANTO DAS EMAS": "RECANTO DAS EMAS", "RIACHO FUNDO": "RIACHO FUNDO", "LAGO SUL": "PLANO PILOTO", 
-            "LAGO NORTE": "PLANO PILOTO", "NUCLEO BANDEIRANTE": "NUCLEO BANDEIRANTE", "BRAZLANDIA": "BRAZLANDIA"
-        }
-
-        self.mapa_siglas_df = {
-            "QNL": "TAGUATINGA", "QNG": "TAGUATINGA", "QNH": "TAGUATINGA", "QNA": "TAGUATINGA", "QNB": "TAGUATINGA", "QNC": "TAGUATINGA", "QND": "TAGUATINGA", "QNE": "TAGUATINGA", "QNF": "TAGUATINGA", "QNJ": "TAGUATINGA", "QNI": "TAGUATINGA", "QSE": "TAGUATINGA", "QSA": "TAGUATINGA",
-            "QNM": "CEILANDIA", "QNN": "CEILANDIA", "QNO": "CEILANDIA", "QNP": "CEILANDIA", "EQNM": "CEILANDIA", "EQNN": "CEILANDIA", "EQNP": "CEILANDIA", "EQNO": "CEILANDIA",
-            "QS": "SAMAMBAIA", "QN": "SAMAMBAIA", "QR": "SAMAMBAIA",
-            "SQN": "PLANO PILOTO", "SQS": "PLANO PILOTO", "SHIS": "LAGO SUL", "SHIN": "LAGO NORTE", "SME": "PLANO PILOTO", "SMU": "PLANO PILOTO",
-            "QE": "GUARA", "QI": "GUARA"
-        }
 
     def normalizar(self, texto):
         if not texto or pd.isna(texto): return ""
@@ -501,18 +467,6 @@ class MotorEnderecoCanônico:
                     break
 
         resultado = {"uf": uf_explicita if uf_explicita else "", "municipio": "", "distrito": ""}
-
-        if not uf_explicita or uf_explicita == "DF":
-            for token in texto_norm.split():
-                sigla_limpa = re.sub(r'[^A-Z]', '', token)
-                if sigla_limpa in self.mapa_siglas_df and len(sigla_limpa) >= 2:
-                    resultado.update({"uf": "DF", "municipio": "BRASILIA", "distrito": self.mapa_siglas_df[sigla_limpa]})
-                    return resultado
-                    
-            for chave, ra_oficial in self.mapa_contexto_df.items():
-                if re.search(rf'\b{chave}\b', texto_norm):
-                    resultado.update({"uf": "DF", "municipio": "BRASILIA", "distrito": ra_oficial})
-                    return resultado
 
         cidades_para_busca = IBGE_MUNICIPIOS
         if uf_explicita:
@@ -673,7 +627,7 @@ def calcular_distancia_linha_reta(lat1, lon1, lat2, lon2, contexto=""):
         if dist_final > 5000.0:
             logger.error(f"ANOMALIA TERRITORIAL: Distância de {dist_final}km excede fisicamente os limites do Brasil. Ctx: {contexto}")
             METRICAS_DISTANCIA["barreira_territorial"] += 1
-            return 0.01, "Falha de Bounding Box (Distância Transcontinental Impossível)"
+            return 0.01, "Falha de Bounding Box Territorial"
 
         return dist_final, status_final
 
@@ -763,7 +717,7 @@ def obedience_base_local(contexto_estruturado):
     return None
 
 # ==============================================================================
-# 🗺️ MÓDULOS DE GEOCODIFICAÇÃO COM TELEMETRIA (CONTRATO LISTA TOP-K)
+# 🗺️ MÓDULOS DE GEOCODIFICAÇÃO COM TELEMETRIA E MOTOR ANTI-COLISÃO
 # ==============================================================================
 
 def API_TomTom(query):
@@ -879,6 +833,33 @@ def API_Photon(query):
     except Exception: pass
     registrar_telemetria("PHOTON", False, time.time() - start_t)
     return None
+
+def forcar_geocodificacao_hierarquica_estrita(texto_cru):
+    """
+    Motor Anti-Colisão (Desambiguação): Chamado estritamente quando dois textos diferentes colapsam no mesmo centróide.
+    Executa busca paralela severa em nuvem e rejeita resultados que sejam meramente "cidades/municípios".
+    Prioriza granularidade a nível de bairro/logradouro.
+    """
+    texto_norm = semantica.normalizar(texto_cru)
+    candidatos = []
+    
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f1 = executor.submit(API_ArcGIS, texto_norm)
+        f2 = executor.submit(API_Nominatim, texto_norm)
+        f3 = executor.submit(API_Photon, texto_norm)
+        
+        for f in as_completed([f1, f2, f3]):
+            res = f.result()
+            if res: candidatos.extend(res)
+            
+    if not candidatos: return None
+    
+    # Ordena pelo peso de granularidade (Rejeita centróides vazios)
+    candidatos.sort(key=lambda x: (x.get('score_base', 0) + (40 if x.get('bairro') else 0) + (50 if x.get('logradouro') else 0)), reverse=True)
+    melhor = candidatos[0]
+    
+    end_f = ", ".join([c for c in [melhor.get('logradouro', ''), melhor.get('bairro', ''), melhor.get('cidade', ''), melhor.get('estado', '')] if c.strip()]) + ", BRASIL"
+    return (melhor['lat'], melhor['lon'], end_f, "DESAMBIGUACAO_ESTRITA", 95, melhor.get('bairro', ''), melhor.get('cidade', ''), f"{melhor['fonte']} (Strict-Mode)", ["Desambiguação Espacial Anti-Colisão acionada em Nuvem. Resolução estrita aplicada."])
 
 def API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d):
     start_t = time.time()
@@ -1161,10 +1142,6 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
             end_f = ", ".join([c for c in [m.get("logradouro", ""), m.get("bairro", ""), m.get("cidade", ""), m.get("estado", "")] if c.strip()]) + ", BRASIL"
             return lat_in, lon_in, end_f, "ABSOLUTA", 100, m.get("bairro", ""), m.get("cidade", ""), "COORDENADA_EXATA", ["Entrada direta via Coordenadas Numéricas."]
 
-    for poi_key, poi_data in BASE_POIS_LOGISTICOS.items():
-        if poi_key in texto_norm:
-            return poi_data["lat"], poi_data["lon"], poi_data["endereco"], "ABSOLUTA", 100, "", poi_data["municipio"], "BASE_POIS_NACIONAIS", ["Resolvido via Base Nacional de POIs Logísticos Ground Truth."]
-
     if texto_norm in cache_aprendizado:
         dado_salvo = cache_aprendizado[texto_norm]
         if isinstance(dado_salvo, dict) and "lat" in dado_salvo and "lon" in dado_salvo:
@@ -1185,19 +1162,6 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     if ctx.get("municipio") and ctx.get("uf"):
         mun_nome = ctx["municipio"]
         uf_nome = ctx["uf"]
-        chave_seguranca = f"{mun_nome}_{uf_nome}"
-        KNOWN_CITIES_MATRIX = {
-            "RIBEIRAO CASCALHEIRA_MT": (-12.9268, -51.8244),
-            "SAO MIGUEL DO ARAGUAIA_GO": (-13.2750, -50.1628),
-            "PORTO DE MOZ_PA": (-1.7483, -52.2383),
-            "ALMEIRIM_PA": (-1.5233, -52.5816)
-        }
-        if chave_seguranca in KNOWN_CITIES_MATRIX:
-            lat_c, lon_c = KNOWN_CITIES_MATRIX[chave_seguranca]
-            endereco_ibge = f"{mun_nome}, {IBGE_ESTADOS.get(uf_nome, uf_nome)}, BRASIL"
-            res_final = (lat_c, lon_c, endereco_ibge, "ALTA", 100, ctx.get("distrito", ""), mun_nome, "MATRIZ_SEGURANCA_INTERNA", ["Blindagem Crítica Antecipada: Coordenada rodoviária exata injetada do Dicionário de Segurança em Memória."])
-            cache_geo.set(cache_key, {"lat": res_final[0], "lon": res_final[1], "endereco": res_final[2], "confianca": res_final[3], "score_num": res_final[4], "distrito": res_final[5], "municipio": res_final[6], "fonte": res_final[7]}, expire=2592000)
-            return res_final
             
         if tipo_entrada == "MUNICIPIO":
             if mun_nome in IBGE_MUNICIPIOS:
@@ -1433,8 +1397,20 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_geo = time.time()
     lat_o, lon_o, end_oficial_o, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, xai_o = obter_coordenadas_e_endereco_oficial(origem_clean)
     lat_d, lon_d, end_oficial_d, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, xai_d = obter_coordenadas_e_endereco_oficial(destino_clean)
-    tempo_geocoding = round(time.time() - start_geo, 2)
     
+    # 🚧 BARREIRA TOPOLÓGICA DE COLISÃO E DESAMBIGUAÇÃO ESTRITA 🚧
+    if lat_o == lat_d and lon_o == lon_d and lat_o != 0.0:
+        if semantica.normalizar(origem_clean) != semantica.normalizar(destino_clean):
+            METRICAS_DISTANCIA["desambiguacoes_estritas"] += 1
+            logger.warning(f"Colisão de Centróide Detectada: '{origem_clean}' e '{destino_clean}' reduzidos ao mesmo ponto. Forçando regeocodificação hierárquica.")
+            
+            res_o = forcar_geocodificacao_hierarquica_estrita(origem_clean)
+            if res_o: lat_o, lon_o, end_oficial_o, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, xai_o = res_o
+            
+            res_d = forcar_geocodificacao_hierarquica_estrita(destino_clean)
+            if res_d: lat_d, lon_d, end_oficial_d, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, xai_d = res_d
+            
+    tempo_geocoding = round(time.time() - start_geo, 2)
     start_rot = time.time()
 
     if all([lat_o is not None, lon_o is not None, lat_d is not None, lon_d is not None]) and lat_o != 0.0 and lat_d != 0.0:
@@ -1722,10 +1698,10 @@ with st.sidebar:
 
     with st.expander("📚 Referências Bibliográficas e Acadêmicas"):
         st.markdown("""
-        * **GeographicLib:** Karney, C. F. F. (2013). "Algorithms for geodesics". Journal of Geodesy.
+        * **GeographicLib / Geodesics on an ellipsoid:** Karney, C. F. F. (2013). "Algorithms for geodesics". Journal of Geodesy.
         * **Haversine Formula:** Sinnott, R.W. (1984). "Virtues of the Haversine". Sky and Telescope 68 (2): 159.
         * **DBSCAN Clustering:** Ester, M., Kriegel, H. P., Sander, J., & Xu, X. (1996). "A density-based algorithm for discovering clusters in large spatial databases with noise". In KDD.
-        * **Teorema de Bayes:** Utilizado estocasticamente no `MotorEnderecoCanonico`.
+        * **Teorema de Bayes:** Implementação algorítmica para consolidação de Ensembles e Motores de Decisão (XAI).
         """)
 
     st.markdown("---")
@@ -2541,7 +2517,7 @@ with tab_analytics:
         st.caption("Nenhum registro de lote persistido na base histórica até o momento.")
 
 with tab_enciclopedia:
-    st.info("💡 **Objetivo desta aba:** Servir como o repositório mestre de conhecimento. Esta enciclopédia detalha toda a jornada técnica de um dado dentro do aplicativo, abordando 100% das funcionalidades corporativas, desde a limpeza gramatical até a validação geométrica extrema.")
+    st.info("💡 **Objetivo desta aba:** Servir como o repositório mestre de conhecimento. Esta enciclopédia detalha toda a jornada técnica de um dado dentro do aplicativo, abordando 100% das funcionalidades corporativas, desde a limpeza gramatical até a validação geométrica extrema anti-colisão.")
     st.markdown("""
     # 📚 Enciclopédia Operacional e Base de Conhecimento Core
     
@@ -2549,50 +2525,53 @@ with tab_enciclopedia:
 
     ---
 
-    ## 1. Geocodificação e Tratamento Lexical (Parser)
-    A geocodificação é a conversão de um texto livre em uma coordenada (Latitude/Longitude).
-    * **Limpeza Lexical:** O sistema aciona o `MotorEnderecoCanonico`, que aplica *Regex* (Expressões Regulares) para limpar acentos, padronizar rodovias (ex: convertendo `BR 060 km 15` para `BR-060 KM 15`) e extrair o CEP estruturado.
-    * **Anti-Fantasma (Street Snapping):** Evita que o sistema invente ruas falsas em cidades vazias. Isso é garantido via `RapidFuzz` (Distância de Levenshtein), que corrige nomes de cidades grafados incorretamente e barra preenchimentos se o limite de semelhança for baixo (< 85%).
-    * **Consenso Espacial (DBSCAN):** Nunca se confia em apenas 1 API. 5 Motores são chamados. Se 3 concordam (distância métrica próxima) e 2 discordam, o `DBSCAN` (Clustering de Machine Learning) exclui as 2 coordenadas anômalas, garantindo que o caminhão vá para a coordenada validada por *crowd-consensus*.
+    ## 1. Geocodificação Universal e Eliminação de Dicionários (O Fim do Hardcode)
+    O sistema **não possui nenhuma localidade ou cidade gravada em seu código-fonte**. Ele é 100% dinâmico e capaz de rotear uma vila no interior do Pará ou uma avenida em Nova York com a mesma arquitetura agnóstica.
+    
+    A geocodificação (conversão de texto livre em coordenada Latitude/Longitude) ocorre através de "Peneiras de Resolução":
+    * **Peneira Lexical (Parser):** Aplica *Regex* para limpar acentos, padronizar rodovias (convertendo `BR 060 km 15` para `BR-060 KM 15`) e separar matematicamente o CEP do restante do texto.
+    * **Anti-Fantasma (Street Snapping):** Evita que o motor "invente" ruas falsas em cidades vazias. Isso é garantido via `RapidFuzz` (Distância de Levenshtein), que corrige nomes de cidades grafados incorretamente e barra preenchimentos se o limite de semelhança for baixo (< 85%).
+    * **Consenso Espacial (DBSCAN):** O sistema nunca confia em apenas 1 API. 5 Motores em nuvem são consultados simultaneamente. Se 3 concordam que a Rua X fica na Zona Sul e 2 discordam apontando para a Zona Norte, o algoritmo `DBSCAN` (Clustering de Machine Learning) exclui as coordenadas "rebeldes", garantindo que a frota vá para o destino validado por consenso espacial.
     * **APIs Utilizadas:** ArcGIS (Padrão Ouro para ruas/CEP), Nominatim/Photon (Padrão Ouro para área rural/interior), TomTom (Malha rodoviária B2B).
     
-    ## 2. Reverse Geocoding
-    * **Finalidade:** Identificar a qual cidade e rua exata pertence uma coordenada isolada.
-    * **Fluxo:** Após a geocodificação ser concluída (ou quando o usuário envia apenas os números de Lat/Lon), a coordenada é reenviada para Nominatim e ArcGIS de forma reversa.
-    * **Auditoria:** Se o usuário pediu a cidade "A" e a geocodificação reversa diz que o ponto físico caiu na cidade "B", o Score do trajeto é duramente penalizado, evitando fraudes de roteamento.
-
-    ## 3. O Motor Geodésico e a Distância em Linha Reta
-    A Distância em Linha Reta (Aérea) é o pilar de integridade matemática do sistema, atuando como auditor incancelável do motor asfáltico (Google/OSRM).
-
-    ### O que é?
-    Geograficamente, é o traçado ideal e mais curto ligando dois pontos topológicos, considerando a curvatura oblata do planeta (Elipsoide Terrestre). Em roteamento asfáltico, você depende de pontes, rodovias curvas e barreiras físicas; na linha reta matemática, o trajeto é perfeito.
+    ## 2. A Barreira Topológica de Colisão (Geocodificação Estrita)
+    Se o usuário solicitar a distância entre o bairro "Ceilândia, DF" e "Samambaia Sul, DF", os provedores de geocodificação comuns tendem a colapsar ambos os textos para o "Centróide" da cidade-mãe (Brasília). O resultado seria `Lat_Origem == Lat_Destino`, gerando uma distância zerada.
     
-    ### Para que serve?
-    * **Validação Operacional e Auditoria:** Serve como "Baseline". Se a Linha Reta entre um Cliente e um Hub for 10 km, mas a Rota Asfáltica for de 60 km, o sistema sinaliza um gargalo geográfico gravíssimo (ex: montanha, rio sem ponte ou rodovia inexistente).
-    * **Segurança Anti-Fraude:** Protege contra erros da API. Se a distância da Linha Reta acusar 0 km para cidades diferentes, trata-se de um erro crítico de *Overflow* computacional.
+    * **A Solução:** O sistema abriga o motor de *Desambiguação Hierárquica Estrita*. Ele aciona um gatilho de emergência: se `coord_A == coord_B` e `texto_A != texto_B`, o sistema rejeita as coordenadas genéricas da cidade, quebra o cache local, ignora o IBGE e dispara requisições forçadas às APIs em nuvem exigindo que elas respondam exclusivamente no nível de "bairro" ou "logradouro", impedindo que duas sub-regiões recebam a mesma latitude e longitude.
+
+    ## 3. Reverse Geocoding
+    * **Finalidade:** Identificar a qual cidade e rua exata pertence uma coordenada isolada. Usado extensivamente para auditar se a geocodificação original caiu na cidade correta.
+    * **Fluxo:** O sistema envia a coordenada final para o OSM (Nominatim) ou ArcGIS REST Server para obter a engenharia reversa. Se o usuário pediu a cidade "Maceió" e o Reverse Geocoding indica que o ponto caiu em "Recife", o Score do trajeto é duramente penalizado, isolando fraudes na planilha de auditoria.
+
+    ## 4. O Motor Geodésico e a Distância em Linha Reta
+    A Distância em Linha Reta (Aérea) é a âncora de segurança matemática da plataforma. Ela atua como juíza absoluta do motor asfáltico (Google Maps).
+
+    ### O que é e Para que Serve?
+    A Linha Reta é a distância física verdadeira entre duas coordenadas globais, medida sobre a superfície curvada da Terra. Se o Google Maps afirma que a rota de asfalto tem 1.000 km, mas a Linha Reta atesta apenas 15 km, o motor identifica uma **Violação Geodésica** severa (como a ausência de uma ponte para atravessar um rio). Ela serve para identificar desvios operacionais invisíveis a olho nu.
     
-    ### Fórmulas Matemáticas Utilizadas (As 5 Camadas de Segurança)
-    Para garantir que essa métrica vital nunca fique zerada ou cause "Envenenamento de Cache" (*Cache Poisoning*), a função `calcular_distancia_linha_reta()` aplica a seguinte escalada:
-    * **Camada 1 (Cálculo Principal - GeographicLib):** Biblioteca oficial baseada nos algoritmos aeronáuticos de *Charles Karney* usando o modelo elipsoide `WGS-84`. Precisão nanométrica.
-    * **Camada 2 (Fallback - Geopy Geodesic):** Motor auxiliar baseado nos cálculos elipsoidais de Vincenty, ativado se a biblioteca primária falhar em compilação C++.
-    * **Camada 3 (Fallback Secundário - Haversine):** Método estritamente trigonométrico em Python puro, assumindo uma terra esférica ideal. Mais rápido, erro em torno de 0.3%.
-    * **Camada 4 (Correção Automática Anti-Zero):** Se, por anomalia de conversão binária float, todas as fórmulas derem `0.0` para latitudes distintas, o sistema aplica um desvio seguro de `0.01 km` para impedir falhas de divisão nos Dashboards.
-    * **Camada 5 (Validação Territorial Continental):** Se a distância de Linha Reta for superior a `5000 km`, o sistema rejeita o valor, pois é fisicamente impossível estar dentro do Brasil (distância N-S e L-O máximas ~ 4390km). A rota recebe flag de falha espacial imediata.
+    ### Fórmulas Matemáticas e as 5 Camadas de Segurança
+    O sistema abriga a função blindada `calcular_distancia_linha_reta()`, que atua nas seguintes camadas operacionais para impedir qualquer retorno de "0 km" indevido:
+    * **Camada 1 (Padrão Ouro WGS-84 via GeographicLib):** Utilizada no controle de tráfego aéreo e mísseis balísticos. Resolve as equações de Bessel para medir a distância considerando a Terra não como uma esfera, mas como um elipsoide achatado nos polos. É a referência primária.
+    * **Camada 2 (Fallback - Geopy Geodesic):** Motor auxiliar baseado nas fórmulas elipsoidais de Vincenty, ativado instantaneamente se a biblioteca C++ primária apresentar instabilidade.
+    * **Camada 3 (Fallback Matemático - Haversine):** Método trigonométrico explícito rodando em Python nativo. Pressupõe uma Terra esférica perfeita. Taxa de erro aceitável de ~0.3%.
+    * **Camada 4 (Correção Automática Anti-Zero):** Em distâncias minúsculas (centímetros), os processadores podem sofrer *Float Overflow* e arredondar a distância para zero. O sistema intercepta isso e converte a resposta para um limiar seguro de `0.01 km`, impedindo que os gráficos de Analytics quebrem com divisões por zero.
+    * **Camada 5 (Validação Territorial de Bounding Box):** O território brasileiro tem extensão máxima (N-S/L-O) de aproximadamente 4.390 km. Se a linha reta gerada ultrapassar `5000.0 km`, o sistema deduz que ocorreu uma alucinação no Geocoder (como fixar São Paulo no Japão). A rota é automaticamente barrada com o status `"Falha de Bounding Box Territorial"`.
 
-    ## 4. O Sistema de Cache Duplo
-    * **Cache Físico (Diskcache):** Toda geocodificação e rota passa por SQLite e é serializada no disco via hashes MD5. `cache_rotas` guarda trajetos; `cache_geo` guarda coordenadas. Isso zera o tempo de resposta em requisições repetidas e economiza faturamento da API (Google).
-    * **Cache de Aprendizado / Unpoisoning:** Se um cálculo errado foi para o cache (ex: Linha reta igual a 0.0), a "Camada 4" de Unpoisoning atua de forma forense. Se ela lê do cache uma anomalia matemática, ela destrói o registro antigo em tempo de execução, reprocessa usando WGS-84 e regrava silenciosamente para que o Dashboard fique perfeito.
+    ## 5. Arquitetura de Cache de Múltiplos Estágios
+    Para zerar latências de rede e economizar custos de API, o sistema conta com a biblioteca `diskcache` (SQLite persistido em disco).
+    * **Cache de Geocodificação (`cache_geo` e `cache_cep`):** Armazena coordenadas validadas via Hashes MD5 da *string* canônica.
+    * **Cache de Roteamento (`cache_rotas`):** Armazena toda a malha viária extraída do Google/OSRM e o polígono final.
+    * **Motor de *Unpoisoning* Automático:** Se por ventura o sistema herdar um *cache viciado* do passado (ex: uma linha reta que na Versão 1.0 foi armazenada como 0 km), o código intercepta a anomalia em tempo real, "quebra" a célula do cache, reprocessa usando WGS-84 e atualiza o banco de dados silenciosamente para o usuário.
 
-    ## 5. Roteamento em Lote (Batch), Alocação Competitiva e Balsas
-    * **Paralelismo Assíncrono:** O Processamento O(U) utiliza `ThreadPoolExecutor`. Se você insere 5.000 linhas, ele não faz fila indiana. Ele cria dezenas de instâncias paralelas e resolve tudo ao mesmo tempo.
-    * **Alocação de Hubs (Roteamento Duplo):** Na aba de Alocação, o motor aplica a matriz de *Nearest Neighbor*. Para 10 Hubs e 1.000 clientes, ele gera 10.000 *Duelos de Linha Reta* virtuais. Aquele que matematicamente está mais perto segue para asfalto. Se houver um Vice-Líder muito próximo, o *Roteamento Duplo* roda ambos no Google Maps e coroa o vencedor.
-    * **Ferries / Balsas:** O OSRM (Motor Open-Source Routing) mapeia todos os contornos azuis (Corpos Hídricos) do OpenStreetMap. Quando o caminhão precisa trocar para modal marítimo, a API levanta a flag `ferry`, e o sistema crava um alerta logístico.
+    ## 6. Roteamento em Lote, Alocação Competitiva e Identificação de Balsas
+    * **Processamento O(U) com ThreadPools:** Toda lista Excel submetida sofre varredura assíncrona. 5.000 clientes não são calculados 1 a 1, mas em *workers* paralelos que inundam as APIs simultaneamente.
+    * **Alocação de Hubs (Roteamento Duplo e Vizinho Mais Próximo):** Em vez de calcular "A para B", a plataforma submete clientes contra centenas de Centros de Distribuição (CD's). O sistema roda `N * M` duelos espaciais na memória virtual calculando a Linha Reta de todos contra todos. Identificados os dois CDs finalistas fisicamente mais próximos do cliente, a API invoca o motor de asfalto do Google/OSRM para definir qual Base abastecerá o CEP, reduzindo severamente os custos logísticos de "Cross-Docking".
+    * **Ferries / Modais Hídricos:** O Motor Open-Source Routing (OSRM) rastreia corpos hídricos no OpenStreetMap. Caso uma viagem terrestre seja forçada a usar balsa (ex: Manaus para Autazes), a API ativa a flag `"Ferry"`, mapeada pela interface em `Uso de Balsas: Sim`.
 
-    ## 6. Score Global, Analytics e Mapas de Calor Regionais
-    * **Como é calculado o Score Global?** `(0.35 * Score Origem) + (0.35 * Score Destino) + (0.30 * Score da Rota Google)`.
-    * **Score de Geocodificação:** É penalizado se a UF original for diferente do geocoder, ou se o motor precisar apelar para o IBGE offline por falha sistêmica das nuvens comerciais.
-    * **Enterprise Analytics:** Painel integrado de BI. Mapeia a densidade do volume populacional logístico e agrega em KPIs como Distância Média e Volumes por **Regiões** (Norte, Nordeste, Centro-Oeste, Sul, Sudeste) e Estados.
-    * **Mapa de Calor por Volume Físico:** Atuando como um software *ArcGIS Enterprise*, o mapa não apenas coloriza pontos, ele escala os círculos (`size_max=45`) com base na **Quantidade Ocorrente de Entregas (`Qtd_Rotas`)**. Estados densos ficam intensos; periferias esparsas ficam translúcidas, permitindo decisões rápidas de *Capex* para abertura de novos galpões logísticos baseadas estritamente em volume comprovado.
+    ## 7. Score de Explicabilidade (XAI) e Enterprise Analytics
+    * O modelo corporativo não omite decisões. Cada rota exibe um **Score Global (0 a 100)**: `(0.35 * Confiança Origem) + (0.35 * Confiança Destino) + (0.30 * Auditoria de Asfalto)`.
+    * O **Enterprise Analytics** é um submódulo visual renderizado por Altair/Plotly. Ele lê instantaneamente as saídas das planilhas, mapeando a base territorial e extraindo dados como *Share* Regional (%) e Distâncias Médias Nacionais.
+    * **Mapas de Densidade Híbridos:** A visualização não apenas plota pontos geográficos. Ela expande a bolha de mapeamento (Raio Visual) conforme a `Quantidade de Ocorrências` de rotas na mesma área, identificando zonas vermelhas de estrangulamento para Capex (Abertura de novos CDs baseados em volume auditado).
     """)
 
 with tab_motores:
@@ -2643,7 +2622,7 @@ with tab_motores:
 
     st.markdown("#### 🌐 Auditoria do Motor Geodésico Contínuo (Métricas de Integridade Matemática)")
     df_metricas_lr = pd.DataFrame([METRICAS_DISTANCIA])
-    df_metricas_lr.columns = ["Total de Cálculos de Linha Reta", "Sucesso: GeographicLib (WGS84)", "Sucesso: Geopy", "Fallback: Haversine", "Correções Automáticas (Anti-Zero)", "Falhas Críticas", "Rotas Unpoisoned (Cache Reparado)", "Barreiras Territoriais (Bounding Box)"]
+    df_metricas_lr.columns = ["Total de Cálculos de Linha Reta", "Sucesso: GeographicLib (WGS84)", "Sucesso: Geopy", "Fallback: Haversine", "Correções Automáticas (Anti-Zero)", "Falhas Críticas", "Rotas Unpoisoned (Cache Reparado)", "Barreiras Territoriais (Bounding Box)", "Desambiguações Topológicas (Anti-Colisão)"]
     st.dataframe(df_metricas_lr, use_container_width=True)
 
 with tab_auditoria:
