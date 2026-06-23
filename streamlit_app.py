@@ -2129,6 +2129,7 @@ with tab_analytics:
             st.caption("✨ **DICA DE OURO INTERATIVA:** Clique em uma fatia da rosca ou em uma barra de município. A matriz de dispersão E a tabela mestre reagirão automaticamente. Desenhar um retângulo na Matriz de Dispersão também atualizará os demais gráficos (Cross-filter bidirecional).")
             
             with st.container(border=True):
+                # Inicialização correta de parâmetros independentes para o Streamlit
                 click_uf = alt.selection_point(fields=['UF_Sintetica_Origem'], name='UF')
                 click_mun = alt.selection_point(fields=['Municipio Origem'], name='Mun')
                 brush = alt.selection_interval(name='Brush')
@@ -2136,33 +2137,30 @@ with tab_analytics:
                 top_muns = df_filtrado['Municipio Origem'].value_counts().head(15).index.tolist()
                 base_chart = alt.Chart(df_filtrado)
 
-                pie_base = base_chart.encode(
+                # CORREÇÃO: Aplicar .add_params e condicional exclusiva a este gráfico
+                chart_pie = base_chart.mark_arc(innerRadius=60).encode(
                     theta=alt.Theta("count():Q", stack=True),
-                    color=alt.Color("UF_Sintetica_Origem:N", legend=alt.Legend(title="Estados (UF)", orient='bottom'))
-                )
-                
-                arc = pie_base.mark_arc(innerRadius=60).encode(
-                    opacity=alt.condition(click_uf & click_mun & brush, alt.value(1), alt.value(0.2)),
+                    color=alt.Color("UF_Sintetica_Origem:N", legend=alt.Legend(title="Estados (UF)", orient='bottom')),
+                    opacity=alt.condition(click_uf, alt.value(1), alt.value(0.2)),
                     tooltip=['UF_Sintetica_Origem', 'count()']
-                ).add_params(click_uf)
-                
-                chart_pie = arc.transform_filter(click_mun).transform_filter(brush).properties(height=350, title="Volume de Demanda por Estado (UF)")
+                ).add_params(click_uf).properties(height=350, title="Volume de Demanda por Estado (UF)")
 
-                bar_base = base_chart.transform_filter(alt.FieldOneOfPredicate(field='Municipio Origem', oneOf=top_muns)).encode(
-                    x=alt.X('count():Q', title='Volume de Rotas', axis=alt.Axis(tickMinStep=1)),
-                    y=alt.Y('Municipio Origem:N', title='Município', sort=alt.EncodingSortField(field='Municipio Origem', op='count', order='descending'))
-                )
-                
+                # CORREÇÃO: Aplicar .add_params e condicional exclusiva a este gráfico
+                bar_base = base_chart.transform_filter(alt.FieldOneOfPredicate(field='Municipio Origem', oneOf=top_muns))
                 bar = bar_base.mark_bar(color='#3B82F6').encode(
-                    opacity=alt.condition(click_uf & click_mun & brush, alt.value(1), alt.value(0.3)),
+                    x=alt.X('count():Q', title='Volume de Rotas', axis=alt.Axis(tickMinStep=1)),
+                    y=alt.Y('Municipio Origem:N', title='Município', sort=alt.EncodingSortField(field='Municipio Origem', op='count', order='descending')),
+                    opacity=alt.condition(click_mun, alt.value(1), alt.value(0.3)),
                     tooltip=['Municipio Origem', 'count()']
                 ).add_params(click_mun)
                 
                 text_bar = bar_base.mark_text(align='right', dx=-5, color='white', fontWeight='bold').encode(
+                    x=alt.X('count():Q'),
+                    y=alt.Y('Municipio Origem:N', sort=alt.EncodingSortField(field='Municipio Origem', op='count', order='descending')),
                     text=alt.Text("count():Q")
                 )
 
-                chart_bars = alt.layer(bar, text_bar).transform_filter(click_uf).transform_filter(brush).properties(height=350, title="Top 15 Municípios de Despacho (Origem)")
+                chart_bars = alt.layer(bar, text_bar).properties(height=350, title="Top 15 Municípios de Despacho (Origem)")
 
                 col_p1, col_p2 = st.columns(2)
                 with col_p1:
@@ -2181,18 +2179,16 @@ with tab_analytics:
                 st.divider()
                 st.write("**Matriz de Dispersão Logística (Identificação de Gargalos Espaciais e Outliers)**")
                 
-                # Paleta moderna corporativa
                 status_palette = alt.Scale(domain=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro'], range=['#2ECC71', '#3498DB', '#F1C40F', '#E67E22', '#E74C3C'])
                 
+                # CORREÇÃO: Aplicar .add_params e condicional exclusiva a este gráfico
                 scatter = base_chart.mark_circle(size=80).encode(
                     x=alt.X('Distancia:Q', title='Distância Viária Oficial (km)', scale=alt.Scale(zero=False, nice=True, padding=10)),
                     y=alt.Y('Tempo_Horas:Q', title='Tempo Estimado (Horas)', scale=alt.Scale(zero=False, nice=True, padding=10)),
                     color=alt.Color('Status da Rota:N', scale=status_palette),
-                    opacity=alt.condition(click_uf & click_mun & brush, alt.value(0.9), alt.value(0.1)),
+                    opacity=alt.condition(brush, alt.value(0.9), alt.value(0.1)),
                     tooltip=['Origem', 'Destino', 'Distancia', 'Tempo', 'Status da Rota', 'Score Final Global']
-                ).add_params(brush).transform_filter(click_uf).transform_filter(click_mun).properties(
-                    height=350
-                )
+                ).add_params(brush).properties(height=350)
                 
                 try:
                     evento_brush = st.altair_chart(scatter, use_container_width=True, on_select="rerun", key=f"dash_scatter_{st.session_state.get('dash_key', 0)}")
@@ -2283,6 +2279,7 @@ with tab_analytics:
                 ufs_selecionadas = []
                 muns_selecionados = []
                 
+                # A lógica de filtro Python permanece intocada, consumindo os objetos capturados pelo Streamlit on_select
                 if evento_uf and hasattr(evento_uf, 'selection'):
                     sel_uf = evento_uf.selection.get('UF', [])
                     for item in sel_uf:
