@@ -1800,8 +1800,8 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"Erro ao tentar transmitir a solicitação via SMTP: {str(e)}")
 
-tab_individual, tab_processamento, tab_alocacao, tab_analytics, tab_calculadora, tab_classificacao, tab_enciclopedia, tab_motores, tab_auditoria = st.tabs([
-    "📍 Geocodificação", "⚙️ Processamento Lote", "📦 Alocação de Hubs", "📊 Enterprise Analytics", "🧮 Calculadora Analítica", "🚨 Classificação Territorial", "📚 Enciclopédia Core", "🔌 Monitor APIs", "🕵️ Auditoria"
+tab_individual, tab_processamento, tab_alocacao, tab_analytics, tab_calculadora, tab_classificacao, tab_enciclopedia, tab_manual, tab_motores, tab_auditoria = st.tabs([
+    "📍 Geocodificação", "⚙️ Processamento Lote", "📦 Alocação de Hubs", "📊 Enterprise Analytics", "🧮 Calculadora Analítica", "🚨 Classificação Territorial", "📚 Enciclopédia Core", "📘 Manual do Usuário", "🔌 Monitor APIs", "🕵️ Auditoria"
 ])
 
 with tab_individual:
@@ -2619,61 +2619,249 @@ with tab_classificacao:
 
 with tab_enciclopedia:
     st.info("💡 **Objetivo desta aba:** Servir como o repositório mestre de conhecimento. Esta enciclopédia detalha toda a jornada técnica de um dado dentro do aplicativo, abordando 100% das funcionalidades corporativas, desde a limpeza gramatical até a validação geométrica extrema anti-colisão.")
-    st.markdown("""
-    # 📚 Enciclopédia Operacional e Base de Conhecimento Core
+    st.markdown("# 📚 Enciclopédia Operacional e Base de Conhecimento Core")
     
-    Este documento é o manual definitivo da Arquitetura do Motor de Roteamento Corporativo. Ele detalha as decisões, algoritmos, métodos de integração e auditorias que garantem a segurança de todas as rotas logísticas despachadas pelo sistema.
+    with st.expander("1. Visão Geral do Sistema", expanded=True):
+        st.markdown("""
+        **O que é o sistema?**
+        O *Motor Nacional de Roteirização Inteligente* é uma plataforma corporativa B2B projetada para processar, em escala industrial, a conversão de endereços de texto livre em rotas matemáticas roteirizáveis.
+        
+        **Qual problema ele resolve?**
+        Elimina a dependência de APIs logísticas frágeis (como o Google isolado, que pode falhar em áreas rurais), superando problemas de *falsos positivos topológicos*, onde endereços incompletos são jogados aleatoriamente no centro do estado ou do país.
+        
+        **Público-Alvo e Benefícios:**
+        * **Operadores de Logística:** Descobrem o tempo viário oficial, pedágios virtuais e alocação de caminhões.
+        * **Auditores de Frete:** Utilizam a plataforma para desmascarar cobranças de distância indevidas, comparando o asfalto com a linha reta geodésica.
+        * **Analistas de Dados:** Aproveitam o Enterprise Analytics para mapas de calor, clusters de entrega e estatísticas robustas cruzadas por região.
+        """)
+        
+    with st.expander("2. Arquitetura Geral e Fluxo de Dados"):
+        st.markdown("""
+        O sistema opera através de um funil hierárquico extremamente estrito e escalável via *ThreadPoolExecutor*:
+        
+```text
+        [ ENTRADA DE DADOS ] → (Usuário insere Lote Excel ou Single-Shot)
+                 ↓
+        [ PARSER LEXICAL ] → (Normalização semântica, limpeza de acentos e extração de CEP)
+                 ↓
+        [ CACHE CHECK ] → (Intercepção instantânea de rotas já processadas)
+                 ↓
+        [ GEOCODIFICAÇÃO MULTIMOTOR ] → (Busca paralela no ArcGIS, Nominatim, TomTom e Photon)
+                 ↓
+        [ BARREIRA ANTI-COLISÃO ] → (Se Ponto A == Ponto B, força modo estrito nas APIs)
+                 ↓
+        [ CÁLCULO DA LINHA RETA ] → (Árbitro Supremo: WGS-84 ou Haversine)
+                 ↓
+        [ ROTEIRIZAÇÃO ASFÁLTICA ] → (Google Maps Scraper Engine ou OSRM Open-Source)
+                 ↓
+        [ SCORE XAI E AUDITORIA ] → (Cálculo de penalidades e confiança baseada em Bayes)
+                 ↓
+        [ ANALYTICS & EXPORT ] → (Geração de Heatmaps, Tabelas Dinâmicas e Relatórios O(U))
+        ```
+        """)
 
-    ---
+    with st.expander("3. Bases de Dados Utilizadas"):
+        st.markdown("""
+        * **IBGE (Instituto Brasileiro de Geografia e Estatística):** Atua como malha central offline do motor. O sistema baixa e consome o centróide exato de todas as 5.570 cidades e distritos do Brasil. Permite o modo de sobrevivência offline caso a internet corporativa falhe.
+        * **OpenStreetMap (OSM):** O maior banco de dados aberto espacial do planeta. Fundamental para estradas de terra e interior do Brasil, servindo dados para o Nominatim, Photon e OSRM.
+        * **CNEFE / Base Local:** Dicionário estrutural acoplável (opcional) mantido no cache, permitindo obediência absoluta a regras locais de filiais.
+        """)
 
-    ## 1. Geocodificação Universal e Eliminação de Dicionários (O Fim do Hardcode)
-    O sistema **não possui nenhuma localidade ou cidade gravada em seu código-fonte**. Ele é 100% dinâmico e capaz de rotear uma vila no interior do Pará ou uma avenida em Nova York com a mesma arquitetura agnóstica.
+    with st.expander("4. APIs Utilizadas"):
+        st.markdown("""
+        **🌐 Geocodificação (Texto para Lat/Lon)**
+        * **ArcGIS (ESRI):** Principal motor B2B predial. Padrão-ouro em conversão de ruas com alta fidelidade na numeração corporativa.
+        * **Nominatim (OpenStreetMap):** Busca minuciosa. Confiabilidade máxima para áreas rurais, lotes distantes e referências geográficas indiretas.
+        * **Photon (Komoot):** Auxiliar de alta velocidade. Atua sob o OSM para fechar o triângulo do Ensemble.
+        * **TomTom Logistics:** Foco na malha viária pesada e rotas de caminhões.
+        
+        **🗺️ Roteirização (Traçado Viário)**
+        * **Google Directions Engine:** Principal provedor de asfalto, tempo e distância.
+        * **OSRM (Open Source Routing Machine):** Servidor matemático independente de fallback. Se o Google falhar por limite de requisições, o OSRM garante que a esteira continue processando as rotas matemáticas sem interrupções.
+        
+        **🔎 Auditoria e Cascatas**
+        * **BrasilAPI, ViaCEP e OpenCEP:** Formam a "Cascata Postal-Tripla" para garantir a quebra estrutural e reversa do CEP da operação, mitigando falhas na rede.
+        """)
+
+    with st.expander("5. Motor de Geocodificação (Como o endereço é compreendido?)"):
+        st.markdown("""
+        1. **Classificação Fuzzy:** O texto passa por um classificador com a biblioteca `RapidFuzz`, que entende a tipologia: É CEP? É Condomínio? É Área Rural?
+        2. **Disparo Simultâneo:** O motor atira a string normalizada para 5 provedores na nuvem ao mesmo tempo.
+        3. **Consenso Espacial (DBSCAN):** Com as 5 respostas de coordenadas, o algoritmo de *Machine Learning* agrupa quem caiu perto de quem. Pontos discrepantes (outliers) são removidos.
+        4. **Score de Confiança:** Calcula a penalidade multiplicando fatores. Ex: Falta de número tira 5 pontos. O motor reverso acusou estado errado tira 50 pontos.
+        """)
+
+    with st.expander("6. Motor de Roteirização (Traçado Logístico)"):
+        st.markdown("""
+        O sistema primeiro exige ter a Latitude/Longitude Exata de Origem e Destino.
+        A partir delas, consulta o banco viário para conectar as ruas.
+        * **Tempo Estimado:** O Google traz em tempo real. No fallback (OSRM), aplica-se a matriz matemática de velocidade comercial da frota (45 km/h urbano, 65 km/h rodoviário).
+        * **Falhas Topológicas:** Se o traçado por asfalto é absurdamente longo ou impossível (ilha, área isolada), a plataforma adota o Fallback Geodésico, entregando o valor em Linha Reta x 1.45 (fator de correção).
+        """)
+
+    with st.expander("7. Distância em Linha Reta (A Matemática do Árbitro)"):
+        st.markdown("""
+        A distância em linha reta atua como o juiz do motor. É a menor distância curva possível sobre a superfície terrestre.
+        
+        **Fórmulas Utilizadas:**
+        * **WGS-84 (GeographicLib):** Calcula considerando o achatamento polar da Terra elipsoidal. Erro quase zero.
+        * **Haversine (Contingência):** Assume a Terra como uma esfera perfeita (Raio = 6371 km).
+        
+        As fórmulas internas trigonométricas implementadas para fallback (Haversine):
+        $$ a = \sin^2\left(\frac{\Delta\phi}{2}\right) + \cos(\phi_1)\cos(\phi_2)\sin^2\left(\frac{\Delta\lambda}{2}\right) $$
+        $$ c = 2 \cdot \text{atan2}\left(\sqrt{a}, \sqrt{1-a}\right) $$
+        $$ d = 6371 \cdot c $$
+        
+        **Como é auditada e para que serve?**
+        Se o caminhão rodou 200km e a linha reta é 10km, existe fraude, estrangulamento viário ou erro na API. A linha reta serve como base indestrutível para detectar anomalias do Google Maps.
+        """)
+
+    with st.expander("8. Sistema de Auditoria Interna"):
+        st.markdown("""
+        Todo o processo da nuvem é gravado na "Caixa Preta".
+        * **Score Global (0 a 100):** Composto por: `35% Confiança Origem + 35% Confiança Destino + 30% Qualidade de Roteamento (Asfalto x Linha Reta)`.
+        * **XAI (Explicabilidade):** A auditoria registra em texto exato *o porquê* de o motor ter feito a escolha. Você lerá algo como: "Correspondência administrativa confirmada via Ensemble ArcGIS + TomTom".
+        """)
+
+    with st.expander("9. Sistema de Cache Corporativo"):
+        st.markdown("""
+        O sistema é dotado de inteligência `diskcache`.
+        * Se você subir 5.000 clientes e metade já foi calculada ontem, o sistema bate no banco SQLITE embarcado em milissegundos.
+        * **Unpoisoning Automático:** Se por ventura uma Linha Reta falhou no passado armazenando "0", a arquitetura identifica, desfaz o cache e reprocessa na hora.
+        """)
+
+    with st.expander("10. Analytics Corporativo"):
+        st.markdown("""
+        O Enterprise Analytics consolida todos os retornos. 
+        Possui filtragem bidirecional estilo Power BI: Clicar num estado de um Gráfico de Rosca reduz todos os mapas de calor, scatter plots e cálculos de tempo apenas para a volumetria daquele estado, cruzando KPIs de Distância e Tempo.
+        """)
+
+    with st.expander("11. Segurança e Confiabilidade"):
+        st.markdown("""
+        * **Failover Multi-Level:** Timeout no ArcGIS? Pula pro OSM. Timeout no OSM? Bate na Base Local IBGE. Timeout no Google Routing? Pula pro OSRM. Timeout no OSRM? Retorna a Projeção Matemática da Linha Reta.
+        * O sistema foi arquitetado para nunca travar as execuções em lote, registrando os erros graciosamente nos Logs e marcando a linha do Excel afetada como "Erro Operacional", para prosseguir com os milhares de outros cálculos da fila sem paralisação.
+        """)
+
+with tab_manual:
+    st.info("💡 **Bem-vindo ao Manual Operacional!** Este espaço é destinado a todos os usuários da plataforma, ensinando de forma prática o 'passo a passo' para executar as operações do dia a dia.")
     
-    A geocodificação (conversão de texto livre em coordenada Latitude/Longitude) ocorre através de "Peneiras de Resolução":
-    * **Peneira Lexical (Parser):** Aplica *Regex* para limpar acentos, padronizar rodovias (convertendo `BR 060 km 15` para `BR-060 KM 15`) e separar matematicamente o CEP do restante do texto.
-    * **Anti-Fantasma (Street Snapping):** Evita que o motor "invente" ruas falsas em cidades vazias. Isso é garantido via `RapidFuzz` (Distância de Levenshtein), que corrige nomes de cidades grafados incorretamente e barra preenchimentos se o limite de semelhança for baixo (< 85%).
-    * **Consenso Espacial (DBSCAN):** O sistema nunca confia em apenas 1 API. 5 Motores em nuvem são consultados simultaneamente. Se 3 concordam que a Rua X fica na Zona Sul e 2 discordam apontando para a Zona Norte, o algoritmo `DBSCAN` (Clustering de Machine Learning) exclui as coordenadas "rebeldes", garantindo que a frota vá para o destino validado por consenso espacial.
-    * **APIs Utilizadas:** ArcGIS (Padrão Ouro para ruas/CEP), Nominatim/Photon (Padrão Ouro para área rural/interior), TomTom (Malha rodoviária B2B).
-    
-    ## 2. A Barreira Topológica de Colisão (Geocodificação Estrita)
-    Se o usuário solicitar a distância entre o bairro "Ceilândia, DF" e "Samambaia Sul, DF", os provedores de geocodificação comuns tendem a colapsar ambos os textos para o "Centróide" da cidade-mãe (Brasília). O resultado seria `Lat_Origem == Lat_Destino`, gerando uma distância zerada.
-    
-    * **A Solução:** O sistema abriga o motor de *Desambiguação Hierárquica Estrita*. Ele aciona um gatilho de emergência: se `coord_A == coord_B` e `texto_A != texto_B`, o sistema rejeita as coordenadas genéricas da cidade, quebra o cache local, ignora o IBGE e dispara requisições forçadas às APIs em nuvem exigindo que elas respondam exclusivamente no nível de "bairro" ou "logradouro", impedindo que duas sub-regiões recebam a mesma latitude e longitude.
+    st.markdown("### 📘 Manual do Usuário e Treinamento")
 
-    ## 3. Reverse Geocoding
-    * **Finalidade:** Identificar a qual cidade e rua exata pertence uma coordenada isolada. Usado extensivamente para auditar se a geocodificação original caiu na cidade correta.
-    * **Fluxo:** O sistema envia a coordenada final para o OSM (Nominatim) ou ArcGIS REST Server para obter a engenharia reversa. Se o usuário pediu a cidade "Maceió" e o Reverse Geocoding indica que o ponto caiu em "Recife", o Score do trajeto é duramente penalizado, isolando fraudes na planilha de auditoria.
+    with st.expander("1. Primeiro Acesso e Navegação", expanded=True):
+        st.markdown("""
+        Ao entrar na plataforma, você verá um **Menu Lateral (Sidebar)** e **Abas Superiores**.
+        * **Menu Lateral:** Contém informações estáticas e o contato de suporte (Ticket de Manutenção).
+        * **Abas Superiores:** São os "módulos" do sistema. É ali que a mágica acontece. Você clica numa aba (Ex: ⚙️ Processamento Lote) e a tela muda apenas para essa função.
+        """)
 
-    ## 4. O Motor Geodésico e a Distância em Linha Reta
-    A Distância em Linha Reta (Aérea) é a âncora de segurança matemática da plataforma. Ela atua como juíza absoluta do motor asfáltico (Google Maps).
+    with st.expander("2. Processamento de Rota Individual (Testes Rápidos)"):
+        st.markdown("""
+        **Quando usar?** Você quer saber a distância de um galpão específico até um cliente sem subir planilhas.
+        **Passo a passo:**
+        1. Clique na aba **📍 Geocodificação**.
+        2. No campo **Origem**, digite o endereço completo ou coordenada (Ex: *Rua Teste, 100, São Paulo, SP*).
+        3. No campo **Destino**, digite o final da viagem.
+        4. Clique em **🚀 Calcular Rota Individual**.
+        5. **Resultado:** O painel exibirá as caixas (Cards) contendo a Distância de Asfalto, a Distância Aérea, e se usa balsas. Abaixo, clique no card de 'Auditoria Detalhada' para ler o log gerado pelo robô.
+        """)
 
-    ### O que é e Para que Serve?
-    A Linha Reta é a distância física verdadeira entre duas coordenadas globais, medida sobre a superfície curvada da Terra. Se o Google Maps afirma que a rota de asfalto tem 1.000 km, mas a Linha Reta atestou apenas 15 km, o motor identifica uma **Violação Geodésica** severa (como a ausência de uma ponte para atravessar um rio). Ela serve para identificar desvios operacionais invisíveis a olho nu.
-    
-    ### Fórmulas Matemáticas e as 5 Camadas de Segurança
-    O sistema abriga a função blindada `calcular_distancia_linha_reta()`, que atua nas seguintes camadas operacionais para impedir qualquer retorno de "0 km" indevido:
-    * **Camada 1 (Padrão Ouro WGS-84 via GeographicLib):** Utilizada no controle de tráfego aéreo e mísseis balísticos. Resolve as equações de Bessel para medir a distância considerando a Terra não como uma esfera, mas como um elipsoide achatado nos polos. É a referência primária.
-    * **Camada 2 (Fallback - Geopy Geodesic):** Motor auxiliar baseado nas fórmulas elipsoidais de Vincenty, ativado instantaneamente se a biblioteca C++ primária apresentar instabilidade.
-    * **Camada 3 (Fallback Matemático - Haversine):** Método trigonométrico explícito rodando em Python nativo. Pressupõe uma Terra esférica perfeita. Taxa de erro aceitável de ~0.3%.
-    * **Camada 4 (Correção Automática Anti-Zero):** Em distâncias minúsculas (centímetros), os processadores podem sofrer *Float Overflow* e arredondar a distância para zero. O sistema intercepta isso e converte a resposta para um limiar seguro de `0.01 km`, impedindo que os gráficos de Analytics quebrem com divisões por zero.
-    * **Camada 5 (Validação Territorial de Bounding Box):** O território brasileiro tem extensão máxima (N-S/L-O) de aproximadamente 4.390 km. Se a linha reta gerada ultrapassar `5000.0 km`, o sistema deduz que ocorreu uma alucinação no Geocoder (como fixar São Paulo no Japão). A rota é automaticamente barrada com o status `"Falha de Bounding Box Territorial"`.
+    with st.expander("3. Processamento em Lote (Milhares de Rotas simultâneas)"):
+        st.markdown("""
+        **Quando usar?** Você tem o faturamento do mês num Excel com milhares de entregas e quer a quilometragem oficial de todas.
+        **Passo a passo:**
+        1. Crie uma planilha em Excel (formato `.xlsx`). Ela **obrigatoriamente** precisa ter uma coluna chamada `Origem` e uma coluna chamada `Destino`.
+        2. Entre na aba **⚙️ Processamento Lote**.
+        3. Arraste e solte o arquivo no bloco pontilhado central.
+        4. (Opcional) Digite sua matrícula para auditoria no campo de Operador.
+        5. Clique em **Iniciar Processamento em Lote**.
+        6. **Resultado:** Uma barra de progresso encherá rapidamente. No final balões sobem à tela e um botão azul **📥 Baixar Planilha (.xlsx)** aparecerá. Ao abrir seu novo Excel, as distâncias e as auditorias estarão preenchidas!
+        """)
 
-    ## 5. Arquitetura de Cache de Múltiplos Estágios
-    Para zerar latências de rede e economizar custos de API, o sistema conta com a biblioteca `diskcache` (SQLite persistido em disco).
-    * **Cache de Geocodificação (`cache_geo` e `cache_cep`):** Armazena coordenadas validadas via Hashes MD5 da *string* canônica.
-    * **Cache de Roteamento (`cache_rotas`):** Armazena toda a malha viária extraída do Google/OSRM e o polígono final.
-    * **Motor de *Unpoisoning* Automático:** Se por ventura o sistema herdar um *cache viciado* do passado (ex: uma linha reta que na Versão 1.0 foi armazenada como 0 km), o código intercepta a anomalia em tempo real, "quebra" a célula do cache, reprocessa usando WGS-84 e atualiza o banco de dados silenciosamente para o usuário.
+    with st.expander("4. Alocação de Hubs (Descobrir o Centro de Distribuição mais próximo)"):
+        st.markdown("""
+        **Quando usar?** Você tem 5 Filiais e 10.000 Clientes. Você não sabe de qual filial a mercadoria de cada cliente deve sair para economizar frete.
+        **Passo a passo:**
+        1. Vá na aba **📦 Alocação de Hubs**.
+        2. Suba o arquivo 1 (Seus Clientes / Entregas).
+        3. Suba o arquivo 2 (A lista com as suas Filiais / Hubs).
+        4. Embaixo, escolha nas caixas de seleção o nome da coluna de origem (no Excel 1) e o nome da coluna das filiais (no Excel 2).
+        5. Clique em **🗺️ Processar Cruzamento Espacial**.
+        6. O sistema cruzará cada cliente contra todas as filiais na matemática. Depois, fará o duelo viário no asfalto e te devolverá um arquivo em Excel apontando exatamente a qual Centro o Cliente pertence.
+        """)
 
-    ## 6. Roteamento em Lote, Alocação Competitiva e Identificação de Balsas
-    * **Processamento O(U) com ThreadPools:** Toda lista Excel submetida sofre varredura assíncrona. 5.000 clientes não são calculados 1 a 1, mas em *workers* paralelos que inundam as APIs simultaneamente.
-    * **Alocação de Hubs (Roteamento Duplo e Vizinho Mais Próximo):** Em vez de calcular "A para B", a plataforma submete clientes contra centenas de Centros de Distribuição (CD's). O sistema roda `N * M` duelos espaciais na memória virtual calculando a Linha Reta de todos contra todos. Identificados os dois CDs finalistas fisicamente mais próximos do cliente, a API invoca o motor de asfalto do Google/OSRM para definir qual Base abastecerá o CEP, reduzindo severamente os custos logísticos de "Cross-Docking".
-    * **Ferries / Modais Hídricos:** O Motor Open-Source Routing (OSRM) rastreia corpos hídricos no OpenStreetMap. Caso uma viagem terrestre seja forçada a usar balsa (ex: Manaus para Autazes), a API ativa a flag `"Ferry"`, mapeada pela interface em `Uso de Balsas: Sim`.
+    with st.expander("5. Calculadora Analítica"):
+        st.markdown("""
+        **Quando usar?** Você processou um Lote gigantesco e quer "tirar relatórios" na própria tela sem precisar abrir o Excel (Ex: Somar distâncias por Estado).
+        **Passo a passo:**
+        1. Após ter processado um lote, vá na aba **🧮 Calculadora Analítica**.
+        2. No painel de configuração, escolha o **Campo** (ex: `Distancia`).
+        3. Escolha a **Operação** (Ex: `Soma (Sum)` ou `Média (Average)`).
+        4. Escolha **Agrupar por** (Ex: `Regiao_Sintetica_Origem` ou `Status da Rota`).
+        5. O gráfico e a tabela serão montados instantaneamente com a soma calculada. Você pode baixar em PDF/Excel a tabela que gerou.
+        """)
 
-    ## 7. Score de Explicabilidade (XAI) e Enterprise Analytics (Cross-Filtering)
-    * **Score Global:** Cada rota exibe um grau de saúde corporativo de 0 a 100: `(0.35 * Confiança Origem) + (0.35 * Confiança Destino) + (0.30 * Auditoria de Asfalto)`.
-    * **Cross-Filtering Engine:** O Enterprise Analytics não possui gráficos isolados. Se o gestor clicar no estado de São Paulo no gráfico de rosca, a base de dados subjacente (`df_cf`) reage instantaneamente cortando dados do Brasil inteiro, forçando os Mapas, Rankings e KPIs do topo da tela a exibirem somente os números e anomalias de São Paulo. A Sincronização é bidirecional (Gráfico <-> Filtros).
-    * **Mapas de Densidade Híbridos:** A visualização não apenas plota pontos geográficos. Ela expande a bolha de mapeamento (Raio Visual) conforme a `Quantidade de Ocorrências` de rotas na mesma área, identificando zonas de estrangulamento para Capex (Abertura de novos CDs baseados em volume auditado).
-    """)
+    with st.expander("6. Classificação Territorial"):
+        st.markdown("""
+        **Quando usar?** Você quer agrupar municípios em faixas de "Tabela de Frete" (Ex: Cidades Críticas, Cidades Normais).
+        **Passo a passo:**
+        1. Entre na aba **🚨 Classificação Territorial**.
+        2. Escolha se as faixas serão baseadas em "Distância" ou "Volume de Rotas".
+        3. Você verá uma tabela editável na tela. Pode apagar, adicionar linhas e mudar as cores/rótulos (Ex: de `1` a `500` km = Verde, de `501` para frente = Vermelho).
+        4. O sistema processará imediatamente o mapa de calor com as novas regras e te dará um botão para baixar a tabela mestre de segmentação.
+        """)
+
+    with st.expander("7. Enterprise Analytics (Dashboards)"):
+        st.markdown("""
+        **Quando usar?** Módulo estilo Power BI para analisar a saúde logística geral e apresentar resultados em reuniões.
+        **Passo a passo:**
+        1. Acesse a aba **📊 Enterprise Analytics**.
+        2. Todos os gráficos (Pizza, Barras, Linha, Mapa e Bolhas) são interativos.
+        3. **Como Filtrar:** Basta clicar na fatia do estado "SP" no gráfico de Pizza. Todos os outros gráficos (Mapa, Indicadores) vão mudar na hora para mostrar os dados exclusivos de São Paulo.
+        4. Para voltar, clique em um espaço branco do gráfico ou no botão "🧹 Limpar Todos os Filtros" no topo da página.
+        """)
+
+    with st.expander("8. Filtros Avançados"):
+        st.markdown("""
+        Além dos cliques nos gráficos, a aba Analytics possui caixas brancas expansíveis chamadas **"🎛️ Painel de Controle de Filtros Avançados"**.
+        Nelas você pode selecionar explicitamente Regiões, Cidades, ou arrastar a barra de distância (Slider) para forçar o dashboard a te mostrar apenas viagens entre `1.000` km e `2.000` km. A resposta é instantânea e bidirecional.
+        """)
+
+    with st.expander("9. Monitoramento de APIs"):
+        st.markdown("""
+        **Quando usar?** O sistema está demorando e você quer ver se o Google ou o servidor caíram.
+        **Passo a passo:**
+        1. Acesse a aba **🔌 Monitor APIs**.
+        2. A tabela informará se a Latência e os Erros (Falhas de Rede) estão normais. O indicador 🟢 significa que o fornecedor em nuvem está operando bem. O 🔴 avisa de quedas, indicando que o sistema começou a utilizar os "Fallbacks de Segurança" automaticamente.
+        """)
+
+    with st.expander("10. Auditoria"):
+        st.markdown("""
+        **Quando usar?** Você suspeita que o motor colocou um cliente na cidade errada.
+        **Passo a passo:**
+        1. Vá até a aba **🕵️ Auditoria**.
+        2. A tabela gigante na tela detalha o "Dossiê Investigativo". Pesquise pela sua rua ali. A coluna de "XAI Explicabilidade" mostrará exatamente a dedução lógica e cruzamento de APIs que o servidor usou.
+        """)
+
+    with st.expander("11. Exportações (Excel, CSV e Relatórios)"):
+        st.markdown("""
+        Todo o sistema foi criado para exportar fácil. 
+        * Nas abas de Lote/Alocação, procure os botões retangulares azuis ou brancos como `📥 Baixar Planilha (.xlsx)`.
+        * Na aba "Calculadora Analítica", existem opções de CSV e a "Exportação Multi-Abas" que embute o gráfico visual dentro da sua planilha de Excel corporativa pronta para a chefia.
+        """)
+
+    with st.expander("12. Perguntas Frequentes (FAQ Corporativo)"):
+        st.markdown("""
+        * **Por que uma rota retornou `0 km` ou `Input Inválido`?**
+        Provavelmente a célula original no seu Excel estava vazia, ou você escreveu lixo indecifrável (ex: `%$#¨#`).
+        * **O que significa o Score de Confiança?**
+        Um número de 0 a 100 indicando a precisão da geocodificação. Acima de 80, a mercadoria chega na porta. Abaixo de 50, o endereço caiu apenas genericamente na cidade.
+        * **O que significa a `Distância Linha Reta`?**
+        É o voo de um pássaro entre o Ponto A e B ignorando ruas. É essencial para você não cair no golpe do frete "asfáltico" cobrado em rotas com desvios artificiais.
+        * **Como identifico uso de balsa?**
+        A coluna `Balsas` no Excel exportado sairá marcada como `Sim` se os radares aquáticos do OSRM/Google detectarem travessia obrigatória.
+        * **Meus gráficos sumiram na aba Analytics. O que fazer?**
+        Provavelmente seus filtros deixaram a base vazia (Ex: Filtrar Nordeste, e depois cruzar pedindo estado SP). Vá no topo da página e clique em **🧹 Limpar Todos os Filtros**.
+        """)
 
 with tab_motores:
     st.info("💡 **Objetivo desta aba:** Monitorar a saúde técnica do ecossistema e o Uptime (SLA) de cada parceiro. Visualize quais APIs em nuvem responderam melhor, identifique instabilidades (timeouts), observe os tempos médios de resposta e verifique a integridade algorítmica do último lote.")
