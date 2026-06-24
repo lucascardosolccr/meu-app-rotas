@@ -2088,7 +2088,8 @@ if tab_individual:
                             for just in res_ind[27]: st.caption(f"- {just}")
 
                     url_iframe = res_ind[29]
-                    try: components.iframe(url_iframe, height=470, scrolling=True)
+                    try: 
+                        st.markdown(f'<iframe src="{url_iframe}" width="100%" height="470" frameborder="0" scrolling="yes"></iframe>', unsafe_allow_html=True)
                     except Exception: st.warning("Renderização de mapa localmente bloqueada pelas políticas de segurança do navegador.")
                     st.markdown(f"[🔗 Abrir Rota Completa no Aplicativo do Google Maps]({res_ind[2]})")
                 else:
@@ -2186,7 +2187,8 @@ if tab_processamento:
                     df_final = df_final.reindex(columns=ordem_finais)
                     
                     st.session_state['df_processado'] = df_final
-                    container_status.empty(); barra_progresso.empty()
+                    container_status.write("")
+                    barra_progresso.progress(1.0)
                     st.success("✨ Processamento em lote corporativo concluído com êxito e Linhas Retas Auditadas!")
                     
                     output_buffer = io.BytesIO()
@@ -2247,7 +2249,8 @@ if tab_alocacao:
                     
                     if not hubs_validos:
                         st.error("CRÍTICO: Nenhuma Base/Hub pôde ser geocodificada no mapa.")
-                        status_alo.empty(); progress_alo.empty()
+                        status_alo.write("")
+                        progress_alo.progress(1.0)
                     else:
                         status_alo.text("Fase 2/3: Geocodificando Endereços de Origem...")
                         dest_coords = {}
@@ -2313,7 +2316,8 @@ if tab_alocacao:
                         
                         tarefas_priorizadas_alo.sort(key=lambda x: x[0])
                         df_final_alo = rodar_pipeline_lote(df_pares, list(pares_unicos_alo), tarefas_priorizadas_alo, user_nome, progress_alo, status_alo, runner_up_map)
-                        status_alo.empty(); progress_alo.empty()
+                        status_alo.write("")
+                        progress_alo.progress(1.0)
                         
                         df_final_alo['Linha Reta'] = df_final_alo['Origem'].astype(str).str.strip().map(dest_to_linha_reta).fillna(df_final_alo['Linha Reta'])
                         df_final_alo['Status Linha Reta'] = df_final_alo['Origem'].astype(str).str.strip().map(dest_to_status_lr).fillna(df_final_alo['Status Linha Reta'])
