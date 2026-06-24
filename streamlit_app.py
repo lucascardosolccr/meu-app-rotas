@@ -2991,4 +2991,183 @@ def render_main_app():
 
             with st.expander("3. Processamento em Lote (Milhares de Rotas simultâneas)"):
                 st.markdown("""
-                **Quando usar?** Você tem o faturamento do mês num Excel com milhares de entregas e quer a quilometragem
+                **Quando usar?** Você tem o faturamento do mês num Excel com milhares de entregas e quer a quilometragem oficial de todas.
+                        **Passo a passo:**
+                        1. Crie uma planilha em Excel (formato `.xlsx`). Ela **obrigatoriamente** precisa ter uma coluna chamada `Origem` e uma coluna chamada `Destino`.
+                        2. Entre na aba **⚙️ Processamento Lote**.
+                        3. Arraste e solte o arquivo no bloco pontilhado central.
+                        4. (Opcional) Digite sua matrícula para auditoria no campo de Operador.
+                        5. Clique em **Iniciar Processamento em Lote**.
+                        6. **Resultado:** Uma barra de progresso encherá rapidamente. No final balões sobem à tela e um botão azul **📥 Baixar Planilha (.xlsx)** aparecerá. Ao abrir seu novo Excel, as distâncias e as auditorias estarão preenchidas!
+                        """)
+
+                    with st.expander("4. Alocação de Hubs (Descobrir o Centro de Distribuição mais próximo)"):
+                        st.markdown("""
+                        **Quando usar?** Você tem 5 Filiais e 10.000 Clientes. Você não sabe de qual filial a mercadoria de cada cliente deve sair para economizar frete.
+                        **Passo a passo:**
+                        1. Vá na aba **📦 Alocação de Hubs**.
+                        2. Suba o arquivo 1 (Seus Clientes / Entregas).
+                        3. Suba o arquivo 2 (A lista com as suas Filiais / Hubs).
+                        4. Embaixo, escolha nas caixas de seleção o nome da coluna de origem (no Excel 1) e o nome da coluna das filiais (no Excel 2).
+                        5. Clique em **🗺️ Processar Cruzamento Espacial**.
+                        6. O sistema cruzará cada cliente contra todas as filiais na matemática. Depois, fará o duelo viário no asfalto e te devolverá um arquivo em Excel apontando exatamente a qual Centro o Cliente pertence.
+                        """)
+
+                    with st.expander("5. Calculadora Analítica"):
+                        st.markdown("""
+                        **Quando usar?** Você processou um Lote gigantesco e quer "tirar relatórios" na própria tela sem precisar abrir o Excel (Ex: Somar distâncias por Estado).
+                        **Passo a passo:**
+                        1. Após ter processado um lote, vá na aba **🧮 Calculadora Analítica**.
+                        2. No painel de configuração, escolha o **Campo** (ex: `Distancia`).
+                        3. Escolha a **Operação** (Ex: `Soma (Sum)` ou `Média (Average)`).
+                        4. Escolha **Agrupar por** (Ex: `Regiao_Sintetica_Origem` ou `Status da Rota`).
+                        5. O gráfico e a tabela serão montados instantaneamente com a soma calculada. Você pode baixar em PDF/Excel a tabela que gerou.
+                        """)
+
+                    with st.expander("6. Classificação Territorial"):
+                        st.markdown("""
+                        **Quando usar?** Você quer agrupar municípios em faixas de "Tabela de Frete" (Ex: Cidades Críticas, Cidades Normais).
+                        **Passo a passo:**
+                        1. Entre na aba **🚨 Classificação Territorial**.
+                        2. Escolha se as faixas serão baseadas em "Distância" ou "Volume de Rotas".
+                        3. Você verá uma tabela editável na tela. Pode apagar, adicionar linhas e mudar as cores/rótulos (Ex: de `1` a `500` km = Verde, de `501` para frente = Vermelho).
+                        4. O sistema processará imediatamente o mapa de calor com as novas regras e te dará um botão para baixar a tabela mestre de segmentação.
+                        """)
+
+                    with st.expander("7. Enterprise Analytics (Dashboards)"):
+                        st.markdown("""
+                        **Quando usar?** Módulo estilo Power BI para analisar a saúde logística geral e apresentar resultados em reuniões.
+                        **Passo a passo:**
+                        1. Acesse a aba **📊 Enterprise Analytics**.
+                        2. Todos os gráficos (Pizza, Barras, Linha, Mapa e Bolhas) são interativos.
+                        3. **Como Filtrar:** Basta clicar na fatia do estado "SP" no gráfico de Pizza. Todos os outros gráficos (Mapa, Indicadores) vão mudar na hora para mostrar os dados exclusivos de São Paulo.
+                        4. Para voltar, clique em um espaço branco do gráfico ou no botão "🧹 Limpar Todos os Filtros" no topo da página.
+                        """)
+
+                    with st.expander("8. Filtros Avançados"):
+                        st.markdown("""
+                        Além dos cliques nos gráficos, a aba Analytics possui caixas brancas expansíveis chamadas **"🎛️ Painel de Controle de Filtros Avançados"**.
+                        Nelas você pode selecionar explicitamente Regiões, Cidades, ou arrastar a barra de distância (Slider) para forçar o dashboard a te mostrar apenas viagens entre `1.000` km e `2.000` km. A resposta é instantânea e bidirecional.
+                        """)
+
+                    with st.expander("9. Monitoramento de APIs"):
+                        st.markdown("""
+                        **Quando usar?** O sistema está demorando e você quer ver se o Google ou o servidor caíram.
+                        **Passo a passo:**
+                        1. Acesse a aba **🔌 Monitor APIs**.
+                        2. A tabela informará se a Latência e os Erros (Falhas de Rede) estão normais. O indicador 🟢 significa que o fornecedor em nuvem está operando bem. O 🔴 avisa de quedas, indicando que o sistema começou a utilizar os "Fallbacks de Segurança" automaticamente.
+                        """)
+
+                    with st.expander("10. Auditoria"):
+                        st.markdown("""
+                        **Quando usar?** Você suspeita que o motor colocou um cliente na cidade errada.
+                        **Passo a passo:**
+                        1. Vá até a aba **🕵️ Auditoria**.
+                        2. A tabela gigante na tela detalha o "Dossiê Investigativo". Pesquise pela sua rua ali. A coluna de "XAI Explicabilidade" mostrará exatamente a dedução lógica e cruzamento de APIs que o servidor usou.
+                        """)
+
+                    with st.expander("11. Exportações (Excel, CSV e Relatórios)"):
+                        st.markdown("""
+                        Todo o sistema foi criado para exportar fácil. 
+                        * Nas abas de Lote/Alocação, procure os botões retangulares azuis ou brancos como `📥 Baixar Planilha (.xlsx)`.
+                        * Na aba "Calculadora Analítica", existem opções de CSV e a "Exportação Multi-Abas" que embute o gráfico visual dentro da sua planilha de Excel corporativa pronta para a chefia.
+                        """)
+
+                    with st.expander("12. Perguntas Frequentes (FAQ Corporativo)"):
+                        st.markdown("""
+                        * **Por que uma rota retornou `0 km` ou `Input Inválido`?**
+                        Provavelmente a célula original no seu Excel estava vazia, ou você escreveu lixo indecifrável (ex: `%$#¨#`).
+                        * **O que significa o Score de Confiança?**
+                        Um número de 0 a 100 indicando a precisão da geocodificação. Acima de 80, a mercadoria chega na porta. Abaixo de 50, o endereço caiu apenas genericamente na cidade.
+                        * **O que significa a `Distância Linha Reta`?**
+                        É o voo de um pássaro entre o Ponto A e B ignorando ruas. É essencial para você não cair no golpe do frete "asfáltico" cobrado em rotas com desvios artificiais.
+                        * **Como identifico uso de balsa?**
+                        A coluna `Balsas` no Excel exportado sairá marcada como `Sim` se os radares aquáticos do OSRM/Google detectarem travessia obrigatória.
+                        * **Meus gráficos sumiram na aba Analytics. O que fazer?**
+                        Provavelmente seus filtros deixaram a base vazia (Ex: Filtrar Nordeste, e depois cruzar pedindo estado SP). Vá no topo da página e clique em **🧹 Limpar Todos os Filtros**.
+                        """)
+
+        if "🔌 Monitor APIs" in tab_dict:
+            with tab_dict["🔌 Monitor APIs"]:
+                st.info("💡 **Objetivo desta aba:** Monitorar a saúde técnica do ecossistema e o Uptime (SLA) de cada parceiro. Visualize quais APIs em nuvem responderam melhor, identifique instabilidades (timeouts), observe os tempos médios de resposta e verifique a integridade algorítmica do último lote.")
+                st.markdown("### 🔌 Painel de Monitoramento de Infraestrutura (APIs Health Check)")
+                
+                if 'df_processado' in st.session_state:
+                    df_kpi = st.session_state['df_processado'].copy()
+                    
+                    with st.container(border=True):
+                        col_p1, col_p2, col_p3 = st.columns(3)
+                        col_p1.metric("Tempo Médio Geocoding (Rede Externa)", f"{round(df_kpi['Tempo Geocoding (s)'].mean(), 2)} s")
+                        col_p2.metric("Tempo Médio Roteamento (Google/OSRM)", f"{round(df_kpi['Tempo Roteamento (s)'].mean(), 2)} s")
+                        col_p3.metric("Overhead Global Total / Rota", f"{round(df_kpi['Tempo Total (s)'].mean(), 2)} s")
+                    
+                    col_m1, col_m2 = st.columns(2)
+                    
+                    with col_m1:
+                        st.caption("**Volume de Requisições de Resolução por Motor (Market Share Base)**")
+                        grafico_apis = alt.Chart(df_kpi).mark_arc(innerRadius=60).encode(
+                            theta=alt.Theta(field="Fonte Geocoding Origem", aggregate="count"),
+                            color=alt.Color(field="Fonte Geocoding Origem", type="nominal", legend=alt.Legend(title="Motores", orient='bottom')),
+                            tooltip=['Fonte Geocoding Origem', 'count()']
+                        ).properties(height=350)
+                        st.altair_chart(grafico_apis, use_container_width=True)
+                        
+                    with col_m2:
+                        st.caption("**Distribuição Qualitativa: Status Bayesiano Pós-Processamento**")
+                        status_palette_bar = alt.Scale(domain=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro'], range=['#2ECC71', '#3498DB', '#F1C40F', '#E67E22', '#E74C3C'])
+                        grafico_status = alt.Chart(df_kpi).mark_bar().encode(
+                            x=alt.X('Status da Rota:N', title='Classificação de Confiança e Exatidão'),
+                            y=alt.Y('count():Q', title='Volume de Requisições'),
+                            color=alt.Color('Status da Rota:N', scale=status_palette_bar, legend=None),
+                            tooltip=['Status da Rota', 'count()']
+                        ).properties(height=350)
+                        st.altair_chart(grafico_status, use_container_width=True)
+                        
+                st.markdown("---")
+                st.markdown("#### 📡 Tabela Mestre de SLA e Latência em Tempo Real")
+                health_data = []
+                for api in ["GOOGLE_MAPS", "ARCGIS", "TOMTOM", "NOMINATIM", "PHOTON", "OVERPASS", "OSRM"]:
+                    dados = cache_api_health.get(api, {"hits": 0, "calls": 0, "falhas": 0, "tempo_total": 0.0})
+                    t_med = f"{round((dados['tempo_total'] / max(1, dados['calls'])) * 1000)} ms" if dados['calls'] > 0 else "N/A"
+                    tx_err = f"{round((dados['falhas'] / max(1, dados['calls'] + dados['falhas'])) * 100, 1)}%" if dados['calls'] > 0 else "0.0%"
+                    health_data.append({"Provedor/Cloud Oficial": api, "Status da Conexão": "🟢 Estável/Online" if dados["falhas"] == 0 else "🔴 Instável/Erros Detectados", "Latência Média Observada": t_med, "Taxa de Falha Sistêmica": tx_err, "Total de Pings Realizados": dados["calls"]})
+                
+                st.dataframe(pd.DataFrame(health_data), use_container_width=True)
+
+                st.markdown("#### 🌐 Auditoria do Motor Geodésico Contínuo (Métricas de Integridade Matemática)")
+                df_metricas_lr = pd.DataFrame([METRICAS_DISTANCIA])
+                df_metricas_lr.columns = ["Total de Cálculos de Linha Reta", "Sucesso: GeographicLib (WGS84)", "Sucesso: Geopy", "Fallback: Haversine", "Correções Automáticas (Anti-Zero)", "Falhas Críticas", "Rotas Unpoisoned (Cache Reparado)", "Barreiras Territoriais (Bounding Box)", "Desambiguações Topológicas (Anti-Colisão)"]
+                st.dataframe(df_metricas_lr, use_container_width=True)
+
+        if "🕵️ Auditoria" in tab_dict:
+            with tab_dict["🕵️ Auditoria"]:
+                st.info("💡 **Objetivo desta aba:** Transparência Total e Explicabilidade (XAI). Funciona como uma 'Caixa Preta' aberta do sistema. Verifique em detalhes qual algoritmo tomou a decisão para cada coordenada e por que ele escolheu descartar outras opções em caso de empate de proximidade.")
+                st.markdown("### 🕵️ Dossiê Investigativo de Auditoria Viária e Espacial")
+                
+                tab_aud_lote, tab_aud_hub, tab_aud_acesso = st.tabs(["⚙️ Logs do Lote de Roteamento", "📦 Logs de Alocação (Hubs)", "🔐 Trilha de Acessos Corporativa"])
+                
+                with tab_aud_lote:
+                    if 'logs_auditoria' in st.session_state and st.session_state['logs_auditoria']:
+                        st.write("Árvore de decisões algorítmicas (XAI) do cálculo de Lote:")
+                        st.dataframe(pd.DataFrame(st.session_state['logs_auditoria']), use_container_width=True)
+                    else:
+                        st.info("Nenhum registro de auditoria em memória cache. Processe uma planilha na aba de Processamento em Lote.")
+                        
+                with tab_aud_hub:
+                    if 'logs_auditoria_alocacao' in st.session_state and st.session_state['logs_auditoria_alocacao']:
+                        st.write("Inferências espaciais estritas da Matriz Geográfica (Hubs x Destinos):")
+                        st.dataframe(pd.DataFrame(st.session_state['logs_auditoria_alocacao']), use_container_width=True)
+                    else:
+                        st.info("Nenhuma árvore de decisão persistida. Processe a alocação de Hubs.")
+                        
+                with tab_aud_acesso:
+                    st.write("Registro de Sessões, Logins e Execuções Operacionais (RBAC):")
+                    st.dataframe(pd.DataFrame(st.session_state.get('audit_trail', [])), use_container_width=True)
+
+# ==============================================================================
+# ENTRYPOINT DO SISTEMA
+# ==============================================================================
+if not st.session_state.get("logged_in", False): 
+    render_login()
+else: 
+    render_main_app()
