@@ -15,9 +15,10 @@ import json
 import urllib.parse
 import smtplib
 import logging
-from datetime import datetime
+import threading
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from datetime import datetime
 import altair as alt
 import plotly.express as px
 import plotly.graph_objects as go
@@ -29,11 +30,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Novas Dependências Corporativas (FastAPI, PostGIS, Polígonos)
-from fastapi import FastAPI, Body, HTTPException
-from fastapi.responses import JSONResponse
-import threading
-from shapely.geometry import shape, Point
+# ==============================================================================
+# 🚀 MÓDULOS CORPORATIVOS E DEPENDÊNCIAS HEADLESS / GEOESPACIAIS
+# ==============================================================================
+try:
+    from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends
+    from pydantic import BaseModel
+    import uvicorn
+    FASTAPI_DISPONIVEL = True
+except ImportError:
+    FASTAPI_DISPONIVEL = False
 
 try:
     import psycopg2
@@ -41,6 +47,13 @@ try:
     POSTGIS_DISPONIVEL = True
 except ImportError:
     POSTGIS_DISPONIVEL = False
+
+try:
+    from shapely.geometry import shape, Point, Polygon
+    import geopandas as gpd
+    SHAPELY_DISPONIVEL = True
+except ImportError:
+    SHAPELY_DISPONIVEL = False
 
 # Motores Geodésicos Estratificados
 try:
@@ -58,7 +71,7 @@ except ImportError:
 # ==============================================================================
 # CONFIGURAÇÃO DE LOGS E AUDITORIA CRÍTICA
 # ==============================================================================
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("MotorGeodesicoCorp")
 
 METRICAS_DISTANCIA = {
@@ -74,167 +87,152 @@ METRICAS_DISTANCIA = {
 }
 
 # ==============================================================================
-# 🗄️ PERSISTÊNCIA POSTGIS E AUDITORIA DE ACESSOS (NOVO MÓDULO)
+# 🛡️ RBAC E GESTÃO DE USUÁRIOS
 # ==============================================================================
-class DatabaseManager:
-    def __init__(self):
-        self.host = os.environ.get("POSTGIS_HOST", "localhost")
-        self.port = os.environ.get("POSTGIS_PORT", "5432")
-        self.db = os.environ.get("POSTGIS_DB", "logistica_corp")
-        self.user = os.environ.get("POSTGIS_USER", "postgres")
-        self.pw = os.environ.get("POSTGIS_PW", "postgres")
-        self.connected = False
-        self._init_db()
-
-    def _init_db(self):
-        if not POSTGIS_DISPONIVEL: return
-        try:
-            with psycopg2.connect(host=self.host, port=self.port, dbname=self.db, user=self.user, password=self.pw) as conn:
-                with conn.cursor() as cur:
-                    cur.execute("CREATE EXTENSION IF NOT EXISTS postgis;")
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS auditoria_acessos (
-                            id SERIAL PRIMARY KEY, usuario VARCHAR(100), data_hora TIMESTAMP, 
-                            acao VARCHAR(255), resultado TEXT, ip_address VARCHAR(50), tempo_execucao FLOAT
-                        )
-                    """)
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS log_rotas (
-                            id SERIAL PRIMARY KEY, origem_texto TEXT, destino_texto TEXT, 
-                            distancia_viaria FLOAT, distancia_geodesica FLOAT, 
-                            geom_origem geometry(Point, 4326), geom_destino geometry(Point, 4326),
-                            data_hora TIMESTAMP
-                        )
-                    """)
-                conn.commit()
-                self.connected = True
-        except Exception as e:
-            logger.warning(f"Fallback para Cache Local: PostGIS Indisponível. Erro: {e}")
-
-    def log_acao(self, usuario, acao, resultado="Sucesso", ip="127.0.0.1", tempo=0.0):
-        if not self.connected: return
-        try:
-            with psycopg2.connect(host=self.host, port=self.port, dbname=self.db, user=self.user, password=self.pw) as conn:
-                with conn.cursor() as cur:
-                    cur.execute("INSERT INTO auditoria_acessos (usuario, data_hora, acao, resultado, ip_address, tempo_execucao) VALUES (%s, %s, %s, %s, %s, %s)",
-                                (usuario, datetime.now(), acao, resultado, ip, tempo))
-                conn.commit()
-        except: pass
-
-db_manager = DatabaseManager()
-
-def registrar_auditoria_app(acao, resultado="Sucesso", tempo=0.0):
-    usuario = st.session_state.get('usuario_atual', 'Sistema')
-    if 'audit_trail' not in st.session_state: st.session_state['audit_trail'] = []
-    
-    reg = {"Usuário": usuario, "Data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Ação": acao, "Resultado": resultado, "Tempo Exec.": f"{tempo:.2f}s"}
-    st.session_state['audit_trail'].append(reg)
-    db_manager.log_acao(usuario, acao, resultado, "UI/Web", tempo)
-
-# ==============================================================================
-# 🔐 GESTÃO DE USUÁRIOS E RBAC (NOVO MÓDULO)
-# ==============================================================================
-USUARIOS_DB = {
-    "admin": {"senha": "123", "perfil": "ADMINISTRADOR", "nome": "Admin Global"},
-    "gestor": {"senha": "123", "perfil": "GESTOR", "nome": "Gestor Estratégico"},
-    "analista": {"senha": "123", "perfil": "ANALISTA", "nome": "Analista de BI"},
-    "operador": {"senha": "123", "perfil": "OPERADOR", "nome": "Operador Logístico"}
-}
-
 class PermissionManager:
-    # Hierarquia de acesso aditiva
-    PERMISSOES = {
-        "OPERADOR": ["geocodificacao", "lote", "alocacao", "manual", "enciclopedia"],
-        "ANALISTA": ["geocodificacao", "lote", "alocacao", "manual", "enciclopedia", "analytics", "calculadora", "classificacao"],
-        "GESTOR": ["geocodificacao", "lote", "alocacao", "manual", "enciclopedia", "analytics", "calculadora", "classificacao", "kpis", "auditoria", "motores"],
-        "ADMINISTRADOR": ["all"]
+    PERFIS = {
+        "ADMINISTRADOR": ["geocodificacao", "lote", "alocacao", "analytics", "calculadora", "classificacao", "enciclopedia", "manual", "monitor", "auditoria", "configuracoes"],
+        "GESTOR": ["geocodificacao", "lote", "alocacao", "analytics", "calculadora", "classificacao", "enciclopedia", "manual", "auditoria"],
+        "ANALISTA": ["geocodificacao", "lote", "analytics", "calculadora", "classificacao", "enciclopedia", "manual"],
+        "OPERADOR": ["geocodificacao", "lote", "enciclopedia", "manual"]
     }
 
-    @classmethod
-    def tem_permissao(cls, perfil, recurso):
-        if perfil == "ADMINISTRADOR": return True
-        return recurso in cls.PERMISSOES.get(perfil, [])
+    USUARIOS_MOCK = {
+        "admin": {"senha": "123", "perfil": "ADMINISTRADOR", "nome": "Admin Global"},
+        "gestor": {"senha": "123", "perfil": "GESTOR", "nome": "Gestor de Operações"},
+        "analista": {"senha": "123", "perfil": "ANALISTA", "nome": "Analista de Logística"},
+        "operador": {"senha": "123", "perfil": "OPERADOR", "nome": "Operador de Base"}
+    }
+
+    @staticmethod
+    def validar_login(usuario, senha):
+        if usuario in PermissionManager.USUARIOS_MOCK and PermissionManager.USUARIOS_MOCK[usuario]["senha"] == senha:
+            return PermissionManager.USUARIOS_MOCK[usuario]
+        return None
+
+    @staticmethod
+    def tem_permissao(perfil, modulo):
+        return modulo in PermissionManager.PERFIS.get(perfil, [])
+
+def registrar_auditoria_usuario(acao, modulo, detalhes=""):
+    if "auditoria_usuarios" not in st.session_state:
+        st.session_state["auditoria_usuarios"] = []
+    
+    usuario_atual = st.session_state.get("user_data", {}).get("nome", "Sistema/API")
+    ip_mock = "127.0.0.1" # Em produção, capturar IP real via headers
+    
+    log_entry = {
+        "Data/Hora": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Usuário": usuario_atual,
+        "Ação": acao,
+        "Módulo": modulo,
+        "IP": ip_mock,
+        "Detalhes": detalhes
+    }
+    st.session_state["auditoria_usuarios"].append(log_entry)
+    logger.info(f"AUDITORIA RBAC: {usuario_atual} | {acao} | {modulo}")
 
 # ==============================================================================
-# 🗺️ MOTOR DE POLÍGONOS E RESTRIÇÕES (NOVO MÓDULO)
+# 🗄️ PERSISTÊNCIA GEOESPACIAL CORPORATIVA (POSTGIS MANAGER)
+# ==============================================================================
+class EnterpriseDatabaseManager:
+    def __init__(self):
+        self.conectado = False
+        self.conn = None
+        self.url = os.environ.get("POSTGIS_URL", "") # Ex: postgresql://user:pass@localhost:5432/logistic_db
+        if self.url and POSTGIS_DISPONIVEL:
+            self.conectar()
+
+    def conectar(self):
+        try:
+            self.conn = psycopg2.connect(self.url)
+            self.conectado = True
+            logger.info("Conexão com PostgreSQL/PostGIS estabelecida com sucesso.")
+            self._criar_tabelas_iniciais()
+        except Exception as e:
+            logger.warning(f"Falha ao conectar no PostgreSQL. O sistema continuará utilizando 100% de persistência em Cache Disk. Erro: {e}")
+            self.conectado = False
+
+    def _criar_tabelas_iniciais(self):
+        if not self.conectado: return
+        query = """
+        CREATE TABLE IF NOT EXISTS rotas_calculadas (
+            id SERIAL PRIMARY KEY,
+            origem TEXT,
+            destino TEXT,
+            distancia_km NUMERIC,
+            tempo_str TEXT,
+            linha_reta_km NUMERIC,
+            geometria geometry(LineString, 4326),
+            data_calculo TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(query)
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            logger.error(f"Erro ao criar tabelas PostGIS: {e}")
+
+    def salvar_rota(self, origem, destino, dist, tempo, lr, lat_o, lon_o, lat_d, lon_d):
+        if not self.conectado: return
+        try:
+            with self.conn.cursor() as cur:
+                # Cria a LineString WKT para a rota (simplificada como linha reta no banco para registro)
+                linha_wkt = f"LINESTRING({lon_o} {lat_o}, {lon_d} {lat_d})"
+                cur.execute("""
+                    INSERT INTO rotas_calculadas (origem, destino, distancia_km, tempo_str, linha_reta_km, geometria)
+                    VALUES (%s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326))
+                """, (origem, destino, dist, tempo, lr, linha_wkt))
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            logger.error(f"Falha ao salvar rota no PostGIS: {e}")
+
+db_manager = EnterpriseDatabaseManager()
+
+# ==============================================================================
+# 🛑 ENGINE DE POLÍGONOS DE RISCO E RESTRIÇÃO
 # ==============================================================================
 class RestrictionEngine:
     def __init__(self):
-        self.polygons = [] # Formato: [{"nome": "ZRC", "risco": "ALTO", "geom": <shapely shape>}]
-    
-    def carregar_geojson(self, geojson_data):
-        try:
-            for feature in geojson_data.get('features', []):
-                geom = shape(feature['geometry'])
-                props = feature.get('properties', {})
-                self.polygons.append({
-                    "nome": props.get('name', 'Área Restrita Não Nomeada'),
-                    "risco": props.get('risk_level', 'MÉDIO'),
-                    "geom": geom
-                })
-        except Exception as e:
-            logger.error(f"Erro ao carregar GeoJSON de restrição: {e}")
+        self.zonas_restritas = [] # Lista de dicionários: {"nome": str, "nivel": str, "poligono": shapely.geometry.Polygon}
+        self.carregar_zonas_padrao()
 
-    def cruza_restricao(self, lat, lon):
-        if not self.polygons or lat == 0.0 or lon == 0.0:
+    def carregar_zonas_padrao(self):
+        # Exemplo: Carregaria de um GeoJSON local ou do PostGIS. 
+        # Aqui, mockamos uma zona de risco genérica no centro-oeste se Shapely estiver disponível
+        if SHAPELY_DISPONIVEL:
+            try:
+                # Exemplo: Caixa delimitadora fictícia no DF
+                poly = Polygon([(-48.10, -15.90), (-47.80, -15.90), (-47.80, -15.60), (-48.10, -15.60)])
+                self.zonas_restritas.append({
+                    "nome": "Zona de Restrição Operacional DF-01",
+                    "nivel": "ALTO",
+                    "tipo": "Área de Risco",
+                    "poligono": poly
+                })
+            except Exception: pass
+
+    def verificar_intersecao(self, lat, lon):
+        if not SHAPELY_DISPONIVEL or lat == 0.0 or lon == 0.0:
             return "Não", "N/A", "N/A", "N/A"
-        try:
-            pt = Point(lon, lat)
-            for poly in self.polygons:
-                if poly['geom'].contains(pt):
-                    return "Sim", poly['nome'], "Geofence Poligonal", poly['risco']
-        except: pass
+        
+        ponto = Point(lon, lat) # Shapely usa (x, y) -> (lon, lat)
+        
+        for zona in self.zonas_restritas:
+            if zona["poligono"].contains(ponto):
+                return "Sim", zona["nome"], zona["tipo"], zona["nivel"]
+        
         return "Não", "N/A", "N/A", "N/A"
 
-motor_restricoes = RestrictionEngine()
+restricoes_engine = RestrictionEngine()
 
 # ==============================================================================
-# 🚀 API FASTAPI HEADLESS (NOVO MÓDULO)
+# CONFIGURAÇÃO DE UI/UX E AMBIENTE (STREAMLIT SETTINGS)
 # ==============================================================================
-app_api = FastAPI(title="Motor Nacional de Roteirização - API Headless", description="API Corporativa B2B de Inteligência Logística")
-
-@app_api.get("/health")
-def api_health():
-    return {"status": "ok", "timestamp": datetime.now().isoformat(), "postgis_ativo": db_manager.connected}
-
-@app_api.post("/geocode")
-def api_geocode(payload: dict = Body(...)):
-    endereco = payload.get("endereco", "")
-    if not endereco: raise HTTPException(status_code=400, detail="Endereço não informado")
-    lat, lon, end_f, conf, score, dist, mun, fonte, xai = obter_coordenadas_e_endereco_oficial(endereco)
-    return {
-        "lat": lat, "lon": lon, "endereco_oficial": end_f, "confianca": conf, 
-        "score": score, "municipio": mun, "fonte": fonte, "xai": xai
-    }
-
-@app_api.post("/route")
-def api_route(payload: dict = Body(...)):
-    origem = payload.get("origem")
-    destino = payload.get("destino")
-    if not origem or not destino: raise HTTPException(status_code=400, detail="Origem e destino obrigatórios")
-    res = executar_pipeline_unificado(origem, destino)
-    return {
-        "distancia_km": res[0], "tempo_estimado": res[1], "uso_balsas": res[3],
-        "distancia_linha_reta": res[4], "fonte_roteamento": res[5], "score_global": res[6]
-    }
-
-@app_api.get("/api/kpis")
-def api_powerbi_kpis():
-    # Retorna métricas agregadas para o Web Connector do Power BI
-    if 'df_processado' in st.session_state and not st.session_state['df_processado'].empty:
-        df = st.session_state['df_processado']
-        return {
-            "total_rotas": len(df),
-            "distancia_total": float(df['Distancia'].sum()),
-            "taxa_sucesso": float((len(df[~df["Status da Rota"].str.contains("Erro")]) / len(df)) * 100),
-            "score_medio": float(df['Score Final Global'].mean())
-        }
-    return {"status": "Aguardando processamento de lote via sistema core."}
-
-# ==============================================================================
-# CONFIGURAÇÃO DE UI/UX E AMBIENTE
-# ==============================================================================
-st.set_page_config(page_title="Gerenciador de Rotas Inteligentes", page_icon="🚗", layout="wide")
+st.set_page_config(page_title="Gerenciador de Rotas Inteligentes - Enterprise", page_icon="🗺️", layout="wide")
 
 st.markdown("""
 <style>
@@ -263,18 +261,19 @@ st.markdown("""
         transform: translateY(-3px);
         box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.15), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
     }
-    [data-testid="stMetricLabel"] {
-        color: #9CA3AF !important; font-weight: 500; font-size: 0.95rem; margin-bottom: 0.5rem;
-    }
-    [data-testid="stMetricValue"] {
-        color: #F9FAFB !important; font-weight: 700; font-size: 1.8rem;
-    }
-    [data-testid="stMetricDelta"] { font-size: 0.85rem; }
+    [data-testid="stMetricLabel"] { color: #9CA3AF !important; font-weight: 500; font-size: 0.95rem; margin-bottom: 0.5rem; }
+    [data-testid="stMetricValue"] { color: #F9FAFB !important; font-weight: 700; font-size: 1.8rem; }
     
     [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
     [data-baseweb="tab"] {
-        background-color: #161A25; border: 1px solid #2D3342; border-bottom: none;
-        border-radius: 8px 8px 0 0; padding: 12px 24px; color: #9CA3AF; font-weight: 600; transition: all 0.2s;
+        background-color: #161A25;
+        border: 1px solid #2D3342;
+        border-bottom: none;
+        border-radius: 8px 8px 0 0;
+        padding: 12px 24px;
+        color: #9CA3AF;
+        font-weight: 600;
+        transition: all 0.2s;
     }
     [data-baseweb="tab"]:hover { color: #F9FAFB; background-color: #1E232F; }
     [data-baseweb="tab"][aria-selected="true"] { background-color: #3B82F6; color: #FFFFFF; border-color: #3B82F6; }
@@ -290,16 +289,16 @@ st.markdown("""
     
     .corporate-header {
         background: linear-gradient(135deg, #161A25 0%, #1E232F 100%);
-        padding: 24px; border-radius: 12px; margin-bottom: 30px; border-left: 6px solid #3B82F6;
+        padding: 24px;
+        border-radius: 12px;
+        margin-bottom: 30px;
+        border-left: 6px solid #3B82F6;
         box-shadow: 0 4px 6px rgba(0,0,0,0.2);
     }
     .corporate-title { color: #F9FAFB; margin: 0; font-weight: 700; font-size: 24px; letter-spacing: -0.5px; }
     .corporate-subtitle { color: #9CA3AF; margin: 5px 0 0 0; font-size: 15px; font-weight: 400; }
     
-    .filter-badge {
-        display: inline-block; background-color: #3B82F6; color: white; padding: 4px 10px;
-        border-radius: 20px; font-size: 13px; font-weight: 600; margin-right: 8px; margin-bottom: 8px;
-    }
+    .filter-badge { display: inline-block; background-color: #3B82F6; color: white; padding: 4px 10px; border-radius: 20px; font-size: 13px; font-weight: 600; margin-right: 8px; margin-bottom: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -322,15 +321,14 @@ cache_aprendizado_auto = Cache("./cache_aprendizado_auto")
 cache_api_health = Cache("./cache_api_health")
 cache_historico_lotes = Cache("./cache_historico_lotes")
 
-if "cache_limpo_v59" not in st.session_state:
+if "cache_limpo_v60" not in st.session_state:
     for c in [cache_classificacao, cache_fuzzy, cache_geo, cache_rotas, cache_poi, cache_cep, cache_google, cache_reverse, cache_base_local, cache_aprendizado, cache_aprendizado_auto, cache_api_health, cache_historico_lotes]:
         c.clear()
-    st.session_state["cache_limpo_v59"] = True
+    st.session_state["cache_limpo_v60"] = True
 
 def realizar_manutencao_logs_google():
     diretorio_logs = "logs_google"
     os.makedirs(diretorio_logs, exist_ok=True)
-   
     limite_tempo = time.time() - (30 * 86400)
     try:
         for arquivo in os.listdir(diretorio_logs):
@@ -346,7 +344,6 @@ retry_strategy = Retry(total=5, backoff_factor=0.5, status_forcelist=[429, 500, 
 adapter = HTTPAdapter(max_retries=retry_strategy)
 session.mount("https://", adapter)
 session.mount("http://", adapter)
-
 session.cookies.set("CONSENT", "YES+cb.20230101-00-p0.pt-BR+FX+902", domain=".google.com.br")
 session.cookies.set("CONSENT", "YES+cb.20230101-00-p0.pt-BR+FX+902", domain=".google.com")
 
@@ -356,10 +353,67 @@ CACHE_IBGE_PATH = "municipios_ibge.pkl"
 # 🎛️ INFRAESTRUTURA DE CONCORRÊNCIA E FILAS (THREAD-SAFE GLOBALS)
 # ==============================================================================
 WORKERS_DISPONIVEIS = 8
-
 EXECUTOR_GLOBAL = ThreadPoolExecutor(max_workers=WORKERS_DISPONIVEIS)
 FILA_NOMINATIM = ThreadPoolExecutor(max_workers=1)
 EXECUTOR_APIS = ThreadPoolExecutor(max_workers=16)
+
+# ==============================================================================
+# 🔌 CAMADA API HEADLESS (FASTAPI) EM THREAD PARALELA
+# ==============================================================================
+if FASTAPI_DISPONIVEL and "api_rodando" not in st.session_state:
+    api_app = FastAPI(title="Motor Geodésico Corporativo REST API", version="8.0.0")
+
+    class GeocodeRequest(BaseModel):
+        endereco: str
+
+    class RouteRequest(BaseModel):
+        origem: str
+        destino: str
+
+    @api_app.get("/health")
+    def health_check():
+        return {"status": "ok", "version": "v60-Enterprise", "postgis": db_manager.conectado}
+
+    @api_app.post("/geocode")
+    def api_geocode(req: GeocodeRequest):
+        # Acesso direto à camada semântica e de orquestração local
+        lat, lon, end_f, conf, score, dist, mun, fonte, xai = obter_coordenadas_e_endereco_oficial(req.endereco)
+        return {"lat": lat, "lon": lon, "endereco_oficial": end_f, "confianca": conf, "score": score, "municipio": mun, "fonte": fonte}
+
+    @api_app.post("/route")
+    def api_route(req: RouteRequest):
+        res = executar_pipeline_unificado(req.origem, req.destino)
+        if res:
+            return {
+                "distancia_km": res[0], "tempo": res[1], "link_rota": res[2], "balsa": res[3],
+                "linha_reta_km": res[4], "fonte_rota": res[5], "score_rota": res[6],
+                "origem_oficial": res[12], "lat_origem": res[19], "lon_origem": res[20],
+                "destino_oficial": res[18], "lat_destino": res[21], "lon_destino": res[22],
+                "status_linha_reta": res[30] if len(res) > 30 else "N/A"
+            }
+        return {"erro": "Falha no roteamento"}
+
+    @api_app.get("/analytics")
+    def api_analytics():
+        # Retorna um JSON consolidado do último lote processado para integração com Power BI
+        if 'df_processado' in st.session_state and not st.session_state['df_processado'].empty:
+            df = st.session_state['df_processado']
+            kpis = {
+                "total_rotas": len(df),
+                "distancia_total_km": float(pd.to_numeric(df['Distancia'], errors='coerce').sum()),
+                "municipios_atendidos": int(df['Municipio Destino'].nunique()),
+                "rotas_com_erro": len(df[df['Status da Rota'].str.contains("Erro")])
+            }
+            return kpis
+        return {"mensagem": "Nenhum lote processado recentemente."}
+
+    def run_fastapi():
+        uvicorn.run(api_app, host="0.0.0.0", port=8000, log_level="error")
+
+    # Inicia a API em background para não travar o Streamlit
+    threading.Thread(target=run_fastapi, daemon=True).start()
+    st.session_state["api_rodando"] = True
+    logger.info("⚡ Camada Headless FastAPI iniciada com sucesso na porta 8000.")
 
 # ==============================================================================
 # 🎛️ DADOS GLOBAIS THREAD-SAFE E EXPANSÃO SEMÂNTICA
@@ -458,7 +512,6 @@ BOUNDING_BOXES_UF = {
     "SP": {"lat_min": -25.50, "lat_max": -19.50, "lon_min": -53.50, "lon_max": -44.00},
     "GO": {"lat_min": -19.50, "lat_max": -12.40, "lon_min": -53.30, "lon_max": -45.90},
 }
-
 # ==============================================================================
 # 🧹 ENGINE DE RESOLUÇÃO UNIVERSAL E ENDEREÇAMENTO CANÔNICO
 # ==============================================================================
@@ -612,7 +665,7 @@ class MotorEnderecoCanônico:
             if melhor_match_global and melhor_match_global[1] >= 85:
                 cidade_uf = melhor_match_global[0]
                 resultado.update({"uf": cidade_uf.rsplit(' ', 1)[1], "municipio": cidade_uf.rsplit(' ', 1)[0]})
-                     
+                
         return resultado
 
     def construir_endereco_canonico(self, texto_cru):
@@ -953,7 +1006,7 @@ def forcar_geocodificacao_hierarquica_estrita(texto_cru):
     
     candidatos.sort(key=lambda x: (x.get('score_base', 0) + (40 if x.get('bairro') else 0) + (50 if x.get('logradouro') else 0)), reverse=True)
     melhor = candidatos[0]
-   
+    
     end_f = ", ".join([c for c in [melhor.get('logradouro', ''), melhor.get('bairro', ''), melhor.get('cidade', ''), melhor.get('estado', '')] if c.strip()]) + ", BRASIL"
     return (melhor['lat'], melhor['lon'], end_f, "DESAMBIGUACAO_ESTRITA", 95, melhor.get('bairro', ''), melhor.get('cidade', ''), f"{melhor['fonte']} (Strict-Mode)", ["Desambiguação Espacial Anti-Colisão acionada em Nuvem. Resolução estrita aplicada."])
 
@@ -1087,7 +1140,6 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         feat_punicao_rodovia = not input_tem_rodovia and api_tem_rodovia
         
         api_end_str = f"{c1.get('logradouro','')} {c1.get('bairro','')} {c1.get('cidade','')} {c1.get('estado','')}".upper()
-  
         l_conf_rural = 0.2 if (tipo_entrada == "RURAL" and any(urb in api_end_str for urb in ["QUADRA ", "SQN ", "SQS ", "APARTAMENTO ", "EDIFICIO ", "BLOCO "])) else 1.0
         l_conf_urbano = 0.4 if (tipo_entrada in ["ENDERECO_COMPLETO", "BAIRRO"] and any(rur in api_end_str for rur in ["CHACARA ", "FAZENDA ", "GLEBA "])) else 1.0
 
@@ -1170,7 +1222,8 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     if tipo_entrada == "CEP": score_completude = 100
     elif tipo_entrada == "ENDERECO_COMPLETO":
         tem_numero = bool(input_usuario.get("numero") or input_usuario.get("complemento"))
-        tem_cidade = bool(mun_inf); tem_uf = bool(uf_inf)
+        tem_cidade = bool(mun_inf)
+        tem_uf = bool(uf_inf)
         if tem_numero and tem_cidade and tem_uf: score_completude = 100
         elif tem_cidade and tem_uf: score_completude = 95
         elif tem_cidade: score_completude = 85
@@ -1191,7 +1244,7 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
         explicacoes_humanas.append(f"Consenso espacial estabelecido via Ensemble Multi-API ({' + '.join(xd['apis'])}).")
     else:
         explicacoes_humanas.append(f"Inferência baseada unicamente na resposta isolada da fonte {vencedor['fonte']}.")
-        
+         
     if not ctx_inf.get("municipio"): explicacoes_humanas.append("Aviso: Validação IBGE local substituída por inteligência e preenchimento em Nuvem.")
     if xd["mun"]: explicacoes_humanas.append("Município validado na malha de referência oficial IBGE.")
     if xd["uf"]: explicacoes_humanas.append("Correspondência administrativa de Estado confirmada.")
@@ -1247,7 +1300,7 @@ def _obter_coordenadas_e_endereco_oficial_core(localidade):
     endereco_canonico, tipo_entrada, _, _, _ = semantica.construir_endereco_canonico(texto_norm)
     parsed_comp = ParserGeograficoBR.extrair_componentes(texto_norm)
     
-    cache_key = hashlib.md5(f"GEO_V55_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"GEO_V54_{tipo_entrada}_{endereco_canonico}".encode('utf-8')).hexdigest()
     
     if cache_key in cache_geo:
         c = cache_geo[cache_key]
@@ -1393,10 +1446,10 @@ def obter_coordenadas_e_endereco_oficial(localidade):
     return lat, lon, end_f, conf, score, dist, mun, fonte, xai
 
 # ==============================================================================
-# 🚀 MOTOR DE ROTEAMENTO EXTREMO E PIPELINE UNIFICADO
+# 🚀 MOTOR DE ROTEAMENTO EXTREMO E PIPELINE UNIFICADO (COM INTEGRAÇÃO DB/RISCO)
 # ==============================================================================
 def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True):
-    cache_key = f"GOOG_V55_{origem_texto}|{destino_texto}|{usar_coordenadas}"
+    cache_key = f"GOOG_V54_{origem_texto}|{destino_texto}|{usar_coordenadas}"
     if cache_key in cache_google: return cache_google[cache_key]
 
     orig_link_txt = requests.utils.quote(origem_texto)
@@ -1463,7 +1516,7 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     start_total = time.time()
     origem_clean, destino_clean = str(origem).strip(), str(destino).strip()
     
-    chave_rota_cache = f"ROTA_V55_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
+    chave_rota_cache = f"ROTA_V54_{semantica.normalizar(origem_clean)}->{semantica.normalizar(destino_clean)}"
     
     if chave_rota_cache in cache_rotas: 
         ret_cache = cache_rotas[chave_rota_cache]
@@ -1483,21 +1536,12 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
                     retorno_mutavel.append(novo_status)
                 else:
                     retorno_mutavel[30] = novo_status
-                # Extensão para Polígonos ao retornar do cache (caso não tenha)
-                if len(retorno_mutavel) < 35:
-                    cr_restricao, nm_restricao, tp_restricao, rsc_restricao = motor_restricoes.cruza_restricao(lat_d_cache, lon_d_cache)
-                    retorno_mutavel.extend([cr_restricao, nm_restricao, tp_restricao, rsc_restricao])
-
                 retorno_novo = tuple(retorno_mutavel)
                 cache_rotas.set(chave_rota_cache, retorno_novo, expire=2592000)
                 return retorno_novo
                  
             if len(ret_cache) == 30:
-                retorno_mutavel = list(ret_cache)
-                retorno_mutavel.append("Calculada via Cache Hit Estável")
-                cr_restricao, nm_restricao, tp_restricao, rsc_restricao = motor_restricoes.cruza_restricao(lat_d_cache, lon_d_cache)
-                retorno_mutavel.extend([cr_restricao, nm_restricao, tp_restricao, rsc_restricao])
-                return tuple(retorno_mutavel)
+                return (*ret_cache, "Calculada via Cache Hit Estável")
             return ret_cache
     
     start_geo = time.time()
@@ -1530,9 +1574,6 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     
     link_fallback = f"https://www.google.com/maps/dir/?api=1&origin={orig_param_fb}&destination={dest_param_fb}&travelmode=driving"
     link_embed_fallback = f"https://maps.google.com/maps?saddr={orig_param_fb}&daddr={dest_param_fb}&output=embed"
-
-    # Engine de Polígonos
-    cr_restricao, nm_restricao, tp_restricao, rsc_restricao = motor_restricoes.cruza_restricao(lat_d, lon_d)
 
     res_google = None
     res_osrm = None
@@ -1576,21 +1617,11 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
             motivo_roteamento = f"Fallback Operacional: Google Maps indisponível (Timeout). Traçado exato ({km_rota}km) calculado matematicamente pela malha OSRM."
             
         tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
+        retorno = (km_rota, tempo_rota, link_rota, balsa_rota, dist_linha_reta, fonte_rota, score_rota, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_roteamento, link_embed, status_linha_reta)
         
-        retorno = (
-            km_rota, tempo_rota, link_rota, balsa_rota, dist_linha_reta, fonte_rota, score_rota, 
-            conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, 
-            conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, 
-            lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, 
-            xai_o, xai_d, motivo_roteamento, link_embed, status_linha_reta,
-            cr_restricao, nm_restricao, tp_restricao, rsc_restricao
-        )
+        # NOVO: Persistência Geoespacial Corporativa (PostGIS)
+        db_manager.salvar_rota(origem_clean, destino_clean, km_rota, tempo_rota, dist_linha_reta, lat_o, lon_o, lat_d, lon_d)
         cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
-        
-        # Opcional: Persistir no PostGIS em Background
-        if db_manager.connected:
-            threading.Thread(target=db_manager.log_acao, args=("Sistema", f"Rota Calculada: {origem_clean} -> {destino_clean}"), daemon=True).start()
-
         return retorno
 
     km_terrestre = round(dist_linha_reta * obter_fator_desvio_rodoviario(dist_linha_reta), 2)
@@ -1599,14 +1630,10 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
     tempo_geo_str = f"{minutos_est} min" if minutos_est < 60 else f"{minutos_est // 60} h {minutos_est % 60} min"
     tempo_roteamento = round(time.time() - start_rot, 2); tempo_total = round(time.time() - start_total, 2)
     motivo_fallback = "Alerta Crítico: Motores viários em Nuvem e Open-Source rejeitaram a rota (Timeout ou Coordenadas Inválidas). Projeção Geodésica Adaptativa acionada baseada na Linha Reta."
-    retorno = (
-        km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 50, 
-        conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, 
-        conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, 
-        lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, 
-        xai_o, xai_d, motivo_fallback, link_embed_fallback, status_linha_reta,
-        cr_restricao, nm_restricao, tp_restricao, rsc_restricao
-    )
+    retorno = (km_terrestre, tempo_geo_str, link_fallback, "Não", dist_linha_reta, "Geodésico Adaptativo", 50, conf_o, score_num_o, dist_o, mun_o, fonte_geo_o, end_oficial_o, conf_d, score_num_d, dist_d, mun_d, fonte_geo_d, end_oficial_d, lat_o, lon_o, lat_d, lon_d, tempo_geocoding, tempo_roteamento, tempo_total, xai_o, xai_d, motivo_fallback, link_embed_fallback, status_linha_reta)
+    
+    # NOVO: Persistência Geoespacial Corporativa (PostGIS) Fallback
+    db_manager.salvar_rota(origem_clean, destino_clean, km_terrestre, tempo_geo_str, dist_linha_reta, lat_o, lon_o, lat_d, lon_d)
     cache_rotas.set(chave_rota_cache, retorno, expire=2592000)
     return retorno
 
@@ -1620,14 +1647,14 @@ def executar_pipeline_unificado(origem_cru, destino_cru, runner_up_info=None):
     justificativa = "N/A"
     
     if orig == "FALHA_GEO_ORIGEM" or dest == "NENHUM_HUB_VALIDO":
-        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ["Falha Espacial Origem"], ["Falha Espacial Destino"], "Falha de Roteamento: Hub Base ou Endereço Destino foi incapaz de resolver latitude/longitude em nuvem.", "N/A", "Falha Operacional (Input Inválido)", "Não", "N/A", "N/A", "N/A", concorrente, dist_conc, link_conc, justificativa)
+        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ["Falha Espacial Origem"], ["Falha Espacial Destino"], "Falha de Roteamento: Hub Base ou Endereço Destino foi incapaz de resolver latitude/longitude em nuvem.", "N/A", "Falha Operacional (Input Inválido)", concorrente, dist_conc, link_conc, justificativa, "Não", "N/A", "N/A", "N/A")
         
     if orig.lower() in ['nan', 'none', 'null', ''] or dest.lower() in ['nan', 'none', 'null', '']:
-        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha na leitura da célula (Campo Vazio).", "N/A", "Falha Operacional (Célula Vazia)", "Não", "N/A", "N/A", "N/A", concorrente, dist_conc, link_conc, justificativa)
+        return (0.0, "0 min", "Link Indisponível", "Não", 0.0, "Input Inválido", 0, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", orig, "BAIXA", 0, "Não Informado", "Não Informado", "N/A", dest, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [], [], "Falha na leitura da célula (Campo Vazio).", "N/A", "Falha Operacional (Célula Vazia)", concorrente, dist_conc, link_conc, justificativa, "Não", "N/A", "N/A", "N/A")
     
     res = calcular_pipeline_logistico(orig, dest, perfil_rota="shortest")
     
-    if runner_up_info and res and len(res) >= 35:
+    if runner_up_info and res and len(res) >= 31:
         dist_v_runner, r_nome, r_lat, r_lon = runner_up_info
         lat_o, lon_o = res[19], res[20]
         
@@ -1651,9 +1678,19 @@ def executar_pipeline_unificado(origem_cru, destino_cru, runner_up_info=None):
             justificativa = f"Alocação definida por proximidade matemática em linha reta. O trajeto viário oficial do Google Maps resultou em {res[0]} km. O 2º município mais próximo em linha reta era '{r_nome}', que geraria um traçado viário de {dist_conc} km."
         else:
             justificativa = f"Alocação matemática por vizinho mais próximo. Rota viária oficial via Google Maps: {res[0]} km."
+
+    # NOVO: Engine de Restrição Espacial
+    cruza_restricao_o, nome_z_o, tipo_z_o, nivel_z_o = restricoes_engine.verificar_intersecao(res[19], res[20]) if res else ("Não", "N/A", "N/A", "N/A")
+    cruza_restricao_d, nome_z_d, tipo_z_d, nivel_z_d = restricoes_engine.verificar_intersecao(res[21], res[22]) if res else ("Não", "N/A", "N/A", "N/A")
+    
+    cruza_geral = "Sim" if cruza_restricao_o == "Sim" or cruza_restricao_d == "Sim" else "Não"
+    nome_z_geral = nome_z_o if cruza_restricao_o == "Sim" else (nome_z_d if cruza_restricao_d == "Sim" else "N/A")
+    tipo_z_geral = tipo_z_o if cruza_restricao_o == "Sim" else (tipo_z_d if cruza_restricao_d == "Sim" else "N/A")
+    nivel_z_geral = nivel_z_o if cruza_restricao_o == "Sim" else (nivel_z_d if cruza_restricao_d == "Sim" else "N/A")
         
-    return (*res, concorrente, dist_conc, link_conc, justificativa)
-    def embrulhar_task_paralela(item):
+    return (*res, concorrente, dist_conc, link_conc, justificativa, cruza_geral, nome_z_geral, tipo_z_geral, nivel_z_geral)
+
+def embrulhar_task_paralela(item):
     if len(item) == 4:
         par_id, orig, dest, r_info = item
     else:
@@ -1662,16 +1699,15 @@ def executar_pipeline_unificado(origem_cru, destino_cru, runner_up_info=None):
         
     try: 
         res = executar_pipeline_unificado(orig, dest, r_info)
-        # O pipeline agora retorna 39 posições por conta dos polígonos de risco e análise competitiva
+        # Garantindo que a tupla sempre retorne o tamanho exato de 39 itens para o DataFrame não quebrar
         if res and isinstance(res, tuple) and len(res) < 39:
             res = tuple(list(res) + ["N/A"] * (39 - len(res)))
         return par_id, res
     except Exception as e: 
         msg_erro = f"FALHA INTERNA: {str(e)}"
-        fallback = (0.0, "0 min", "Link Indisponível", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], msg_erro, "N/A", "Falha de Processamento Multithread", "Não", "N/A", "N/A", "N/A", "N/A", 0.0, "N/A", "N/A")
+        fallback = (0.0, "0 min", "Link Indisponível", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], msg_erro, "N/A", "Falha de Processamento Multithread", "N/A", 0.0, "N/A", "N/A", "Não", "N/A", "N/A", "N/A")
         return par_id, fallback
-
-def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, progress_bar, status_container, runner_up_map=None):
+        def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, progress_bar, status_container, runner_up_map=None):
     resultados_unicos = {}
     executor_lote = EXECUTOR_GLOBAL
     
@@ -1715,13 +1751,8 @@ def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, pr
                     df.at[idx, 'Tempo Roteamento (s)'] = float(res[24]) if res[24] is not None else 0.0
                     df.at[idx, 'Tempo Total (s)'] = float(res[25]) if res[25] is not None else 0.0
                     
-                    df.at[idx, 'Cruza Area Restrita'] = res[31] if len(res) > 31 and res[31] is not None else "Não"
-                    df.at[idx, 'Area Restrita Encontrada'] = res[32] if len(res) > 32 and res[32] is not None else "N/A"
-                    df.at[idx, 'Tipo Restricao'] = res[33] if len(res) > 33 and res[33] is not None else "N/A"
-                    df.at[idx, 'Nivel de Risco'] = res[34] if len(res) > 34 and res[34] is not None else "N/A"
-
                     if runner_up_map:
-                        df.at[idx, 'Distancia Concorrente'] = float(res[36]) if res[36] != "N/A" else 0.0
+                        df.at[idx, 'Distancia Concorrente'] = float(res[32]) if res[32] != "N/A" else 0.0
                 except (ValueError, TypeError): pass
 
                 df.at[idx, 'Tempo'] = res[1] if res[1] is not None else "0 min"
@@ -1742,9 +1773,15 @@ def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, pr
                 df.at[idx, 'Status Linha Reta'] = res[30] if len(res) > 30 and res[30] is not None else "Não Mapeado"
                 
                 if runner_up_map:
-                    df.at[idx, 'Concorrente Analisado'] = res[35] if len(res) > 35 and res[35] is not None else "N/A"
-                    df.at[idx, 'Link Rota Concorrente'] = res[37] if len(res) > 37 and res[37] is not None else "N/A"
-                    df.at[idx, 'Justificativa de Alocacao'] = res[38] if len(res) > 38 and res[38] is not None else "N/A"
+                    df.at[idx, 'Concorrente Analisado'] = res[31] if len(res) > 31 and res[31] is not None else "N/A"
+                    df.at[idx, 'Link Rota Concorrente'] = res[33] if len(res) > 33 and res[33] is not None else "N/A"
+                    df.at[idx, 'Justificativa de Alocacao'] = res[34] if len(res) > 34 and res[34] is not None else "N/A"
+                
+                # NOVO: Colunas de Área Restrita
+                df.at[idx, 'Cruza Área Restrita'] = res[35] if len(res) > 35 else "Não"
+                df.at[idx, 'Área Restrita Encontrada'] = res[36] if len(res) > 36 else "N/A"
+                df.at[idx, 'Tipo Restrição'] = res[37] if len(res) > 37 else "N/A"
+                df.at[idx, 'Nível de Risco'] = res[38] if len(res) > 38 else "N/A"
                 
                 try:
                     if float(res[19]) == 0.0 and float(res[21]) == 0.0:
@@ -1775,45 +1812,34 @@ def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, pr
 # ==============================================================================
 def extrair_selecoes_altair():
     sel = {'regiao': [], 'uf': [], 'mun': [], 'status': [], 'linha_mun': [], 'scatter_mun': [], 'brush': {}}
-    
     def _get_sel(key, field, sel_key):
         if key in st.session_state and 'selection' in st.session_state[key]:
             items = st.session_state[key]['selection'].get(sel_key, [])
             return [i[field] for i in items if isinstance(i, dict) and field in i]
         return []
-        
     sel['regiao'] = _get_sel("dash_reg", 'Regiao_Sintetica_Origem', 'Reg')
     sel['uf'] = _get_sel("dash_uf", 'UF_Sintetica_Origem', 'UF')
     sel['status'] = _get_sel("dash_status", 'Status da Rota', 'Status')
     sel['mun'] = _get_sel("dash_mun", 'Municipio Origem', 'Mun')
     sel['linha_mun'] = _get_sel("dash_lr", 'Municipio Origem', 'LinhaMun')
     sel['scatter_mun'] = _get_sel("dash_scatter", 'Municipio Origem', 'ScatterMun')
-    
     if "dash_scatter" in st.session_state and 'selection' in st.session_state["dash_scatter"]:
         sel['brush'] = st.session_state["dash_scatter"]['selection'].get('Brush', {})
-        
     return sel
 
 def sync_altair_to_widgets():
     sel = extrair_selecoes_altair()
     prev_sel_key = "prev_altair_sel"
     prev_sel = st.session_state.get(prev_sel_key, {'regiao':[], 'uf':[], 'mun':[], 'status':[], 'linha_mun':[], 'scatter_mun':[], 'brush':{}})
-    
     def check_update(field, widget_key, default_val):
         if sel[field] != prev_sel[field]:
             st.session_state[widget_key] = sel[field][0] if sel[field] else default_val
-
     check_update('regiao', 'widget_regiao', 'Todas')
     check_update('uf', 'widget_uf', 'Todas')
     check_update('status', 'widget_status', 'Todos')
-    
-    if sel['mun'] != prev_sel['mun']:
-        st.session_state['widget_mun'] = sel['mun'][0] if sel['mun'] else 'Todos'
-    elif sel['linha_mun'] != prev_sel['linha_mun']:
-        st.session_state['widget_mun'] = sel['linha_mun'][0] if sel['linha_mun'] else 'Todos'
-    elif sel['scatter_mun'] != prev_sel['scatter_mun']:
-        st.session_state['widget_mun'] = sel['scatter_mun'][0] if sel['scatter_mun'] else 'Todos'
-
+    if sel['mun'] != prev_sel['mun']: st.session_state['widget_mun'] = sel['mun'][0] if sel['mun'] else 'Todos'
+    elif sel['linha_mun'] != prev_sel['linha_mun']: st.session_state['widget_mun'] = sel['linha_mun'][0] if sel['linha_mun'] else 'Todos'
+    elif sel['scatter_mun'] != prev_sel['scatter_mun']: st.session_state['widget_mun'] = sel['scatter_mun'][0] if sel['scatter_mun'] else 'Todos'
     st.session_state[prev_sel_key] = sel
 
 def aplicar_filtro_global(df_base, sel):
@@ -1823,33 +1849,21 @@ def aplicar_filtro_global(df_base, sel):
     if st.session_state.widget_mun != "Todos": df_cf = df_cf[df_cf['Municipio Origem'] == st.session_state.widget_mun]
     if st.session_state.widget_status != "Todos": df_cf = df_cf[df_cf['Status da Rota'] == st.session_state.widget_status]
     if st.session_state.widget_fonte != "Todas": df_cf = df_cf[df_cf['Fonte Geocoding Origem'] == st.session_state.widget_fonte]
-    
     if sel['brush']:
         b = sel['brush']
-        if 'Distancia' in b:
-            df_cf = df_cf[(df_cf['Distancia'] >= b['Distancia'][0]) & (df_cf['Distancia'] <= b['Distancia'][1])]
-        if 'Tempo_Horas' in b:
-            df_cf = df_cf[(df_cf['Tempo_Horas'] >= b['Tempo_Horas'][0]) & (df_cf['Tempo_Horas'] <= b['Tempo_Horas'][1])]
-            
+        if 'Distancia' in b: df_cf = df_cf[(df_cf['Distancia'] >= b['Distancia'][0]) & (df_cf['Distancia'] <= b['Distancia'][1])]
+        if 'Tempo_Horas' in b: df_cf = df_cf[(df_cf['Tempo_Horas'] >= b['Tempo_Horas'][0]) & (df_cf['Tempo_Horas'] <= b['Tempo_Horas'][1])]
     return df_cf
 
 def renderizar_indicador_filtros(brush_active):
     active_html = ""
-    if st.session_state.get('widget_regiao', 'Todas') != 'Todas':
-        active_html += f"<span class='filter-badge'>Região: {st.session_state.widget_regiao}</span>"
-    if st.session_state.get('widget_uf', 'Todas') != 'Todas':
-        active_html += f"<span class='filter-badge'>UF: {st.session_state.widget_uf}</span>"
-    if st.session_state.get('widget_mun', 'Todos') != 'Todos':
-        active_html += f"<span class='filter-badge'>Município: {st.session_state.widget_mun}</span>"
-    if st.session_state.get('widget_status', 'Todos') != 'Todos':
-        active_html += f"<span class='filter-badge'>Status: {st.session_state.widget_status}</span>"
-    if st.session_state.get('widget_fonte', 'Todas') != 'Todas':
-        active_html += f"<span class='filter-badge'>Fonte: {st.session_state.widget_fonte}</span>"
-    if brush_active:
-        active_html += f"<span class='filter-badge'>Filtro de Área (Scatter)</span>"
-        
-    if active_html:
-        st.markdown(f"<div style='background:#1E232F; padding:15px; border-radius:8px; border: 1px solid #3B82F6; margin-bottom:15px'><b>🔍 Filtros Ativos no Dashboard:</b><br><br> {active_html}</div>", unsafe_allow_html=True)
+    if st.session_state.get('widget_regiao', 'Todas') != 'Todas': active_html += f"<span class='filter-badge'>Região: {st.session_state.widget_regiao}</span>"
+    if st.session_state.get('widget_uf', 'Todas') != 'Todas': active_html += f"<span class='filter-badge'>UF: {st.session_state.widget_uf}</span>"
+    if st.session_state.get('widget_mun', 'Todos') != 'Todos': active_html += f"<span class='filter-badge'>Município: {st.session_state.widget_mun}</span>"
+    if st.session_state.get('widget_status', 'Todos') != 'Todos': active_html += f"<span class='filter-badge'>Status: {st.session_state.widget_status}</span>"
+    if st.session_state.get('widget_fonte', 'Todas') != 'Todas': active_html += f"<span class='filter-badge'>Fonte: {st.session_state.widget_fonte}</span>"
+    if brush_active: active_html += f"<span class='filter-badge'>Filtro de Área (Scatter)</span>"
+    if active_html: st.markdown(f"<div style='background:#1E232F; padding:15px; border-radius:8px; border: 1px solid #3B82F6; margin-bottom:15px'><b>🔍 Filtros Ativos no Dashboard:</b><br><br> {active_html}</div>", unsafe_allow_html=True)
 
 def get_agg_func(op_name):
     if 'Contagem Distinta' in op_name: return 'nunique'
@@ -1867,44 +1881,43 @@ def get_agg_func(op_name):
     return 'count'
 
 # ==============================================================================
-# 🔐 UI LOGIN E PROTEÇÃO DE SESSÃO
+# INTERFACE STREAMLIT COM RBAC, LOGIN E ABAS
 # ==============================================================================
-def tela_login():
+
+if "user_data" not in st.session_state:
+    st.session_state["user_data"] = None
+
+# TELA DE LOGIN (RBAC)
+if st.session_state["user_data"] is None:
     st.markdown("""
-    <div style="text-align:center; padding:50px 0;">
-        <h1 style="color:#3B82F6; font-weight:800;">Motor Logístico Corp</h1>
-        <p style="color:#9CA3AF;">Plataforma de Geocodificação e Inteligência Espacial B2B</p>
+    <div class="corporate-header" style="text-align: center;">
+        <h1 class="corporate-title">🗺️ Motor Nacional de Roteirização Inteligente</h1>
+        <p class="corporate-subtitle">Acesso Restrito - Enterprise Edition B2B</p>
     </div>
     """, unsafe_allow_html=True)
     
-    col1, col2, col3 = st.columns([1, 1.5, 1])
+    col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
         with st.container(border=True):
-            st.subheader("🔑 Autenticação Segura")
-            usuario_input = st.text_input("Usuário de Rede", placeholder="ex: admin, analista, gestor, operador")
-            senha_input = st.text_input("Senha Corporativa", type="password")
-            
-            if st.button("Acessar Plataforma", type="primary", use_container_width=True):
-                if usuario_input in USUARIOS_DB and USUARIOS_DB[usuario_input]["senha"] == senha_input:
-                    st.session_state['autenticado'] = True
-                    st.session_state['usuario_atual'] = usuario_input
-                    st.session_state['perfil_atual'] = USUARIOS_DB[usuario_input]["perfil"]
-                    st.session_state['nome_atual'] = USUARIOS_DB[usuario_input]["nome"]
-                    registrar_auditoria_app("Login Realizado")
+            st.markdown("### 🔒 Autenticação Corporativa")
+            username = st.text_input("Usuário / Matrícula")
+            password = st.text_input("Senha", type="password")
+            if st.button("Entrar", type="primary", use_container_width=True):
+                user_info = PermissionManager.validar_login(username, password)
+                if user_info:
+                    st.session_state["user_data"] = user_info
+                    registrar_auditoria_usuario("LOGIN", "Sistema", "Autenticação bem sucedida")
                     st.rerun()
                 else:
-                    st.error("Credenciais inválidas ou acesso não autorizado.")
-
-if 'autenticado' not in st.session_state:
-    st.session_state['autenticado'] = False
-
-if not st.session_state['autenticado']:
-    tela_login()
+                    st.error("Credenciais inválidas. Tente novamente.")
+            
+            st.caption("Contas de Demonstração disponíveis: `admin`/`123`, `gestor`/`123`, `analista`/`123`, `operador`/`123`")
     st.stop()
 
-# ==============================================================================
-# INTERFACE STREAMLIT COM ENGINE DE SIDEBAR E ABAS PROTEGIDAS (RBAC)
-# ==============================================================================
+# TELA PRINCIPAL (PÓS-LOGIN)
+user_perfil = st.session_state["user_data"]["perfil"]
+user_nome = st.session_state["user_data"]["nome"]
+
 st.markdown("""
 <div class="corporate-header">
     <h1 class="corporate-title">🗺️ Motor Nacional de Roteirização Inteligente</h1>
@@ -1913,21 +1926,23 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    st.markdown(f"**👤 Usuário:** {st.session_state.get('nome_atual', '')}")
-    st.markdown(f"**🛡️ Perfil:** {st.session_state.get('perfil_atual', '')}")
-    if st.button("Sair / Logout", use_container_width=True):
-        registrar_auditoria_app("Logout Realizado")
-        st.session_state['autenticado'] = False
+    st.markdown(f"**👤 Olá, {user_nome}**")
+    st.caption(f"Perfil: {user_perfil}")
+    if st.button("🚪 Sair (Logout)", use_container_width=True):
+        registrar_auditoria_usuario("LOGOUT", "Sistema", "Encerramento de sessão")
+        st.session_state["user_data"] = None
         st.rerun()
         
-    st.header("📖 Documentação Corporativa", help="Diretrizes estruturais, matemáticas e logísticas completas do motor corporativo.")
+    st.markdown("---")
+    
+    st.header("📖 Documentação Corporativa")
     
     with st.expander("📊 Visão Geral e Filosofia"):
         st.markdown("""
         O **Motor Nacional de Roteirização Inteligente** é o sistema core de inteligência logística B2B da operação. Diferente de sistemas comuns que dependem de uma única API comercial (correndo risco de indisponibilidade e falsos positivos topológicos), esta plataforma foi projetada com a arquitetura de **Pipeline Híbrido Multimotor**.
         """)
 
-    with st.expander("🌐 Inteligência de Busca e Componentes"):
+    with st.expander("🌐 Inteligência de Busca e Componentes do Ensemble"):
         st.markdown("""
         O sistema atua sob o princípio do **Ensemble Espacial Geográfico**. Em vez de confiar em um motor, ele consulta paralelamente (`ThreadPoolExecutor`):
         * **ArcGIS (ESRI):** Padrão-ouro em cadastros prediais corporativos.
@@ -1944,6 +1959,14 @@ with st.sidebar:
         * **Haversine (Fallback):** Esfera perfeita (6371 km).
         * **Validação Anti-Zero:** Previne *overflows*.
         * **Bounding Box Territorial:** Bloqueia automaticamente coordenadas impossíveis.
+        """)
+
+    with st.expander("🔌 Integração API REST e Power BI"):
+        st.markdown("""
+        O motor funciona também como serviço **Headless**. 
+        - **Documentação Local:** Acesse `http://localhost:8000/docs` para o Swagger UI da API.
+        - **Power BI:** Use o Conector Web no Power BI apontando para `/analytics`.
+        - **Power Automate:** Crie fluxos POST para `/route` enviando um JSON com `origem` e `destino`.
         """)
 
     st.markdown("---")
@@ -1982,26 +2005,39 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"Erro ao tentar transmitir a solicitação via SMTP: {str(e)}")
 
-# Definição dinâmica de Abas com base no RBAC
-abas_disponiveis = []
-perfil_atual = st.session_state['perfil_atual']
 
-if PermissionManager.tem_permissao(perfil_atual, "geocodificacao"): abas_disponiveis.append("📍 Geocodificação")
-if PermissionManager.tem_permissao(perfil_atual, "lote"): abas_disponiveis.append("⚙️ Processamento Lote")
-if PermissionManager.tem_permissao(perfil_atual, "alocacao"): abas_disponiveis.append("📦 Alocação de Hubs")
-if PermissionManager.tem_permissao(perfil_atual, "analytics"): abas_disponiveis.append("📊 Enterprise Analytics")
-if PermissionManager.tem_permissao(perfil_atual, "calculadora"): abas_disponiveis.append("🧮 Calculadora Analítica")
-if PermissionManager.tem_permissao(perfil_atual, "classificacao"): abas_disponiveis.append("🚨 Classificação Territorial")
-if PermissionManager.tem_permissao(perfil_atual, "enciclopedia"): abas_disponiveis.append("📚 Enciclopédia Core")
-if PermissionManager.tem_permissao(perfil_atual, "manual"): abas_disponiveis.append("📘 Manual do Usuário")
-if PermissionManager.tem_permissao(perfil_atual, "motores"): abas_disponiveis.append("🔌 Monitor APIs")
-if PermissionManager.tem_permissao(perfil_atual, "auditoria"): abas_disponiveis.append("🕵️ Auditoria")
+# Renderização Dinâmica das Abas via RBAC
+abas_ativas = []
+if PermissionManager.tem_permissao(user_perfil, "geocodificacao"): abas_ativas.append("📍 Geocodificação")
+if PermissionManager.tem_permissao(user_perfil, "lote"): abas_ativas.append("⚙️ Processamento Lote")
+if PermissionManager.tem_permissao(user_perfil, "alocacao"): abas_ativas.append("📦 Alocação de Hubs")
+if PermissionManager.tem_permissao(user_perfil, "analytics"): abas_ativas.append("📊 Enterprise Analytics")
+if PermissionManager.tem_permissao(user_perfil, "calculadora"): abas_ativas.append("🧮 Calculadora Analítica")
+if PermissionManager.tem_permissao(user_perfil, "classificacao"): abas_ativas.append("🚨 Classificação Territorial")
+if PermissionManager.tem_permissao(user_perfil, "enciclopedia"): abas_ativas.append("📚 Enciclopédia Core")
+if PermissionManager.tem_permissao(user_perfil, "manual"): abas_ativas.append("📘 Manual do Usuário")
+if PermissionManager.tem_permissao(user_perfil, "monitor"): abas_ativas.append("🔌 Monitor APIs")
+if PermissionManager.tem_permissao(user_perfil, "auditoria"): abas_ativas.append("🕵️ Auditoria")
 
-tabs_renderizadas = st.tabs(abas_disponiveis)
-tab_idx = 0
+tabs = st.tabs(abas_ativas)
 
-if PermissionManager.tem_permissao(perfil_atual, "geocodificacao"):
-    with tabs_renderizadas[tab_idx]:
+def get_tab(nome):
+    try: return tabs[abas_ativas.index(nome)]
+    except ValueError: return None
+
+tab_individual = get_tab("📍 Geocodificação")
+tab_processamento = get_tab("⚙️ Processamento Lote")
+tab_alocacao = get_tab("📦 Alocação de Hubs")
+tab_analytics = get_tab("📊 Enterprise Analytics")
+tab_calculadora = get_tab("🧮 Calculadora Analítica")
+tab_classificacao = get_tab("🚨 Classificação Territorial")
+tab_enciclopedia = get_tab("📚 Enciclopédia Core")
+tab_manual = get_tab("📘 Manual do Usuário")
+tab_motores = get_tab("🔌 Monitor APIs")
+tab_auditoria = get_tab("🕵️ Auditoria")
+
+if tab_individual:
+    with tab_individual:
         st.info("💡 **Objetivo desta aba:** Validar rapidamente uma única rota. Digite a Origem e o Destino para obter a distância viária oficial do Google Maps, o desvio geodésico rigoroso e a explicabilidade do motor de geocodificação.")
         st.markdown("### 🔍 Validador Rápido de Rota (Single-Shot)")
         col_ind1, col_ind2 = st.columns(2)
@@ -2010,10 +2046,9 @@ if PermissionManager.tem_permissao(perfil_atual, "geocodificacao"):
         
         if st.button("🚀 Calcular Rota Individual", type="primary", help="Inicia o pipeline Bayesiano para geocodificação e aciona os motores do Google Maps e OSRM para o trajeto."):
             if orig_ind and dest_ind:
+                registrar_auditoria_usuario("CALCULO_INDIVIDUAL", "Geocodificacao", f"{orig_ind} -> {dest_ind}")
                 with st.spinner("Acionando motores de geocodificação e consenso unificado..."):
-                    start_single = time.time()
                     res_ind = executar_pipeline_unificado(orig_ind, dest_ind)
-                    registrar_auditoria_app(f"Cálculo Rota Individual: {orig_ind} -> {dest_ind}", tempo=time.time()-start_single)
                     
                 if res_ind and res_ind[28] != "Falha na leitura da célula (Campo Vazio)." and "FALHA INTERNA" not in res_ind[28]:
                     st.success("✅ Rota estabelecida com sucesso na malha viária!")
@@ -2028,9 +2063,10 @@ if PermissionManager.tem_permissao(perfil_atual, "geocodificacao"):
                     
                     st.info(f"🧠 **Estratégia de Roteamento (XAI):** {res_ind[28]}")
                     st.caption(f"🔧 **Status da Linha Reta:** {res_ind[30] if len(res_ind) > 30 else 'Não Mapeado'}")
-                    if len(res_ind) > 31 and res_ind[31] == "Sim":
-                        st.warning(f"⚠️ **Atenção (Área de Risco):** Rota cruza polígono restrito. Risco: {res_ind[34]}. Tipo: {res_ind[33]}")
                     
+                    if len(res_ind) > 35 and res_ind[35] == "Sim":
+                        st.error(f"⚠️ ALERTA DE RESTRIÇÃO ESPACIAL: Rota cruza zona mapeada ({res_ind[36]}) - Nível: {res_ind[38]}")
+
                     with st.expander("🕵️ Auditoria Detalhada da Geocodificação e Consenso", expanded=False):
                         st.caption(f"Status da Base IBGE Local: {'Ativa e Carregada' if len(IBGE_MUNICIPIOS) > 1000 else '⚠️ CORROMPIDA/FALHA DE API'}")
                         col_aud1, col_aud2 = st.columns(2)
@@ -2059,10 +2095,9 @@ if PermissionManager.tem_permissao(perfil_atual, "geocodificacao"):
                     st.error("Falha na validação de consistência geodésica unificada.")
             else:
                 st.warning("Preencha origem e destino para inicializar o cálculo.")
-    tab_idx += 1
 
-if PermissionManager.tem_permissao(perfil_atual, "lote"):
-    with tabs_renderizadas[tab_idx]:
+if tab_processamento:
+    with tab_processamento:
         st.info("💡 **Objetivo desta aba:** Processamento em massa O(U). Envie uma planilha Excel com milhares de origens e destinos. O sistema extrairá rotas únicas, calculará os desvios de todas simultaneamente e devolverá a planilha rigorosamente preenchida.")
         arquivo_carregado = st.file_uploader("Selecionar Arquivo Excel", type=["xlsx"], key="lote_std", help="A planilha deve conter as colunas 'Origem' e 'Destino'.")
 
@@ -2079,16 +2114,17 @@ if PermissionManager.tem_permissao(perfil_atual, "lote"):
                     st.stop()
                     
                 st.success(f"Tabela com {len(df)} registros mapeada! Pronto para processar o Lote Unificado.")
-                nome_operador = st.text_input("Matrícula / Nome do Operador (Opcional)", value=st.session_state.get('nome_atual', ''), max_chars=50)
+                nome_operador = st.text_input("Matrícula / Nome do Operador (Opcional)", value=user_nome, max_chars=50)
                 
                 if st.button("Iniciar Processamento em Lote", type="primary"):
+                    registrar_auditoria_usuario("PROCESSAMENTO_LOTE", "Lote", f"Iniciado para {len(df)} linhas")
                     start_lote_clock = time.time()
                     novas_colunas = [
                         'Distancia', 'Tempo', 'Link da Rota', 'Balsas', 'Motivo Roteamento', 'Status Linha Reta', 'Linha Reta', 'Fonte da Rota', 'Score da Rota', 
                         'Confianca Origem', 'Score Num Origem', 'Distrito Origem', 'Municipio Origem', 'Fonte Geocoding Origem', 'Endereco Oficial Origem',
                         'Confianca Destino', 'Score Num Destino', 'Distrito Destino', 'Municipio Destino', 'Fonte Geocoding Destino', 'Endereco Oficial Destino',
                         'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Status da Rota',
-                        'Cruza Area Restrita', 'Area Restrita Encontrada', 'Tipo Restricao', 'Nivel de Risco'
+                        'Cruza Área Restrita', 'Área Restrita Encontrada', 'Tipo Restrição', 'Nível de Risco'
                     ]
                     colunas_numericas = ['Distancia', 'Linha Reta', 'Score da Rota', 'Score Num Origem', 'Score Num Destino', 'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global']
                     
@@ -2144,8 +2180,6 @@ if PermissionManager.tem_permissao(perfil_atual, "lote"):
                         "Tempo Médio/Rota (s)": round(tempo_lote_segundos / max(1, len(pares_unicos)), 2)
                     }, expire=None)
 
-                    registrar_auditoria_app(f"Processamento em Lote Realizado: {len(df)} linhas", tempo=tempo_lote_segundos)
-
                     ordem_finais = list(df.columns)
                     for c in novas_colunas:
                         if c not in ordem_finais: ordem_finais.append(c)
@@ -2158,6 +2192,7 @@ if PermissionManager.tem_permissao(perfil_atual, "lote"):
                     output_buffer = io.BytesIO()
                     with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: df_final.to_excel(writer, index=False)
                     st.session_state['planilha_pronta'] = output_buffer.getvalue()
+                    registrar_auditoria_usuario("DOWNLOAD_LOTE", "Lote", f"Planilha gerada com {len(df_final)} registros")
 
             if 'df_processado' in st.session_state and 'planilha_pronta' in st.session_state:
                 st.write("---")
@@ -2166,14 +2201,12 @@ if PermissionManager.tem_permissao(perfil_atual, "lote"):
                 st.dataframe(st.session_state['df_processado'], use_container_width=True, height=250)
                 col_down1, col_down2 = st.columns(2)
                 with col_down1:
-                    if st.download_button(label="📥 Baixar Planilha (.xlsx)", data=st.session_state['planilha_pronta'], file_name="planilha_rotas_calculada.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True):
-                        registrar_auditoria_app("Exportação Lote Excel")
+                    st.download_button(label="📥 Baixar Planilha (.xlsx)", data=st.session_state['planilha_pronta'], file_name="planilha_rotas_calculada.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
                 with col_down2:
                     st.markdown("""<a href="https://sheets.new/" target="_blank" style="display:inline-block; padding:0.5em 1em; background-color:#1E90FF; color:white; border-radius:5px; text-decoration:none; font-weight:bold; text-align:center; width:100%; transition: all 0.2s;">📊 Abrir Google Sheets Vazio</a>""", unsafe_allow_html=True)
-    tab_idx += 1
 
-if PermissionManager.tem_permissao(perfil_atual, "alocacao"):
-    with tabs_renderizadas[tab_idx]:
+if tab_alocacao:
+    with tab_alocacao:
         st.info("💡 **Objetivo desta aba:** Inteligência Logística de Hubs. Envie uma lista de clientes (Origens) e uma lista de Centros de Distribuição/Bases (Destinos). O sistema calculará todas as combinações espaciais e descobrirá automaticamente qual é a Base Logística mais próxima de cada cliente individualmente.")
         col_a1, col_a2 = st.columns(2)
         with col_a1: file_dest = st.file_uploader("1. Planilha de Endereços / Entregas (Origens)", type=["xlsx"], key="up_dests_v19")
@@ -2188,6 +2221,7 @@ if PermissionManager.tem_permissao(perfil_atual, "alocacao"):
             with col_s2: hub_col_name = st.selectbox("Selecione a coluna que contém os Municípios/Bases (Destinos):", df_hubs.columns)
             
             if st.button("🗺️ Processar Cruzamento Espacial e Roteamento Duplo", type="primary"):
+                registrar_auditoria_usuario("ALOCACAO_HUBS", "Alocacao", "Processamento de Alocação de Hubs iniciado")
                 start_alo_clock = time.time()
                 hubs_unicos = df_hubs[hub_col_name].dropna().astype(str).str.strip().unique().tolist()
                 dests_unicos = df_dest[dest_col_name].dropna().astype(str).str.strip().unique().tolist()
@@ -2253,8 +2287,7 @@ if PermissionManager.tem_permissao(perfil_atual, "alocacao"):
                             'Confianca Origem', 'Score Num Origem', 'Distrito Origem', 'Municipio Origem', 'Fonte Geocoding Origem', 'Endereco Oficial Origem',
                             'Confianca Destino', 'Score Num Destino', 'Distrito Destino', 'Municipio Destino', 'Fonte Geocoding Destino', 'Endereco Oficial Destino',
                             'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Status da Rota',
-                            'Cruza Area Restrita', 'Area Restrita Encontrada', 'Tipo Restricao', 'Nivel de Risco',
-                            'Concorrente Analisado', 'Distancia Concorrente', 'Link Rota Concorrente', 'Justificativa de Alocacao'
+                            'Concorrente Analisado', 'Distancia Concorrente', 'Link Rota Concorrente', 'Justificativa de Alocacao', 'Cruza Área Restrita', 'Área Restrita Encontrada', 'Tipo Restrição', 'Nível de Risco'
                         ]
                         colunas_numericas = ['Distancia', 'Linha Reta', 'Score da Rota', 'Score Num Origem', 'Score Num Destino', 'Lat Origem', 'Lon Origem', 'Lat Destino', 'Lon Destino', 'Tempo Geocoding (s)', 'Tempo Roteamento (s)', 'Tempo Total (s)', 'Score Final Global', 'Distancia Concorrente']
                         
@@ -2279,7 +2312,7 @@ if PermissionManager.tem_permissao(perfil_atual, "alocacao"):
                                     tarefas_priorizadas_alo.append((MAPA_PRIORIDADE.get(tipo_o, 99), (o, d)))
                         
                         tarefas_priorizadas_alo.sort(key=lambda x: x[0])
-                        df_final_alo = rodar_pipeline_lote(df_pares, list(pares_unicos_alo), tarefas_priorizadas_alo, st.session_state.get('nome_atual', ''), progress_alo, status_alo, runner_up_map)
+                        df_final_alo = rodar_pipeline_lote(df_pares, list(pares_unicos_alo), tarefas_priorizadas_alo, user_nome, progress_alo, status_alo, runner_up_map)
                         status_alo.empty(); progress_alo.empty()
                         
                         df_final_alo['Linha Reta'] = df_final_alo['Origem'].astype(str).str.strip().map(dest_to_linha_reta).fillna(df_final_alo['Linha Reta'])
@@ -2301,8 +2334,6 @@ if PermissionManager.tem_permissao(perfil_atual, "alocacao"):
                             "Tempo Gasto (s)": tempo_alo_segundos, "Tempo Médio/Rota (s)": round(tempo_alo_segundos / max(1, len(pares_unicos_alo)), 2)
                         }, expire=None)
 
-                        registrar_auditoria_app(f"Alocação Competitiva de Hubs", tempo=tempo_alo_segundos)
-
                         st.session_state['df_processado'] = df_final_alo
                         st.success(f"✨ Matriz resolvida e Duelos concluídos! {len(df_final_alo)} linhas originais foram rigorosamente preservadas e preenchidas.")
                         
@@ -2314,12 +2345,10 @@ if PermissionManager.tem_permissao(perfil_atual, "alocacao"):
                         st.dataframe(df_final_alo, use_container_width=True, height=250)
                         output_buffer = io.BytesIO()
                         with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: df_final_alo.to_excel(writer, index=False)
-                        if st.download_button(label="📥 Baixar Planilha de Alocação Competitiva (.xlsx)", data=output_buffer.getvalue(), file_name="matriz_alocacao_competitiva.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True):
-                            registrar_auditoria_app("Exportação Alocação Excel")
-    tab_idx += 1
+                        st.download_button(label="📥 Baixar Planilha de Alocação Competitiva (.xlsx)", data=output_buffer.getvalue(), file_name="matriz_alocacao_competitiva.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
-if PermissionManager.tem_permissao(perfil_atual, "analytics"):
-    with tabs_renderizadas[tab_idx]:
+if tab_analytics:
+    with tab_analytics:
         st.info("💡 **Objetivo desta aba:** Sistema Analítico Global estilo Power BI. Clique nas fatias, barras ou arraste o mouse no Scatter Plot para filtrar dinamicamente TODOS os indicadores, mapas e tabelas abaixo.")
         
         col_d_title, col_d_btn = st.columns([80, 20])
@@ -2459,8 +2488,10 @@ if PermissionManager.tem_permissao(perfil_atual, "analytics"):
                 with tab_kpi_regional:
                     with st.container(border=True):
                         df_regioes = df_cf.groupby('Regiao_Sintetica_Origem').agg(
-                            Rotas=('Origem', 'count'), Dist_Media=('Distancia', 'mean'),
-                            Tempo_Medio_Horas=('Tempo_Horas', 'mean'), Score_Medio=('Score Final Global', 'mean'),
+                            Rotas=('Origem', 'count'),
+                            Dist_Media=('Distancia', 'mean'),
+                            Tempo_Medio_Horas=('Tempo_Horas', 'mean'),
+                            Score_Medio=('Score Final Global', 'mean'),
                             Muns_Unicos=('Municipio Origem', 'nunique')
                         ).reset_index()
                         df_regioes = df_regioes[df_regioes['Regiao_Sintetica_Origem'] != "Indefinido"]
@@ -2616,10 +2647,9 @@ if PermissionManager.tem_permissao(perfil_atual, "analytics"):
 
         else:
             st.warning("Aguardando processamento de planilha corporativa na aba de Lotes (⚙️) para ativar e renderizar o Enterprise Data Analytics Engine.")
-    tab_idx += 1
 
-if PermissionManager.tem_permissao(perfil_atual, "calculadora"):
-    with tabs_renderizadas[tab_idx]:
+if tab_calculadora:
+    with tab_calculadora:
         st.info("💡 **Objetivo desta aba:** Uma ferramenta de autoatendimento Analítico (Self-Service BI). Realize extrações, crie tabelas dinâmicas e pivote informações de forma flexível utilizando a base que já passou pela blindagem e filtros globais.")
         col_c_title, col_c_btn = st.columns([80, 20])
         with col_c_title: st.markdown("### 🧮 Calculadora Analítica Corporativa")
@@ -2688,8 +2718,9 @@ if PermissionManager.tem_permissao(perfil_atual, "calculadora"):
                     with col_r2:
                         if len(calc_agrup) == 1: fig = px.bar(df_agg, x=calc_agrup[0], y=f"{calc_op} de {calc_campo}", color=calc_agrup[0], title=f"Distribuição de {calc_campo}")
                         elif len(calc_agrup) >= 2: fig = px.bar(df_agg, x=calc_agrup[0], y=f"{calc_op} de {calc_campo}", color=calc_agrup[1], barmode='group', title=f"Análise Multidimensional de {calc_campo}")
-                        fig.update_layout(showlegend=True, height=400, margin=dict(l=0, r=0, t=40, b=0))
-                        st.plotly_chart(fig, use_container_width=True)
+                        if fig:
+                            fig.update_layout(showlegend=True, height=400, margin=dict(l=0, r=0, t=40, b=0))
+                            st.plotly_chart(fig, use_container_width=True)
 
                     st.markdown("#### 📥 Exportação Avançada Multi-Abas (Calculadora + Gráficos)")
                     
@@ -2717,12 +2748,10 @@ if PermissionManager.tem_permissao(perfil_atual, "calculadora"):
                     st.error(f"⚠️ Impossível realizar o cálculo solicitado. A operação estatística '{calc_op}' falhou. Verifique se o campo '{calc_campo}' contém números válidos. Erro: {e}")
         else:
             st.warning("Os dados ainda não foram processados ou o filtro global está muito restrito. Processe um lote na Aba 'Processamento em Lote'.")
-    tab_idx += 1
 
-if PermissionManager.tem_permissao(perfil_atual, "classificacao"):
-    with tabs_renderizadas[tab_idx]:
+if tab_classificacao:
+    with tab_classificacao:
         st.info("💡 **Objetivo desta aba:** Segmentar a volumetria logística por município, criar faixas personalizadas e rotular os polos de distribuição. Utilize o Editor de Faixas abaixo para configurar os limites, divisores operacionais e níveis críticos.")
-        
         st.markdown("### 🚨 Classificação Territorial de Ocorrências Municipais")
         
         if 'df_cf_master' in st.session_state and not st.session_state['df_cf_master'].empty:
@@ -2732,7 +2761,8 @@ if PermissionManager.tem_permissao(perfil_atual, "classificacao"):
             metrica_classificacao = st.radio(
                 "Selecione a métrica que definirá as faixas territoriais:",
                 ["Distância Total (km)", "Distância Média (km)", "Ocorrências (Volume)"],
-                index=0, horizontal=True,
+                index=0,
+                horizontal=True,
                 help="A métrica selecionada será utilizada para enquadrar os municípios nas faixas configuradas abaixo."
             )
             
@@ -2756,8 +2786,11 @@ if PermissionManager.tem_permissao(perfil_atual, "classificacao"):
                 df_base_class['Distancia'] = pd.to_numeric(df_base_class['Distancia'], errors='coerce').fillna(0)
                 
                 df_agg_class = df_base_class.groupby(['Municipio Origem', 'UF_Sintetica_Origem', 'Regiao_Sintetica_Origem']).agg(
-                    Ocorrências=('Origem', 'count'), Distância_Total=('Distancia', 'sum'), Distância_Media=('Distancia', 'mean'),
-                    Lat_Media=('Lat Origem', 'mean'), Lon_Media=('Lon Origem', 'mean')
+                    Ocorrências=('Origem', 'count'),
+                    Distância_Total=('Distancia', 'sum'),
+                    Distância_Media=('Distancia', 'mean'),
+                    Lat_Media=('Lat Origem', 'mean'),
+                    Lon_Media=('Lon Origem', 'mean')
                 ).reset_index()
                 
                 df_agg_class = df_agg_class[df_agg_class['Municipio Origem'] != "Não Identificado"]
@@ -2792,7 +2825,6 @@ if PermissionManager.tem_permissao(perfil_atual, "classificacao"):
                     cc_k4.metric("Polo Mais Crítico", f"{m_critico} ({v_critico})")
             
                 st.markdown("#### 3️⃣ Ecossistema Visual Temático")
-                
                 map_colors = dict(zip(df_agg_class['Rótulo'], df_agg_class['Cor Hex']))
                 
                 t_col1, t_col2 = st.columns([60, 40])
@@ -2829,17 +2861,18 @@ if PermissionManager.tem_permissao(perfil_atual, "classificacao"):
                 
         else:
             st.warning("O conjunto de dados base global está vazio. Por favor, processe seu Lote para alimentar este módulo espacial.")
-    tab_idx += 1
 
-if PermissionManager.tem_permissao(perfil_atual, "enciclopedia"):
-    with tabs_renderizadas[tab_idx]:
+if tab_enciclopedia:
+    with tab_enciclopedia:
         st.info("💡 **Objetivo desta aba:** Servir como o repositório mestre de conhecimento. Esta enciclopédia detalha toda a jornada técnica de um dado dentro do aplicativo, abordando 100% das funcionalidades corporativas, desde a limpeza gramatical até a validação geométrica extrema anti-colisão.")
         st.markdown("# 📚 Enciclopédia Operacional e Base de Conhecimento Core")
-        
         with st.expander("1. Visão Geral do Sistema", expanded=True):
             st.markdown("""
             **O que é o sistema?**
             O *Motor Nacional de Roteirização Inteligente* é uma plataforma corporativa B2B projetada para processar, em escala industrial, a conversão de endereços de texto livre em rotas matemáticas roteirizáveis.
+            
+            **Qual problema ele resolve?**
+            Elimina a dependência de APIs logísticas frágeis (como o Google isolado, que pode falhar em áreas rurais), superando problemas de *falsos positivos topológicos*, onde endereços incompletos são jogados aleatoriamente no centro do estado ou do país.
             
             **Público-Alvo e Benefícios:**
             * **Operadores de Logística:** Descobrem o tempo viário oficial, pedágios virtuais e alocação de caminhões.
@@ -2851,79 +2884,82 @@ if PermissionManager.tem_permissao(perfil_atual, "enciclopedia"):
             st.markdown("""
             O sistema opera através de um funil hierárquico extremamente estrito e escalável via *ThreadPoolExecutor*:
             
-            `[ ENTRADA DE DADOS ] → [ PARSER LEXICAL ] → [ CACHE CHECK ] → [ GEOCODIFICAÇÃO MULTIMOTOR ] → [ BARREIRA ANTI-COLISÃO ] → [ CÁLCULO DA LINHA RETA ] → [ ROTEIRIZAÇÃO ASFÁLTICA ] → [ SCORE XAI E AUDITORIA ] → [ ANALYTICS & EXPORT ]`
+            ```text
+            [ ENTRADA DE DADOS ] → (Usuário insere Lote Excel ou Single-Shot)
+                     ↓
+            [ PARSER LEXICAL ] → (Normalização semântica, limpeza de acentos e extração de CEP)
+                     ↓
+            [ CACHE CHECK ] → (Intercepção instantânea de rotas já processadas)
+                     ↓
+            [ GEOCODIFICAÇÃO MULTIMOTOR ] → (Busca paralela no ArcGIS, Nominatim, TomTom e Photon)
+                     ↓
+            [ BARREIRA ANTI-COLISÃO ] → (Se Ponto A == Ponto B, força modo estrito nas APIs)
+                     ↓
+            [ CÁLCULO DA LINHA RETA ] → (Árbitro Supremo: WGS-84 ou Haversine)
+                     ↓
+            [ ROTEIRIZAÇÃO ASFÁLTICA ] → (Google Maps Scraper Engine ou OSRM Open-Source)
+                     ↓
+            [ VALIDAÇÃO ESPACIAL ] → (Cruzamento com Polígonos Restritivos e de Risco via PostGIS/Shapely)
+                     ↓
+            [ SCORE XAI E AUDITORIA ] → (Cálculo de penalidades e confiança baseada em Bayes)
+                     ↓
+            [ ANALYTICS & EXPORT ] → (Geração de Heatmaps, Tabelas Dinâmicas e Relatórios O(U))
+            ```
             """)
 
-        with st.expander("3. Bases de Dados, PostGIS e RBAC (Novo)"):
+        with st.expander("3. Bases de Dados Utilizadas"):
             st.markdown("""
-            * **PostgreSQL + PostGIS:** O sistema possui suporte em background nativo para bancos de dados espaciais corporativos. Todas as ações, trilhas de log e polígonos são salvos para consultas avançadas.
-            * **RBAC (Role-Based Access Control):** Controle estrito. Somente Analistas e Gestores acessam os módulos de BI e cálculos agregados.
-            * **Polígonos de Risco (Geofence):** Utilizando `shapely`, o sistema avalia passagens terrestres contra polígonos de áreas restritas/militares cadastrados.
+            * **IBGE (Instituto Brasileiro de Geografia e Estatística):** Atua como malha central offline do motor. O sistema baixa e consome o centróide exato de todas as 5.570 cidades e distritos do Brasil. Permite o modo de sobrevivência offline caso a internet corporativa falhe.
+            * **OpenStreetMap (OSM):** O maior banco de dados aberto espacial do planeta. Fundamental para estradas de terra e interior do Brasil, servindo dados para o Nominatim, Photon e OSRM.
+            * **PostgreSQL + PostGIS:** Repositório analítico de longo prazo das rotas efetuadas. Fornece persistência baseada em geometria (`geometry(LineString, 4326)`).
+            * **CNEFE / Base Local:** Dicionário estrutural acoplável (opcional) mantido no cache, permitindo obediência absoluta a regras locais de filiais.
             """)
 
-        with st.expander("4. APIs e Roteirização"):
+        with st.expander("4. Integração API Headless e Power Automate"):
             st.markdown("""
-            **🌐 Geocodificação:** ArcGIS, Nominatim, Photon, TomTom e Base IBGE Offline.
-            **🗺️ Roteirização:** Google Directions Engine e OSRM Open-Source.
+            O motor suporta integrações via API (FastAPI) correndo em background na porta `8000`. Isso permite que o Power BI consuma a rota recém-gerada e que o Power Automate envie endereços para serem roteirizados como serviço autônomo, dispensando planilhas na tela.
             """)
 
-        with st.expander("5. API Headless, Power BI e Power Automate (Novo)"):
-            st.markdown("""
-            O motor agora é uma API REST corporativa (via FastAPI) rodando nativamente:
-            * **Integrando Power BI:** Utilize `Web Connector` apontando para `/api/kpis`.
-            * **Integrando Power Automate:** Dispare requisições POST para `/geocode` ou `/route` sem necessitar usar a interface visual. O motor responderá em milissegundos um JSON estruturado.
-            * O sistema roda silenciosamente as duas aplicações.
-            """)
-    tab_idx += 1
-
-if PermissionManager.tem_permissao(perfil_atual, "manual"):
-    with tabs_renderizadas[tab_idx]:
+if tab_manual:
+    with tab_manual:
         st.info("💡 **Bem-vindo ao Manual Operacional!** Este espaço é destinado a todos os usuários da plataforma, ensinando de forma prática o 'passo a passo' para executar as operações do dia a dia.")
         st.markdown("### 📘 Manual do Usuário e Treinamento")
 
         with st.expander("1. Primeiro Acesso e Navegação", expanded=True):
             st.markdown("""
-            Ao entrar na plataforma, você logou com sua matrícula. Isso destravou o menu lateral e abas baseadas no seu perfil (Operador, Analista, etc).
+            Ao entrar na plataforma, você verá um **Menu Lateral (Sidebar)** e **Abas Superiores**.
+            * **Controle de Acessos:** Se você está lendo isso, você fez Login. Algumas abas podem estar ocultas dependendo do seu Perfil (Operador, Analista, Gestor, Administrador).
+            * **Abas Superiores:** São os "módulos" do sistema. É ali que a mágica acontece. Você clica numa aba (Ex: ⚙️ Processamento Lote) e a tela muda apenas para essa função.
             """)
 
         with st.expander("2. Processamento em Lote (Milhares de Rotas simultâneas)"):
             st.markdown("""
+            **Quando usar?** Você tem o faturamento do mês num Excel com milhares de entregas e quer a quilometragem oficial de todas.
+            **Passo a passo:**
             1. Crie uma planilha em Excel (formato `.xlsx`). Ela **obrigatoriamente** precisa ter uma coluna chamada `Origem` e uma coluna chamada `Destino`.
             2. Entre na aba **⚙️ Processamento Lote**.
-            3. Arraste e solte o arquivo e clique em processar. Baixe no botão azul.
+            3. Arraste e solte o arquivo no bloco pontilhado central.
+            4. Clique em **Iniciar Processamento em Lote**.
+            5. **Resultado:** Uma barra de progresso encherá rapidamente. No final balões sobem à tela e um botão azul **📥 Baixar Planilha (.xlsx)** aparecerá. Ao abrir seu novo Excel, as distâncias e as auditorias estarão preenchidas!
             """)
 
-        with st.expander("3. Alocação de Hubs"):
-            st.markdown("""
-            1. Vá na aba **📦 Alocação de Hubs**.
-            2. Suba o arquivo 1 (Seus Clientes / Entregas) e arquivo 2 (Filiais / Hubs).
-            3. Selecione as colunas corretas e clique em Processar. O sistema cruzará cada cliente contra todas as filiais.
-            """)
-
-        with st.expander("4. Integração Headless (Power BI / RPA)"):
-            st.markdown("""
-            Caso sua equipe de TI precise interligar sistemas:
-            * Documentação interativa `/docs` gerada automaticamente (Swagger UI).
-            * Chame `/geocode` enviando `{"endereco": "Avenida Paulista"}` para uso em seus scripts.
-            """)
-    tab_idx += 1
-
-if PermissionManager.tem_permissao(perfil_atual, "motores"):
-    with tabs_renderizadas[tab_idx]:
-        st.info("💡 **Objetivo desta aba:** Monitorar a saúde técnica do ecossistema e o Uptime (SLA) de cada parceiro.")
+if tab_motores:
+    with tab_motores:
+        st.info("💡 **Objetivo desta aba:** Monitorar a saúde técnica do ecossistema e o Uptime (SLA) de cada parceiro. Visualize quais APIs em nuvem responderam melhor, identifique instabilidades (timeouts), observe os tempos médios de resposta e verifique a integridade algorítmica do último lote.")
         st.markdown("### 🔌 Painel de Monitoramento de Infraestrutura (APIs Health Check)")
         
         if 'df_processado' in st.session_state:
             df_kpi = st.session_state['df_processado'].copy()
+            
             with st.container(border=True):
                 col_p1, col_p2, col_p3 = st.columns(3)
-                col_p1.metric("Tempo Médio Geocoding", f"{round(df_kpi['Tempo Geocoding (s)'].mean(), 2)} s")
-                col_p2.metric("Tempo Médio Roteamento", f"{round(df_kpi['Tempo Roteamento (s)'].mean(), 2)} s")
-                col_p3.metric("Overhead Global Total", f"{round(df_kpi['Tempo Total (s)'].mean(), 2)} s")
+                col_p1.metric("Tempo Médio Geocoding (Rede Externa)", f"{round(df_kpi['Tempo Geocoding (s)'].mean(), 2)} s")
+                col_p2.metric("Tempo Médio Roteamento (Google/OSRM)", f"{round(df_kpi['Tempo Roteamento (s)'].mean(), 2)} s")
+                col_p3.metric("Overhead Global Total / Rota", f"{round(df_kpi['Tempo Total (s)'].mean(), 2)} s")
             
             col_m1, col_m2 = st.columns(2)
             with col_m1:
-                st.caption("**Volume de Requisições de Resolução por Motor**")
+                st.caption("**Volume de Requisições de Resolução por Motor (Market Share Base)**")
                 grafico_apis = alt.Chart(df_kpi).mark_arc(innerRadius=60).encode(
                     theta=alt.Theta(field="Fonte Geocoding Origem", aggregate="count"),
                     color=alt.Color(field="Fonte Geocoding Origem", type="nominal", legend=alt.Legend(title="Motores", orient='bottom')),
@@ -2932,16 +2968,17 @@ if PermissionManager.tem_permissao(perfil_atual, "motores"):
                 st.altair_chart(grafico_apis, use_container_width=True)
                 
             with col_m2:
-                st.caption("**Distribuição Qualitativa: Status Bayesiano**")
+                st.caption("**Distribuição Qualitativa: Status Bayesiano Pós-Processamento**")
                 status_palette_bar = alt.Scale(domain=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro'], range=['#2ECC71', '#3498DB', '#F1C40F', '#E67E22', '#E74C3C'])
                 grafico_status = alt.Chart(df_kpi).mark_bar().encode(
-                    x=alt.X('Status da Rota:N', title='Classificação de Confiança'),
+                    x=alt.X('Status da Rota:N', title='Classificação de Confiança e Exatidão'),
                     y=alt.Y('count():Q', title='Volume de Requisições'),
                     color=alt.Color('Status da Rota:N', scale=status_palette_bar, legend=None),
                     tooltip=['Status da Rota', 'count()']
                 ).properties(height=350)
                 st.altair_chart(grafico_status, use_container_width=True)
                 
+        st.markdown("---")
         st.markdown("#### 📡 Tabela Mestre de SLA e Latência em Tempo Real")
         health_data = []
         for api in ["GOOGLE_MAPS", "ARCGIS", "TOMTOM", "NOMINATIM", "PHOTON", "OVERPASS", "OSRM"]:
@@ -2949,48 +2986,37 @@ if PermissionManager.tem_permissao(perfil_atual, "motores"):
             t_med = f"{round((dados['tempo_total'] / max(1, dados['calls'])) * 1000)} ms" if dados['calls'] > 0 else "N/A"
             tx_err = f"{round((dados['falhas'] / max(1, dados['calls'] + dados['falhas'])) * 100, 1)}%" if dados['calls'] > 0 else "0.0%"
             health_data.append({"Provedor/Cloud Oficial": api, "Status da Conexão": "🟢 Estável/Online" if dados["falhas"] == 0 else "🔴 Instável/Erros Detectados", "Latência Média Observada": t_med, "Taxa de Falha Sistêmica": tx_err, "Total de Pings Realizados": dados["calls"]})
-        
         st.dataframe(pd.DataFrame(health_data), use_container_width=True)
 
-        st.markdown("#### 🌐 Auditoria do Motor Geodésico Contínuo")
+        st.markdown("#### 🌐 Auditoria do Motor Geodésico Contínuo (Métricas de Integridade Matemática)")
         df_metricas_lr = pd.DataFrame([METRICAS_DISTANCIA])
-        df_metricas_lr.columns = ["Total de Cálculos", "GeographicLib", "Geopy", "Haversine", "Anti-Zero", "Falhas Críticas", "Rotas Unpoisoned", "Barreiras", "Anti-Colisão"]
+        df_metricas_lr.columns = ["Total de Cálculos de Linha Reta", "Sucesso: GeographicLib (WGS84)", "Sucesso: Geopy", "Fallback: Haversine", "Correções Automáticas (Anti-Zero)", "Falhas Críticas", "Rotas Unpoisoned (Cache Reparado)", "Barreiras Territoriais (Bounding Box)", "Desambiguações Topológicas (Anti-Colisão)"]
         st.dataframe(df_metricas_lr, use_container_width=True)
-    tab_idx += 1
 
-if PermissionManager.tem_permissao(perfil_atual, "auditoria"):
-    with tabs_renderizadas[tab_idx]:
-        st.info("💡 **Objetivo desta aba:** Transparência Total e Explicabilidade (XAI) + Auditoria RBAC.")
-        st.markdown("### 🕵️ Dossiê Investigativo de Auditoria Viária e Acessos")
+if tab_auditoria:
+    with tab_auditoria:
+        st.info("💡 **Objetivo desta aba:** Transparência Total e Explicabilidade (XAI). Funciona como uma 'Caixa Preta' aberta do sistema. Verifique em detalhes qual algoritmo tomou a decisão para cada coordenada e por que ele escolheu descartar outras opções em caso de empate de proximidade.")
+        st.markdown("### 🕵️ Dossiê Investigativo de Auditoria Viária e Espacial")
         
-        tab_aud_lote, tab_aud_hub, tab_aud_rbac = st.tabs(["⚙️ Logs do Lote de Roteamento Padrão", "📦 Logs de Alocação", "🔐 Auditoria de Acessos (Sessão Atual)"])
+        tab_aud_lote, tab_aud_hub, tab_aud_rbac = st.tabs(["⚙️ Logs do Lote de Roteamento Padrão", "📦 Logs do Motor de Alocação (Hubs Competitive)", "🛡️ Logs de Acesso e Usuários (RBAC)"])
         
         with tab_aud_lote:
             if 'logs_auditoria' in st.session_state and st.session_state['logs_auditoria']:
-                st.write("Árvore de decisões algorítmicas:")
+                st.write("Abaixo consta a árvore de decisões algorítmicas explicáveis tomada pelo motor durante o cálculo do Lote:")
                 st.dataframe(pd.DataFrame(st.session_state['logs_auditoria']), use_container_width=True)
             else:
-                st.info("Nenhum registro de auditoria em memória cache.")
+                st.info("Nenhum registro de auditoria em memória cache. Processe uma nova planilha corporativa na aba de Processamento em Lote (⚙️) para gerar o relatório XAI.")
                 
         with tab_aud_hub:
             if 'logs_auditoria_alocacao' in st.session_state and st.session_state['logs_auditoria_alocacao']:
-                st.write("Inferências espaciais estritas:")
+                st.write("Abaixo constam as inferências espaciais estritas feitas individualmente para cada Base (Destino) e Endereço (Origem) na leitura e mapeamento da Matriz Geográfica:")
                 st.dataframe(pd.DataFrame(st.session_state['logs_auditoria_alocacao']), use_container_width=True)
             else:
-                st.info("Nenhuma árvore de decisão persistida.")
+                st.info("Nenhuma árvore de decisão persistida. Processe o cálculo de matrizes matemáticas na aba de Alocação de Hubs (📦) para carregar as justificativas competitivas.")
                 
         with tab_aud_rbac:
-            st.write("Registros de acessos e interações nesta sessão:")
-            if 'audit_trail' in st.session_state and st.session_state['audit_trail']:
-                st.dataframe(pd.DataFrame(st.session_state['audit_trail']), use_container_width=True)
+            if 'auditoria_usuarios' in st.session_state and st.session_state['auditoria_usuarios']:
+                st.write("Histórico de Acessos e Uso do Sistema pelos Operadores Logísticos:")
+                st.dataframe(pd.DataFrame(st.session_state['auditoria_usuarios']), use_container_width=True)
             else:
-                st.info("A trilha de log ainda não foi povoada.")
-
-# Inicialização da API em thread paralela para convivência Streamlit + FastAPI num script monolítico
-def run_fastapi():
-    import uvicorn
-    uvicorn.run(app_api, host="0.0.0.0", port=8000, log_level="error")
-
-if "api_thread_started" not in st.session_state:
-    threading.Thread(target=run_fastapi, daemon=True).start()
-    st.session_state["api_thread_started"] = True
+                st.info("Nenhum log de usuário encontrado nesta sessão.")
