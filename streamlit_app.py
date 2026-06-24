@@ -1708,8 +1708,8 @@ def embrulhar_task_paralela(item):
         fallback = (0.0, "0 min", "Link Indisponível", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], msg_erro, "N/A", "Falha de Processamento Multithread", "N/A", 0.0, "N/A", "N/A", "Não", "N/A", "N/A", "N/A")
         return par_id, fallback
         def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, progress_bar, status_container, runner_up_map=None):
-    resultados_unicos = {}
-    executor_lote = EXECUTOR_GLOBAL
+        resultados_unicos = {}
+        executor_lote = EXECUTOR_GLOBAL
     
     if runner_up_map:
         tarefas_unicas = [(t[1], t[1][0], t[1][1], runner_up_map.get(t[1][0])) for t in tarefas_priorizadas]
