@@ -1445,8 +1445,8 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 
     return lat, lon, end_f, conf, score, dist, mun, fonte, xai
     def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, progress_bar, status_container, runner_up_map=None):
-    resultados_unicos = {}
-    executor_lote = EXECUTOR_GLOBAL
+        resultados_unicos = {}
+        executor_lote = EXECUTOR_GLOBAL
     
     if runner_up_map:
         tarefas_unicas = [(t[1], t[1][0], t[1][1], runner_up_map.get(t[1][0])) for t in tarefas_priorizadas]
