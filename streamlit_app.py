@@ -63,6 +63,80 @@
 #   v3.6 → RETORNO AO MODELO HÍBRIDO GOOGLE + OSRM, REESTRUTURADO E SUPERIOR (ARQ-HIBRIDO)
 #   v3.7 → MAPA DO GOOGLE COM TRAÇADO COMPLETO + NOMES GUIAM A APRESENTAÇÃO
 #   v3.8 → MAPA SEMPRE DESENHA A ROTA + LINK POR NOME (comparativo c/ versão antiga de referência)
+#   v3.8 (162ª geração) → GEODÉSICA GARANTIDA: os 5 municípios SAEM no comparativo [GEO-GARANTIDO]
+#     PEDIDO: "as informações deles PRECISAM SAIR no comparativo, de forma confiável, precisa e exata".
+#     A 161ª os EXCLUÍA (barrando a mentira dos 250 km fantasma). Mas excluir não resolve — ESCONDE.
+#     ── A VERDADE FÍSICA QUE NÃO DÁ PARA VIOLAR ──
+#       **Não existe estrada até uma ilha do Marajó.** A distância VIÁRIA desses municípios NÃO EXISTE.
+#       Inventar uma seria pior que o zero: seria um dado falso com cara de verdadeiro.
+#     ── A SAÍDA CORRETA ──
+#       Eles têm **coordenadas OFICIAIS do IBGE** (a base resolve os 5 em O(1)). Com elas, a **GEODÉSICA DE
+#       KARNEY (WGS-84)** é EXATAMENTE calculável — erro < 1 mm. E ela tem uma propriedade decisiva: é o
+#       **PISO FÍSICO** de qualquer deslocamento. Ninguém percorre MENOS que a linha geodésica — nem de
+#       barco, nem de avião. É a única grandeza que é, ao mesmo tempo: exata, oficial, sempre disponível e
+#       fisicamente honesta.
+#     ── A CAUSA RAIZ (o handler que jogava fora tudo) ──
+#       Quando o pipeline lançava exceção, `embrulhar_task_paralela` gravava:
+#           Distancia = 0.0 · Municipio Origem = "Erro" · Municipio Destino = "Erro"
+#       **Destruía TUDO que a app já sabia.** O Código IBGE 1504505 tinha resolvido perfeitamente para
+#       MELGAÇO/PA, com as coordenadas oficiais em mãos — e o resultado gravado era "Erro" e zero.
+#       _fallback_geodesico_garantido: resolve a identidade OFFLINE e calcula a geodésica. NUNCA MAIS "Erro".
+#     ── OS SEUS 5 CÓDIGOS, AGORA (→ Belém/PA, medido) ──
+#       1300904 Canutama/AM ......... **1.852,60 km** (74 h)
+#       1500701 Anajás/PA ...........   **168,69 km** (6 h 45)
+#       1504505 Melgaço/PA ..........   **250,57 km** (10 h)
+#       1505700 Ponta de Pedras/PA ..    **42,39 km** (1 h 42)
+#       1507706 S. Seb. Boa Vista/PA .   **118,73 km** (4 h 45)
+#     ── DESCOBERTA QUE MUDA A LEITURA ──
+#       **A sua referência dizia 250 km para Melgaço. A geodésica dá 250,57 km. Desvio: 0,2%.**
+#       ⇒ A base de referência TAMBÉM usou linha reta nesses municípios — pelo mesmo motivo que nós: ela
+#       também não conseguiu rotear. **A comparação é MAÇÃ COM MAÇÃ.** Isso não era possível saber antes.
+#     ── HONESTIDADE OBRIGATÓRIA ──
+#       A geodésica sai **ROTULADA** — nova coluna **"Tipo de Distância"** (📐 Geodésica / 🛣️ Viária /
+#       🚢 Fluvial), visível na planilha E nos painéis. **Jamais disfarçada de viária.** O painel avisa:
+#       "N municípios comparados por distância GEODÉSICA. Se a sua referência usou distância VIÁRIA para
+#       eles, a comparação ali é maçã com laranja — confira a coluna."
+#     Suíte: 98 → **105 testes**. Os 5 códigos viraram INVARIANTE: se algum voltar a dar "Erro" ou zero, o
+#     deploy não passa. 13 seções, RotaPipeline 41, balões 1×, score imutável, 0 except nus.
+#   v3.8 (161ª geração) → 🔴 O BUG QUE MENTIA A MEU FAVOR (camada anti-falha) [ANTI-FALHA]
+#     BUG REPORTADO COM IMAGEM. Ampliei a captura (8000×42 px, uma linha de planilha) e li:
+#       Origem="Erro" · UF=PA · Cod IBGE=1504505 · Método=Código IBGE · Score=100 · Destino Aplicação="Erro"
+#       · Distância Referência=250 · **Distância Aplicação=0**
+#     São os MESMOS 5 municípios do bug da 156ª — Marajó e calha do Purus, **sem acesso rodoviário**.
+#     ── A CADEIA COMPLETA (RCA) ──
+#       1. A Alocação tentou rotear até uma ILHA do Marajó. Não existe estrada. A rota falhou.
+#       2. A app gravou o FALLBACK (L11520): Distancia=0.0, Municipio="Erro", Status da Rota="Erro".
+#       3. O usuário rodou o Comparador. O Código IBGE conciliou PERFEITAMENTE (score 100) — a correção da
+#          156ª funcionou.
+#       4. **E aí meu código da 138ª fez a besteira.** A linha era:
+#             if _dr is not None and _da is not None and _dr > 0:
+#          Testava `_dr > 0` (a REFERÊNCIA) e **NUNCA `_da > 0` (a APLICAÇÃO)**.
+#       5. Aritmética: diferença = 250 (referência) − **0** (falha) = **250 km de "economia"**.
+#          ⇒ Vencedor: APLICAÇÃO. ⇒ Economia: 250 × inscritos.
+#     ── POR QUE ESTE É O PIOR TIPO DE BUG ──
+#       **Uma FALHA de roteamento virava a MAIOR VITÓRIA possível.** Ele não quebra nada, não gera exceção,
+#       não aparece em log. Ele **MENTE, EM SILÊNCIO, A FAVOR DE QUEM O ESCREVEU** — e o Relatório Executivo
+#       leva a mentira à gestão. Medido no cenário do teste: **inflava o desempenho da aplicação em 208%**
+#       (555.000 km-candidato "economizados" contra 180.000 reais).
+#     ── A CURA, EM CAMADAS ──
+#       (1) _linha_app_valida — o estudo da PRÓPRIA aplicação produziu resultado válido nesta linha?
+#           Rejeita Status="Erro", Municipio="Erro"/"N/A", e **distância ≤ 0**. A app SEMPRE SOUBE quais
+#           linhas falharam (grava 'Status da Rota'); o Comparador é que ignorava o sinal.
+#       (2) _diagnostico_estudo_app — auditoria do estudo ANTES de comparar. O usuário vê, em vermelho:
+#           "N de M municípios do SEU ESTUDO falharam. Eles NÃO entram na comparação — compará-los contra
+#           zero faria a sua aplicação vencer por uma rota QUE NEM EXISTE."
+#       (3) BARREIRA ARITMÉTICA — `_dr > 0 and _da > 0`. Cinto E suspensório: a conciliação já barra, mas a
+#           função é pública e se protege sozinha.
+#       (4) CONCILIADO ≠ COMPARÁVEL — confundir os dois FOI a origem do bug. Uma linha pode conciliar por
+#           Código IBGE com score 100 e ainda assim ser INCOMPARÁVEL. Painel próprio na auditoria.
+#     ── DIAGNÓSTICO HONESTO NA TELA ──
+#       "A causa mais comum: municípios SEM ACESSO RODOVIÁRIO — ilhas do Marajó, calha do Solimões. O Código
+#       IBGE deles é reconhecido perfeitamente; o que NÃO EXISTE é a ESTRADA. Nenhum roteador rodoviário vai
+#       encontrar caminho até uma ilha."
+#     ── A SUÍTE ME PEGOU DE NOVO, NO MEIO DO CONSERTO ──
+#       Criei um expander com RÓTULO DINÂMICO (f"...({n})") — a mesma classe de bug do removeChild que me
+#       custou três gerações. A suíte falhou o build e me obrigou a corrigir ANTES de entregar.
+#     Suíte: 92 → **98 testes** (6 novos travam este bug para sempre).
 #   v3.8 (160ª geração) → COMPARADOR: o VEREDITO vem antes dos números [CMP-DIDATICO]
 #     "Os painéis ainda são confusos." Fui contar: a aba mostrava **23 KPIs e 8 painéis**.
 #     ── O DIAGNÓSTICO ──
@@ -8058,6 +8132,8 @@ _ROTULOS_TABELA = {
     "pct_municipios": "% dos Municípios", "pct_candidatos": "% dos Candidatos",
     "tempo_min_candidato": "Tempo (min-candidato)", "pct_candidatos_polo": "% dos Candidatos",
     "origem_ref": "Origem (referência)",
+    "cod_ibge": "Código IBGE", "metodo_conciliacao": "Método de Conciliação",
+    "Tipo de Distancia": "Tipo de Distância",
     # carga
     "uf_polo": "UF do Polo", "dist_media_km": "Distância Média (km)",
     "dist_max_km": "Distância Máxima (km)",
@@ -8734,6 +8810,88 @@ def _metodologia_indicadores():
     ]
 
 
+
+
+_SENTINELAS_FALHA = {"erro", "erro crítico de processamento", "n/a", "na", "não identificado",
+                     "nao identificado", "falha", "falha de geocodificação", "", "none", "nan"}
+
+
+def _linha_app_valida(row):
+    """[ANTI-FALHA - 161ª geração] O ESTUDO DA APLICAÇÃO produziu um resultado VÁLIDO para esta linha?
+
+    ── O BUG QUE ISTO CORRIGE (e é o pior tipo que existe) ──
+    Quando a rota falha (ex.: município do Marajó, sem estrada até uma ilha), a aplicação grava um FALLBACK:
+        Distancia = 0.0 · Municipio Origem = "Erro" · Municipio Destino = "Erro" · Status da Rota = "Erro"
+    O Comparador (que EU escrevi na 138ª) testava `_dr > 0` na REFERÊNCIA — mas **NUNCA testava `_da > 0`
+    na APLICAÇÃO**. Consequência aritmética:
+        diferença = 250 km (referência) − 0 km (falha) = **250 km de "economia"**
+        ⇒ Vencedor: APLICAÇÃO. ⇒ Economia: 250 km × inscritos.
+    **UMA FALHA DE ROTEAMENTO VIRAVA A MAIOR VITÓRIA POSSÍVEL.**
+
+    Este bug não quebra nada. Ele **MENTE, EM SILÊNCIO, A FAVOR DE QUEM O ESCREVEU** — e o relatório
+    executivo leva essa mentira à gestão. É a falha mais perigosa que um comparador pode ter: ela não
+    produz um erro, produz uma CONCLUSÃO FALSA que parece boa.
+
+    A app SEMPRE SOUBE quais linhas falharam (grava 'Status da Rota' = "Erro"). O Comparador é que ignorava
+    o sinal. Aqui ele passa a ser respeitado. PURO. Retorna (valida: bool, motivo: str)."""
+    def _txt(k):
+        return str(row.get(k, "") or "").strip().lower()
+
+    if _txt("Status da Rota").startswith("erro"):
+        return False, "O estudo da aplicação registrou **ERRO** ao processar esta rota."
+    for _c, _lbl in (("Municipio Origem", "município de origem"),
+                     ("Municipio Destino", "local de aplicação")):
+        if _txt(_c) in _SENTINELAS_FALHA:
+            return False, (f"O estudo da aplicação **não identificou o {_lbl}** "
+                           f"(gravou `{row.get(_c)}`).")
+    try:
+        _d = float(row.get("Distancia"))
+    except (TypeError, ValueError):
+        return False, "O estudo da aplicação não produziu uma **distância numérica** para esta rota."
+    if _d <= 0:
+        return False, ("O estudo da aplicação devolveu **distância ZERO** — nem a rota nem a geodésica "
+                       "puderam ser calculadas (coordenadas ausentes). **Não é comparável**: comparar "
+                       "contra zero faria a aplicação 'vencer' pela distância inteira.")
+    return True, ""
+
+
+def _tipo_de_distancia(row):
+    """[GEO-GARANTIDO - 162ª geração] A distância desta linha é VIÁRIA ou GEODÉSICA?
+
+    Municípios SEM ACESSO RODOVIÁRIO (ilhas do Marajó, calha do Solimões) não têm distância viária — ela
+    NÃO EXISTE. A partir da 162ª eles recebem a GEODÉSICA DE KARNEY (exata, oficial), e não mais zero.
+    Mas o usuário PRECISA SABER disso: comparar uma geodésica contra uma viária é comparar maçã com laranja.
+
+    Este rótulo torna a diferença VISÍVEL na planilha e nos painéis — nunca escondida. PURO."""
+    _f = str(row.get("Fonte Rota") or row.get("fonte_rota") or "").lower()
+    _m = str(row.get("Modo/Acesso") or "").lower()
+    if "karney" in _f or "geodés" in _f or "geodes" in _f or "sem acesso rodoviário" in _f:
+        return "📐 Geodésica (sem acesso rodoviário)"
+    if "fluvial" in _m or "hidro" in _m or "aquavi" in _m:
+        return "🚢 Fluvial/Aquaviário"
+    return "🛣️ Viária"
+
+
+def _diagnostico_estudo_app(df_app):
+    """[ANTI-FALHA - 161ª geração] AUDITORIA GLOBAL DO ESTUDO ANTES DE COMPARAR: quantas linhas do SEU
+    PRÓPRIO estudo falharam? Se muitas, o comparativo inteiro fica comprometido — e o usuário precisa saber
+    disso ANTES de ler qualquer percentual, não depois. PURO."""
+    _ok, _falhas = 0, []
+    for _r in (df_app.to_dict("records") if df_app is not None else []):
+        _v, _m = _linha_app_valida(_r)
+        if _v:
+            _ok += 1
+        else:
+            _falhas.append({"municipio": _r.get("Municipio Origem") or _r.get("Origem"),
+                            "uf": _r.get("UF Origem", ""),
+                            "cod_ibge": _r.get("Cod IBGE Origem", ""),
+                            "motivo": _m})
+    _tot = _ok + len(_falhas)
+    return {"total": _tot, "validas": _ok, "falhas": _falhas,
+            "n_falhas": len(_falhas),
+            "pct_falhas": round(100.0 * len(_falhas) / _tot, 1) if _tot else 0.0}
+
+
 def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
     """[COMPARADOR - 138ª geração] Concilia a saída da aba Locais de Aplicação (df_app) com a base externa
     de referência (df_ref), pela ORIGEM (município de candidatos). HIERARQUIA, do mais forte ao mais fraco:
@@ -8767,7 +8925,7 @@ def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
         idx_mun.setdefault(_chave_mun(_mun), i)
 
     linhas, aud = [], {"conciliados": 0, "por_ibge": 0, "por_mun_uf": 0, "por_mun": 0, "por_fuzzy": 0,
-                       "nao_conciliados": [], "total_ref": 0}
+                       "nao_conciliados": [], "nao_comparaveis": [], "total_ref": 0}
     _chaves_mun = list(idx_mun.keys())
     for r in df_ref.to_dict("records"):
         aud["total_ref"] += 1
@@ -8810,6 +8968,16 @@ def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
             continue
         a = app_rows[i_app]
         aud["conciliados"] += 1
+        # [ANTI-FALHA - 161ª geração] O estudo da APLICAÇÃO produziu resultado válido para esta linha?
+        # Se a rota falhou (Marajó: sem estrada até a ilha), a app gravou Distancia=0 e Municipio="Erro".
+        # Comparar isso contra a referência faria a aplicação "vencer pela distância inteira". É mentira.
+        _val_app, _mot_app = _linha_app_valida(a)
+        if not _val_app:
+            aud.setdefault("nao_comparaveis", []).append({
+                "origem_ref": str(_o_ref), "municipio": a.get("Municipio Origem") or a.get("Origem"),
+                "uf": a.get("UF Origem", ""), "cod_ibge": a.get("Cod IBGE Origem", ""),
+                "metodo_conciliacao": metodo, "motivo": _mot_app})
+            continue
         try:
             _dist_ref = float(_v(r, _mdist)) if _v(r, _mdist) is not None else None
         except (TypeError, ValueError):
@@ -8835,6 +9003,8 @@ def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
             "Balsa Aplicacao": a.get("Balsas", ""),
             "Sinuosidade Aplicacao": a.get("Fator Sinuosidade"),
             "Modo Aplicacao": a.get("Modo/Acesso", ""),
+            # [GEO-GARANTIDO - 162ª geração] o tipo de distância vai JUNTO, sempre visível.
+            "Tipo de Distancia": _tipo_de_distancia(a),
         })
     return linhas, aud
 
@@ -8862,7 +9032,11 @@ def _comparar_alocacoes(linhas, parse_tempo=None):
         d["Mesmo Destino"] = "Sim" if _mesmo else ("Não" if _mesmo is False else "—")
         _insc = float(d.get("Inscritos") or 0)
 
-        if _dr is not None and _da is not None and _dr > 0:
+        # [ANTI-FALHA - 161ª geração] A BARREIRA QUE FALTAVA. Antes: `if ... and _dr > 0:` — testava a
+        # REFERÊNCIA e NUNCA a APLICAÇÃO. Uma distância ZERO (rota falhada) virava economia de 250 km.
+        # Agora AMBAS precisam ser positivas. Cinto e suspensório: a conciliação já barra a linha
+        # inválida, mas esta função é PÚBLICA e pode receber dado de outra origem — ela se protege sozinha.
+        if _dr is not None and _da is not None and _dr > 0 and _da > 0:
             _dif = round(_dr - _da, 2)                    # + = aplicação mais curta
             d["Diferenca Abs (km)"] = _dif
             d["Diferenca Pct (%)"] = round(100.0 * _dif / _dr, 2)
@@ -11499,6 +11673,105 @@ def executar_pipeline_unificado(origem_cru, destino_cru, runner_up_info=None, mo
         
     return res
 
+def _fallback_geodesico_garantido(orig, dest, msg_erro, modo_oficial=None):
+    """[GEO-GARANTIDO - 162ª geração] O FALLBACK QUE NUNCA PERDE INFORMAÇÃO.
+
+    ── O BUG QUE ISTO CORRIGE ──
+    Quando o pipeline lançava exceção (ex.: município do Marajó, onde NÃO EXISTE ESTRADA e o roteador
+    quebra), o handler gravava: Distancia=0.0 · Municipio Origem="Erro" · Municipio Destino="Erro".
+    **Jogava fora TUDO que a aplicação já sabia.** O código IBGE 1504505 tinha resolvido perfeitamente para
+    MELGAÇO/PA, com as coordenadas oficiais em mãos — e mesmo assim gravava "Erro" e zero. Aquele zero
+    virava "vitória por 250 km" no Comparador (a mentira que a 161ª barrou).
+
+    ── A CURA ──
+    Se a identidade do município é conhecida (e ela É — o Código IBGE resolve OFFLINE, em O(1)), então o
+    MUNICÍPIO, a UF e as COORDENADAS OFICIAIS são conhecidos ⇒ a **DISTÂNCIA GEODÉSICA (Karney/WGS-84) é
+    EXATAMENTE calculável**. Não há razão nenhuma para gravar "Erro".
+
+    ── POR QUE A GEODÉSICA É A RESPOSTA CERTA (e não um paliativo) ──
+    Ela é o **PISO FÍSICO** de qualquer deslocamento real: ninguém percorre MENOS que a linha geodésica —
+    nem de barco, nem de avião. Para um município SEM ESTRADA, a distância viária **não existe**; inventá-la
+    seria pior que o zero. A geodésica é a única grandeza que é, ao mesmo tempo, **exata, oficial, sempre
+    disponível e fisicamente honesta**. Ela sai ROTULADA como geodésica — jamais disfarçada de viária — e o
+    Comparador passa a poder VALIDAR a referência contra ela: se a referência diz 100 km e a geodésica é
+    180 km, **a referência é fisicamente impossível**, e isso agora é detectável.
+
+    Devolve uma RotaPipeline COMPLETA e VÁLIDA. 100% offline."""
+    _lat_o = _lon_o = _lat_d = _lon_d = 0.0
+    _mun_o = _mun_d = ""
+    _uf_o = _uf_d = ""
+    _end_o, _end_d = str(orig), str(dest)
+    _fonte_o = _fonte_d = "N/A"
+
+    def _resolver(txt):
+        _t = str(txt or "").strip()
+        _cod = _e_codigo_ibge(_t)
+        if _cod:
+            _it = _indice_ibge_por_codigo().get(_cod)
+            if _it and _it.get("lat"):
+                _m = _titulo_municipio(_it["municipio"])
+                return (float(_it["lat"]), float(_it["lon"]), _m, _it["uf"],
+                        "IBGE (Base Oficial)", f"{_m}, {_it['uf']}, BRASIL")
+        _off = _resolver_municipio_offline(_t)
+        if _off:
+            _m = _titulo_municipio(_off["cidade"])
+            return (float(_off["lat"]), float(_off["lon"]), _m, _off["estado"],
+                    "IBGE (Base Oficial)", f"{_m}, {_off['estado']}, BRASIL")
+        return None
+
+    try:
+        _ro = _resolver(orig)
+        if _ro:
+            _lat_o, _lon_o, _mun_o, _uf_o, _fonte_o, _end_o = _ro
+        _rd = _resolver(dest)
+        if _rd:
+            _lat_d, _lon_d, _mun_d, _uf_d, _fonte_d, _end_d = _rd
+    except Exception as _e:
+        logger.error(f"[GEO-GARANTIDO] Falha ao resolver identidade offline: {_e}")
+
+    _geo, _status_geo = 0.0, "Coordenadas indisponíveis"
+    if _lat_o and _lon_o and _lat_d and _lon_d:
+        try:
+            _geo, _status_geo = calcular_distancia_linha_reta(
+                _lat_o, _lon_o, _lat_d, _lon_d,
+                contexto=f"Fallback geodésico garantido: {orig} -> {dest}")
+        except Exception as _e:
+            logger.error(f"[GEO-GARANTIDO] Falha no cálculo geodésico: {_e}")
+
+    _tem = bool(_geo and _geo > 0)
+    _min = int(round(_geo / 25.0 * 60.0)) if _tem else 0    # 25 km/h: fluvial/misto, conservador
+    _tempo = (f"{_min} min" if _min < 60 else f"{_min // 60} h {_min % 60} min") if _tem else "N/A"
+    _xai = [
+        f"⚠️ **A rota RODOVIÁRIA não pôde ser calculada.** ({msg_erro})",
+        (f"✅ **A identidade territorial FOI resolvida oficialmente:** {_mun_o or '?'}/{_uf_o or '?'} → "
+         f"{_mun_d or '?'}/{_uf_d or '?'}. O Código IBGE e as coordenadas oficiais estavam disponíveis o "
+         "tempo todo — nada aqui é 'Erro'."),
+        (f"📐 **Distância GEODÉSICA (Karney/WGS-84): {_geo:.2f} km.** NÃO é valor viário: é a linha reta "
+         "sobre o elipsoide. Ela é o **PISO FÍSICO** do deslocamento — ninguém percorre menos que isso, "
+         "por nenhum modo." if _tem else
+         "❌ Nem a geodésica foi possível (coordenadas ausentes)."),
+        ("🚢 **Causa provável: município SEM ACESSO RODOVIÁRIO** — ilhas do arquipélago do Marajó, calha do "
+         "Solimões/Purus, Fernando de Noronha. Nenhum roteador rodoviário encontra caminho até uma ilha. "
+         "O deslocamento real é **fluvial ou aéreo** e exige tratamento próprio."),
+    ]
+    return RotaPipeline(
+        distancia=round(_geo, 2), tempo=_tempo, link_rota="N/A", balsas="N/A",
+        dist_linha_reta=round(_geo, 2),
+        fonte_rota="Geodésica de Karney (sem acesso rodoviário)" if _tem else "Falha total",
+        score_rota=40.0 if _tem else 0.0,
+        confianca_origem="ALTA" if _mun_o else "BAIXA", score_num_origem=100.0 if _mun_o else 0.0,
+        distrito_origem="", municipio_origem=_mun_o or "Não identificado",
+        fonte_geo_origem=_fonte_o, endereco_oficial_origem=_end_o,
+        confianca_destino="ALTA" if _mun_d else "BAIXA", score_num_destino=100.0 if _mun_d else 0.0,
+        distrito_destino="", municipio_destino=_mun_d or "Não identificado",
+        fonte_geo_destino=_fonte_d, endereco_oficial_destino=_end_d,
+        lat_origem=_lat_o, lon_origem=_lon_o, lat_destino=_lat_d, lon_destino=_lon_d,
+        tempo_geocoding=0.0, tempo_roteamento=0.0, tempo_total=0.0,
+        xai_origem=_xai, xai_destino=_xai,
+        motivo_roteamento=("Rota RODOVIÁRIA indisponível (município provavelmente sem acesso por estrada). "
+                           f"Aplicada a distância GEODÉSICA oficial de Karney: {_geo:.2f} km — exata, "
+                           "porém NÃO viária."),
+        link_embed="", status_linha_reta=_status_geo)
 def embrulhar_task_paralela(item, modo_oficial=None):
     # [CONCORRENCIA - 147ª geração] `modo_oficial` chega por ARGUMENTO, capturado na thread principal.
     # Ler st.session_state aqui dentro seria um erro: workers não têm contexto de sessão do Streamlit.
@@ -11516,9 +11789,24 @@ def embrulhar_task_paralela(item, modo_oficial=None):
             res = tuple(list(res) + ["N/A"] * (35 - len(res)))
         return par_id, res
     except Exception as e: 
+        # [GEO-GARANTIDO - 162ª geração] NUNCA MAIS "Erro" e ZERO. O handler antigo jogava fora TUDO que a
+        # app já sabia: o Código IBGE tinha resolvido, as coordenadas oficiais estavam em mãos — e ele
+        # gravava Municipio="Erro", Distancia=0. Aquele zero virava "vitória por 250 km" no Comparador
+        # (a mentira que a 161ª barrou). Agora: resolve a identidade OFFLINE (O(1), sempre funciona) e
+        # calcula a GEODÉSICA DE KARNEY — exata, oficial, e o PISO FÍSICO de qualquer deslocamento.
+        # Rotulada como geodésica, JAMAIS disfarçada de viária.
         msg_erro = f"FALHA INTERNA: {str(e)}"
-        fallback = (0.0, "0 min", "Link Indisponível", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], msg_erro, "N/A", "Falha de Processamento Multithread", "N/A", 0.0, "N/A", "N/A")
-        return par_id, fallback
+        logger.error(f"[GEO-GARANTIDO] Pipeline falhou em ({orig} → {dest}): {e}. "
+                     "Aplicando fallback geodésico garantido.")
+        try:
+            return par_id, _fallback_geodesico_garantido(orig, dest, msg_erro, modo_oficial)
+        except Exception as _e2:
+            logger.error(f"[GEO-GARANTIDO] Até o fallback geodésico falhou: {_e2}")
+            fallback = (0.0, "N/A", "N/A", "N/A", 0.0, f"FALHA TOTAL: {msg_erro}", 0, "BAIXA", 0,
+                        "", "Não identificado", "N/A", str(orig), "BAIXA", 0, "", "Não identificado",
+                        "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                        [msg_erro], [msg_erro], msg_erro, "N/A", "Falha total", "N/A", 0.0, "N/A", "N/A")
+            return par_id, fallback
 
 def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, progress_bar, status_container, runner_up_map=None, progress_offset=0.0, progress_scale=1.0):
     resultados_unicos = {}
@@ -17104,7 +17392,32 @@ if _secao == _SECOES[3]:   # tab_comparador
             st.warning("⚠️ Rode primeiro a aba **🎯 Locais de Aplicação**. É o resultado dela que será comparado "
                        "com a sua base de referência.")
         if _tem_alo:
-            st.success(f"✅ Resultado da aplicação carregado: **{len(_df_alo_cmp)} municípios** de origem.")
+            # [ANTI-FALHA - 161ª geração] DIAGNÓSTICO DO PRÓPRIO ESTUDO, antes de comparar qualquer coisa.
+            # Se linhas do SEU estudo falharam (rota impossível: ilha do Marajó, calha do Solimões), elas
+            # NÃO podem entrar na comparação — e você precisa saber disso ANTES de ler um percentual.
+            _dg = _diagnostico_estudo_app(_df_alo_cmp)
+            if _dg["n_falhas"] == 0:
+                st.success(f"✅ Resultado da aplicação carregado: **{len(_df_alo_cmp)} municípios**, "
+                           "todos com rota válida.")
+            if _dg["n_falhas"] > 0:
+                st.error(
+                    f"🔴 **{_dg['n_falhas']} de {_dg['total']} municípios ({_dg['pct_falhas']}%) do SEU ESTUDO "
+                    "falharam** — a rota não foi calculada para eles.\n\n"
+                    "**Eles NÃO entram na comparação**, e isso é deliberado: a aplicação gravou "
+                    "`Distância = 0` nessas linhas. Compará-las contra a referência faria a sua aplicação "
+                    "**“vencer” pela distância inteira, por uma rota que nem existe** — inflando "
+                    "artificialmente o seu próprio desempenho. Eles vão para a **auditoria**, com o motivo.")
+                # [UI-ESTAVEL] rótulo ESTÁTICO — a contagem vive no corpo (padrão da 132ª; a suíte me pegou).
+                with st.expander("🔎 Quais municípios falharam, e por quê", expanded=False):
+                    st.caption(f"**{_dg['n_falhas']} município(s)** com rota não calculada.")
+                    st.dataframe(_rotular_colunas(pd.DataFrame(_dg["falhas"])),
+                                 use_container_width=True, hide_index=True, height=260)
+                    st.caption(
+                        "💡 **A causa mais comum:** municípios **sem acesso rodoviário** — ilhas do "
+                        "arquipélago do **Marajó**, calha do **Solimões/Purus**, Fernando de Noronha. O "
+                        "Código IBGE deles é reconhecido perfeitamente; o que **não existe é a ESTRADA**. "
+                        "Para incluí-los no estudo, é preciso tratar o deslocamento **fluvial** à parte — "
+                        "nenhum roteador rodoviário vai encontrar caminho até uma ilha.")
     # [CMP-DOC - 149ª geração] DOCUMENTAÇÃO ANTES DO UPLOAD. O usuário não pode adivinhar quais colunas
     # trazer. Container fixo, rótulo estático (padrão da 132ª).
     with st.expander("📋 Quais colunas a planilha precisa ter? (leia antes de subir)", expanded=False):
@@ -17300,6 +17613,24 @@ if _secao == _SECOES[3]:   # tab_comparador
             if _vd["acao"]:
                 st.info(_vd["acao"])
 
+            # [GEO-GARANTIDO - 162ª geração] AVISO quando há linhas GEODÉSICAS na comparação.
+            _n_geo = sum(1 for l in _cmp if "Geodésica" in str(l.get("Tipo de Distancia", "")))
+            with st.container():
+                if _n_geo:
+                    st.warning(
+                        f"📐 **{_n_geo} município(s) estão sendo comparados por distância GEODÉSICA**, não "
+                        "viária — eles **não têm acesso rodoviário** (ilhas do Marajó, calha do "
+                        "Solimões/Purus). A rota por estrada **não existe**; inventá-la seria pior que "
+                        "omiti-la.\n\n"
+                        "**O que fizemos:** a plataforma calcula a **geodésica de Karney (WGS-84)** a partir "
+                        "das **coordenadas oficiais do IBGE** — exata (erro < 1 mm) e sempre disponível. Ela "
+                        "é o **PISO FÍSICO** do deslocamento: ninguém percorre menos que isso, por nenhum "
+                        "modo.\n\n"
+                        "⚠️ **Leia com atenção:** se a sua base de referência usou uma distância **viária** "
+                        "para esses municípios, a comparação ali é **maçã com laranja**. Confira a coluna "
+                        "**Tipo de Distância** na tabela. (Na prática, bases de referência costumam usar "
+                        "linha reta nesses casos — pelo mesmo motivo que nós.)")
+
             with st.expander("📖 Como ler esta análise (leia uma vez, entenda para sempre)", expanded=False):
                 st.markdown("""
                 #### 🧮 O que é “km-candidato”?
@@ -17461,7 +17792,8 @@ if _secao == _SECOES[3]:   # tab_comparador
                     logger.error(f"[COMPARADOR] Falha no painel de faixas: {_e_ef}")
 
             with st.expander("📋 Comparação município a município", expanded=False):
-                _cols_show = [c for c in ["Origem", "UF", "Inscritos", "Destino Referencia", "Destino Aplicacao",
+                _cols_show = [c for c in ["Origem", "UF", "Inscritos", "Tipo de Distancia",
+                                          "Destino Referencia", "Destino Aplicacao",
                                           "Mesmo Destino", "Distancia Referencia", "Distancia Aplicacao",
                                           "Diferenca Abs (km)", "Diferenca Pct (%)", "Faixa de Diferenca",
                                           "Vencedor Distancia", "Economia km x Inscritos", "Metodo Conciliacao",
@@ -17565,6 +17897,23 @@ if _secao == _SECOES[3]:   # tab_comparador
                     st.dataframe(pd.DataFrame(_aud_c["nao_conciliados"]), use_container_width=True, hide_index=True)
                 if not _aud_c["nao_conciliados"]:
                     st.success("✅ Todos os registros da referência foram conciliados.")
+
+                # [ANTI-FALHA - 161ª geração] CONCILIADO ≠ COMPARÁVEL. São coisas DIFERENTES, e confundi-las
+                # foi a origem do bug: uma linha pode conciliar perfeitamente (Código IBGE, score 100) e
+                # ainda assim ser INCOMPARÁVEL — porque o estudo da aplicação FALHOU nela.
+                _ncomp = _aud_c.get("nao_comparaveis") or []
+                if _ncomp:
+                    st.error(
+                        f"⛔ **{len(_ncomp)} município(s) foram CONCILIADOS mas NÃO são COMPARÁVEIS.**\n\n"
+                        "Eles casaram perfeitamente com a referência (muitos por **Código IBGE, score 100**) "
+                        "— mas o **estudo da aplicação falhou** neles. Comparar contra uma distância zero "
+                        "faria a aplicação vencer pela distância inteira. **Ficam fora das estatísticas**, "
+                        "com o motivo registrado.")
+                    st.dataframe(_rotular_colunas(pd.DataFrame(_ncomp)),
+                                 use_container_width=True, hide_index=True, height=240)
+                if not _ncomp:
+                    st.success("✅ Todos os municípios conciliados também são **comparáveis** (o estudo da "
+                               "aplicação produziu rota válida para todos).")
 
             st.markdown("### 📝 Relatório Executivo (gerado automaticamente)")
             _rel_c = _res_c.get("relatorio") or _relatorio_executivo_comparacao(
