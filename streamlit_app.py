@@ -63,144 +63,6 @@
 #   v3.6 → RETORNO AO MODELO HÍBRIDO GOOGLE + OSRM, REESTRUTURADO E SUPERIOR (ARQ-HIBRIDO)
 #   v3.7 → MAPA DO GOOGLE COM TRAÇADO COMPLETO + NOMES GUIAM A APRESENTAÇÃO
 #   v3.8 → MAPA SEMPRE DESENHA A ROTA + LINK POR NOME (comparativo c/ versão antiga de referência)
-#   v3.8 (162ª geração) → GEODÉSICA GARANTIDA: os 5 municípios SAEM no comparativo [GEO-GARANTIDO]
-#     PEDIDO: "as informações deles PRECISAM SAIR no comparativo, de forma confiável, precisa e exata".
-#     A 161ª os EXCLUÍA (barrando a mentira dos 250 km fantasma). Mas excluir não resolve — ESCONDE.
-#     ── A VERDADE FÍSICA QUE NÃO DÁ PARA VIOLAR ──
-#       **Não existe estrada até uma ilha do Marajó.** A distância VIÁRIA desses municípios NÃO EXISTE.
-#       Inventar uma seria pior que o zero: seria um dado falso com cara de verdadeiro.
-#     ── A SAÍDA CORRETA ──
-#       Eles têm **coordenadas OFICIAIS do IBGE** (a base resolve os 5 em O(1)). Com elas, a **GEODÉSICA DE
-#       KARNEY (WGS-84)** é EXATAMENTE calculável — erro < 1 mm. E ela tem uma propriedade decisiva: é o
-#       **PISO FÍSICO** de qualquer deslocamento. Ninguém percorre MENOS que a linha geodésica — nem de
-#       barco, nem de avião. É a única grandeza que é, ao mesmo tempo: exata, oficial, sempre disponível e
-#       fisicamente honesta.
-#     ── A CAUSA RAIZ (o handler que jogava fora tudo) ──
-#       Quando o pipeline lançava exceção, `embrulhar_task_paralela` gravava:
-#           Distancia = 0.0 · Municipio Origem = "Erro" · Municipio Destino = "Erro"
-#       **Destruía TUDO que a app já sabia.** O Código IBGE 1504505 tinha resolvido perfeitamente para
-#       MELGAÇO/PA, com as coordenadas oficiais em mãos — e o resultado gravado era "Erro" e zero.
-#       _fallback_geodesico_garantido: resolve a identidade OFFLINE e calcula a geodésica. NUNCA MAIS "Erro".
-#     ── OS SEUS 5 CÓDIGOS, AGORA (→ Belém/PA, medido) ──
-#       1300904 Canutama/AM ......... **1.852,60 km** (74 h)
-#       1500701 Anajás/PA ...........   **168,69 km** (6 h 45)
-#       1504505 Melgaço/PA ..........   **250,57 km** (10 h)
-#       1505700 Ponta de Pedras/PA ..    **42,39 km** (1 h 42)
-#       1507706 S. Seb. Boa Vista/PA .   **118,73 km** (4 h 45)
-#     ── DESCOBERTA QUE MUDA A LEITURA ──
-#       **A sua referência dizia 250 km para Melgaço. A geodésica dá 250,57 km. Desvio: 0,2%.**
-#       ⇒ A base de referência TAMBÉM usou linha reta nesses municípios — pelo mesmo motivo que nós: ela
-#       também não conseguiu rotear. **A comparação é MAÇÃ COM MAÇÃ.** Isso não era possível saber antes.
-#     ── HONESTIDADE OBRIGATÓRIA ──
-#       A geodésica sai **ROTULADA** — nova coluna **"Tipo de Distância"** (📐 Geodésica / 🛣️ Viária /
-#       🚢 Fluvial), visível na planilha E nos painéis. **Jamais disfarçada de viária.** O painel avisa:
-#       "N municípios comparados por distância GEODÉSICA. Se a sua referência usou distância VIÁRIA para
-#       eles, a comparação ali é maçã com laranja — confira a coluna."
-#     Suíte: 98 → **105 testes**. Os 5 códigos viraram INVARIANTE: se algum voltar a dar "Erro" ou zero, o
-#     deploy não passa. 13 seções, RotaPipeline 41, balões 1×, score imutável, 0 except nus.
-#   v3.8 (161ª geração) → 🔴 O BUG QUE MENTIA A MEU FAVOR (camada anti-falha) [ANTI-FALHA]
-#     BUG REPORTADO COM IMAGEM. Ampliei a captura (8000×42 px, uma linha de planilha) e li:
-#       Origem="Erro" · UF=PA · Cod IBGE=1504505 · Método=Código IBGE · Score=100 · Destino Aplicação="Erro"
-#       · Distância Referência=250 · **Distância Aplicação=0**
-#     São os MESMOS 5 municípios do bug da 156ª — Marajó e calha do Purus, **sem acesso rodoviário**.
-#     ── A CADEIA COMPLETA (RCA) ──
-#       1. A Alocação tentou rotear até uma ILHA do Marajó. Não existe estrada. A rota falhou.
-#       2. A app gravou o FALLBACK (L11520): Distancia=0.0, Municipio="Erro", Status da Rota="Erro".
-#       3. O usuário rodou o Comparador. O Código IBGE conciliou PERFEITAMENTE (score 100) — a correção da
-#          156ª funcionou.
-#       4. **E aí meu código da 138ª fez a besteira.** A linha era:
-#             if _dr is not None and _da is not None and _dr > 0:
-#          Testava `_dr > 0` (a REFERÊNCIA) e **NUNCA `_da > 0` (a APLICAÇÃO)**.
-#       5. Aritmética: diferença = 250 (referência) − **0** (falha) = **250 km de "economia"**.
-#          ⇒ Vencedor: APLICAÇÃO. ⇒ Economia: 250 × inscritos.
-#     ── POR QUE ESTE É O PIOR TIPO DE BUG ──
-#       **Uma FALHA de roteamento virava a MAIOR VITÓRIA possível.** Ele não quebra nada, não gera exceção,
-#       não aparece em log. Ele **MENTE, EM SILÊNCIO, A FAVOR DE QUEM O ESCREVEU** — e o Relatório Executivo
-#       leva a mentira à gestão. Medido no cenário do teste: **inflava o desempenho da aplicação em 208%**
-#       (555.000 km-candidato "economizados" contra 180.000 reais).
-#     ── A CURA, EM CAMADAS ──
-#       (1) _linha_app_valida — o estudo da PRÓPRIA aplicação produziu resultado válido nesta linha?
-#           Rejeita Status="Erro", Municipio="Erro"/"N/A", e **distância ≤ 0**. A app SEMPRE SOUBE quais
-#           linhas falharam (grava 'Status da Rota'); o Comparador é que ignorava o sinal.
-#       (2) _diagnostico_estudo_app — auditoria do estudo ANTES de comparar. O usuário vê, em vermelho:
-#           "N de M municípios do SEU ESTUDO falharam. Eles NÃO entram na comparação — compará-los contra
-#           zero faria a sua aplicação vencer por uma rota QUE NEM EXISTE."
-#       (3) BARREIRA ARITMÉTICA — `_dr > 0 and _da > 0`. Cinto E suspensório: a conciliação já barra, mas a
-#           função é pública e se protege sozinha.
-#       (4) CONCILIADO ≠ COMPARÁVEL — confundir os dois FOI a origem do bug. Uma linha pode conciliar por
-#           Código IBGE com score 100 e ainda assim ser INCOMPARÁVEL. Painel próprio na auditoria.
-#     ── DIAGNÓSTICO HONESTO NA TELA ──
-#       "A causa mais comum: municípios SEM ACESSO RODOVIÁRIO — ilhas do Marajó, calha do Solimões. O Código
-#       IBGE deles é reconhecido perfeitamente; o que NÃO EXISTE é a ESTRADA. Nenhum roteador rodoviário vai
-#       encontrar caminho até uma ilha."
-#     ── A SUÍTE ME PEGOU DE NOVO, NO MEIO DO CONSERTO ──
-#       Criei um expander com RÓTULO DINÂMICO (f"...({n})") — a mesma classe de bug do removeChild que me
-#       custou três gerações. A suíte falhou o build e me obrigou a corrigir ANTES de entregar.
-#     Suíte: 92 → **98 testes** (6 novos travam este bug para sempre).
-#   v3.8 (160ª geração) → COMPARADOR: o VEREDITO vem antes dos números [CMP-DIDATICO]
-#     "Os painéis ainda são confusos." Fui contar: a aba mostrava **23 KPIs e 8 painéis**.
-#     ── O DIAGNÓSTICO ──
-#       Era uma **PILHA DE FATOS, não uma resposta**. O usuário abria, via 23 números, e tinha que MONTAR a
-#       conclusão sozinho. Pior: **"km-candidato" é a unidade central de TODA a análise — e a tela NUNCA a
-#       explicava.** O sujeito lia "economia ponderada: 2.600.000 km-candidato" e não fazia ideia se isso era
-#       muito, pouco, bom ou ruim.
-#     ── A CURA: INVERTER A ORDEM (como num parecer técnico de verdade) ──
-#       (1) **POSSO CONFIAR NISTO?** — vem PRIMEIRO. Se a conciliação foi ruim, nada mais importa. Com 57%
-#           conciliado a app diz, ANTES de mostrar qualquer percentual: "os percentuais abaixo NÃO
-#           representam o universo completo".
-#       (2) **QUAL É A RESPOSTA?** — uma frase, em português: "🏆 A SUA APLICAÇÃO produziu a melhor
-#           distribuição. Ela levou o candidato mais perto em 62% dos municípios."
-#       (3) **QUAL O TAMANHO?** — traduzido para **ESCALA HUMANA**. E é aqui que mora o pulo do gato:
-#           "2.600.000 km-candidato" **não significa nada para ninguém**.
-#           "**Cada candidato anda 12,4 km A MENOS**" significa tudo.
-#           É o MESMO número, dividido pelo total de candidatos — mas é a diferença entre um DADO e um
-#           ENTENDIMENTO.
-#     ── "📖 COMO LER ESTA ANÁLISE" (leia uma vez, entenda para sempre) ──
-#       Explica o que é km-candidato (com o PORQUÊ: poupar 10 km para 5.000 candidatos importa mais que 200
-#       km para 10); por que empate técnico não é vitória; o que é conciliar (tabela dos 4 métodos com o
-#       nível de confiança de cada um); **em que ORDEM ler os 7 painéis**; e o que significa um número
-#       NEGATIVO (a sua aplicação levou o candidato mais longe).
-#     ── LEGENDA EM TODOS OS GRÁFICOS E PAINÉIS ──
-#       Cada um agora tem "📖 Como ler" (o que é o eixo, o que é a altura, o que significa negativo) E "🔎 O
-#       que este gráfico diz" (a leitura do SEU dado). Exemplos: o gráfico "quem venceu" conta MUNICÍPIOS, não
-#       candidatos — por isso responde "onde", enquanto o KPI de economia responde "quanto". O CV ganhou
-#       explicação própria: é o número que separa "melhoria estrutural" de "melhoria pontual", e duas
-#       comparações com a MESMA MÉDIA podem contar histórias OPOSTAS.
-#     ── DETALHE QUE IMPORTA ──
-#       Os números saíam em formato AMERICANO ("12.4 km", "57.4%") num app brasileiro. Corrigido: 8 pontos.
-#     Suíte: 89 → **92 testes**. 13 seções, RotaPipeline 41, balões 1×, score imutável, 0 except nus.
-#   v3.8 (159ª geração) → HIERARQUIA VISUAL: a app era uma PAREDE DE CAIXAS COLORIDAS [UX-HIERARQUIA]
-#     Pergunta: "o visual está moderno, elegante e didático?" Respondi com MEDIÇÃO, não com opinião.
-#     ── O DIAGNÓSTICO (medido) ──
-#       **138 caixas coloridas** (st.info/success/warning/error) + **193 legendas**. A seção "Deslocamento
-#       do Candidato" sozinha tem **94 elementos** (8 info + 12 success + 13 warning + 3 error + 58 captions).
-#       Isso é a parede de caixas clássica do Streamlit. E o problema não é estético — é COGNITIVO:
-#       **quando TUDO está destacado, NADA está.** Cada insight que escrevi virou um st.info() saturado; o
-#       olho não sabe onde pousar. Não era hierarquia: era ruído.
-#     ── A CURA: ONDE HÁ ALAVANCAGEM ──
-#       Uma injeção de CSS conserta as 138 caixas DE UMA VEZ, sem tocar em uma linha de lógica:
-#       (1) CAIXAS ACHATADAS — fundo saturado → **barra de acento à esquerda** (o padrão de Stripe, Linear,
-#           GitHub, Power BI). A cor continua comunicando severidade, mas PARA DE GRITAR (fundo a 7-9% de
-#           opacidade em vez de fill sólido).
-#       (2) LEGENDAS RECUAM — 193 captions competiam com o conteúdo. Uma legenda que grita não é legenda.
-#           Agora é apoio silencioso: menor, mais discreta, disponível para quem procura.
-#       (3) ESCALA TIPOGRÁFICA REAL — os títulos eram quase todos h5. Sem escala não há hierarquia: o olho
-#           não distingue "seção" de "subseção". O h5 (o mais usado) virou um RÓTULO DE PAINEL (uppercase,
-#           letter-spacing, linha divisória) — para de fingir que é título e passa a ser o que é.
-#       (4) MÉTRICAS VIRAM CARTÕES — eram números FLUTUANDO NO VAZIO. Agora têm borda, fundo e respiro, e o
-#           olho lê a linha de KPIs como um BLOCO, escaneando de uma vez em vez de item a item.
-#       (5) TABELAS — cabeçalho ancorado (a âncora do olho ao rolar) e hover de linha (é assim que se
-#           rastreia uma linha numa tabela larga sem se perder).
-#     ── DISCIPLINA MANTIDA ──
-#       **Zero componente adicionado.** Medido: 75 elementos / 6,1 pesados por rerun — IDÊNTICO à 158ª. A
-#       renderização preguiçosa da 142ª (que me custou TRÊS gerações) segue intacta. Zero cor hardcoded
-#       (117 usos de token). WCAG AA continua passando.
-#     ── O QUE **NÃO** SE RESOLVE COM CSS (e eu não vou fingir que resolvi) ──
-#       A CONTAGEM de elementos. 94 numa única seção é muito, e nenhum estilo conserta isso — é problema de
-#       CONTEÚDO, não de aparência. Resolver exige decidir O QUE CORTAR, e isso depende de saber o que você
-#       de fato usa e o que apenas ignora. Me diga qual seção te cansa e eu corto com bisturi, em vez de
-#       adivinhar.
-#     Suíte: 89 testes. 13 seções, RotaPipeline 41, balões 1×, score imutável, 0 except nus.
 #   v3.8 (158ª geração) → AUDITEI O MEU PRÓPRIO CÓDIGO NOVO (e minhas 3 suspeitas erraram) [PERF]
 #     SÉTIMA vez do mesmo prompt. Não fingi novidade. Apliquei o que disse na 153ª: o que rende é auditar
 #     CÓDIGO NOVO — e eu escrevi ~530 linhas desde então (154ª a 157ª). Meu histórico é ruim: plantei bug de
@@ -2937,154 +2799,6 @@ st.markdown("""
         font-size: var(--fs-xs); font-weight: 700;
         display: flex; align-items: center; justify-content: center;
     }
-
-    /* ================================================================================
-       [UX-HIERARQUIA - 159ª geração] O PROBLEMA MEDIDO: 138 caixas coloridas e 193 legendas.
-       A tela "Deslocamento do Candidato" sozinha tem 94 elementos. Isso é a parede de caixas
-       clássica do Streamlit — e o problema não é estético, é COGNITIVO:
-       **quando tudo está destacado, nada está.**
-       Cada insight virou um st.info() saturado. O olho não sabe onde pousar.
-
-       A CURA (uma injeção de CSS, zero linha de lógica tocada, 138 caixas de uma vez):
-       trocar o FUNDO SATURADO por uma BARRA DE ACENTO à esquerda — o padrão de Stripe, Linear,
-       GitHub e Power BI. A cor continua comunicando a severidade, mas para de GRITAR.
-       ================================================================================ */
-    div[data-testid="stAlert"],
-    div[data-testid="stNotification"] {
-        border-radius: var(--r-sm) !important;
-        border: 1px solid var(--sf-3) !important;
-        border-left-width: 3px !important;
-        box-shadow: none !important;
-        padding: var(--sp-3) var(--sp-4) !important;
-        margin-bottom: var(--sp-3) !important;
-    }
-    /* fundo QUASE neutro: a cor vive na barra, não na área inteira */
-    div[data-testid="stAlert"] > div,
-    div[data-testid="stNotification"] > div {
-        background: transparent !important;
-    }
-    div[data-testid="stAlert"] p,
-    div[data-testid="stNotification"] p {
-        font-size: var(--fs-md) !important;
-        line-height: 1.55 !important;
-        color: var(--tx-2) !important;
-    }
-    /* Streamlit distingue os 4 tipos pela cor de fundo herdada; usamos a barra para cada um. */
-    div[data-testid="stAlert"]:has([data-testid="stAlertContentInfo"]),
-    div[data-testid="stNotification"]:has([data-testid="stNotificationContentInfo"]) {
-        background: rgba(52, 152, 219, .07) !important;
-        border-left-color: var(--info) !important;
-    }
-    div[data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"]),
-    div[data-testid="stNotification"]:has([data-testid="stNotificationContentSuccess"]) {
-        background: rgba(46, 204, 113, .07) !important;
-        border-left-color: var(--ok) !important;
-    }
-    div[data-testid="stAlert"]:has([data-testid="stAlertContentWarning"]),
-    div[data-testid="stNotification"]:has([data-testid="stNotificationContentWarning"]) {
-        background: rgba(230, 126, 34, .07) !important;
-        border-left-color: var(--warn) !important;
-    }
-    div[data-testid="stAlert"]:has([data-testid="stAlertContentError"]),
-    div[data-testid="stNotification"]:has([data-testid="stNotificationContentError"]) {
-        background: rgba(231, 76, 60, .09) !important;
-        border-left-color: var(--danger) !important;
-    }
-
-    /* ---------- LEGENDAS: recuam de verdade ----------
-       193 st.caption() competindo com o conteúdo principal. Uma legenda que grita não é legenda.
-       Aqui ela vira o que deveria ser: apoio silencioso, disponível para quem procurar. */
-    div[data-testid="stCaptionContainer"] p,
-    [data-testid="stCaptionContainer"] {
-        font-size: var(--fs-sm) !important;
-        color: var(--tx-3) !important;
-        line-height: 1.5 !important;
-    }
-
-    /* ---------- ESCALA TIPOGRÁFICA REAL ----------
-       Os títulos eram quase todos h5 ("#####"). Sem escala, não há hierarquia:
-       o olho não distingue "seção" de "subseção" de "detalhe". */
-    .main h1 { font-size: var(--fs-2xl) !important; font-weight: 700 !important; color: var(--tx-1) !important;
-               letter-spacing: -.02em; }
-    .main h2 { font-size: var(--fs-xl) !important; font-weight: 600 !important; color: var(--tx-1) !important;
-               margin-top: var(--sp-6) !important; }
-    .main h3 { font-size: var(--fs-lg) !important; font-weight: 600 !important; color: var(--tx-1) !important;
-               margin-top: var(--sp-5) !important; }
-    .main h4 { font-size: var(--fs-md) !important; font-weight: 600 !important; color: var(--tx-2) !important; }
-    /* h5 = o subtítulo de painel que a app mais usa: vira RÓTULO, não título */
-    .main h5 {
-        font-size: var(--fs-sm) !important;
-        font-weight: 700 !important;
-        letter-spacing: .06em;
-        text-transform: uppercase;
-        color: var(--tx-3) !important;
-        margin-top: var(--sp-5) !important;
-        margin-bottom: var(--sp-2) !important;
-        padding-bottom: var(--sp-1);
-        border-bottom: 1px solid var(--sf-3);
-    }
-
-    /* ---------- BOTÃO PRIMÁRIO: um só protagonista por tela ---------- */
-    button[kind="primary"] {
-        border-radius: var(--r-sm) !important;
-        font-weight: 600 !important;
-        box-shadow: var(--sh-1) !important;
-        transition: transform .08s ease, box-shadow .12s ease;
-    }
-    button[kind="primary"]:hover {
-        transform: translateY(-1px);
-        box-shadow: var(--sh-2) !important;
-    }
-
-    /* ================================================================================
-       [UX-HIERARQUIA - 159ª geração] MÉTRICAS VIRAM CARTÕES.
-       Hoje são NÚMEROS FLUTUANDO NO VAZIO — sem moldura, sem agrupamento visual, competindo
-       com o texto ao redor. Em Stripe, Power BI e Azure Portal, um KPI é um CARTÃO: tem borda,
-       tem fundo, tem respiro. Isso não é enfeite — é o que permite ao olho tratar "os números"
-       como um bloco único e escanear a linha inteira de uma vez, em vez de ler item a item.
-       ================================================================================ */
-    div[data-testid="stMetric"] {
-        background: var(--sf-2);
-        border: 1px solid var(--sf-3);
-        border-radius: var(--r-md);
-        padding: var(--sp-3) var(--sp-4);
-        transition: border-color .12s ease;
-    }
-    div[data-testid="stMetric"]:hover { border-color: var(--brand); }
-
-    /* ---------- TABELAS: legíveis de verdade ----------
-       O cabeçalho precisa se separar do corpo (é a âncora do olho ao rolar), e a linha sob o
-       cursor precisa se destacar (é como se rastreia uma linha numa tabela larga sem perder-se). */
-    div[data-testid="stDataFrame"] {
-        border: 1px solid var(--sf-3);
-        border-radius: var(--r-md);
-        overflow: hidden;
-    }
-    div[data-testid="stDataFrame"] thead th {
-        background: var(--sf-3) !important;
-        color: var(--tx-1) !important;
-        font-weight: 600 !important;
-        font-size: var(--fs-sm) !important;
-        letter-spacing: .02em;
-    }
-    div[data-testid="stDataFrame"] tbody tr:hover td {
-        background: var(--sf-2) !important;
-    }
-
-    /* ---------- EXPANDERS: painéis, não acordeões genéricos ---------- */
-    div[data-testid="stExpander"] {
-        border: 1px solid var(--sf-3) !important;
-        border-radius: var(--r-md) !important;
-        background: var(--sf-1);
-        margin-bottom: var(--sp-3);
-    }
-    div[data-testid="stExpander"] summary {
-        font-weight: 600 !important;
-        font-size: var(--fs-md) !important;
-        color: var(--tx-2) !important;
-        padding: var(--sp-3) var(--sp-4) !important;
-    }
-    div[data-testid="stExpander"] summary:hover { color: var(--tx-1) !important; }
 
     /* ---------- MÉTRICAS: hierarquia legível ---------- */
     [data-testid="stMetricValue"] {
@@ -8132,8 +7846,6 @@ _ROTULOS_TABELA = {
     "pct_municipios": "% dos Municípios", "pct_candidatos": "% dos Candidatos",
     "tempo_min_candidato": "Tempo (min-candidato)", "pct_candidatos_polo": "% dos Candidatos",
     "origem_ref": "Origem (referência)",
-    "cod_ibge": "Código IBGE", "metodo_conciliacao": "Método de Conciliação",
-    "Tipo de Distancia": "Tipo de Distância",
     # carga
     "uf_polo": "UF do Polo", "dist_media_km": "Distância Média (km)",
     "dist_max_km": "Distância Máxima (km)",
@@ -8810,88 +8522,6 @@ def _metodologia_indicadores():
     ]
 
 
-
-
-_SENTINELAS_FALHA = {"erro", "erro crítico de processamento", "n/a", "na", "não identificado",
-                     "nao identificado", "falha", "falha de geocodificação", "", "none", "nan"}
-
-
-def _linha_app_valida(row):
-    """[ANTI-FALHA - 161ª geração] O ESTUDO DA APLICAÇÃO produziu um resultado VÁLIDO para esta linha?
-
-    ── O BUG QUE ISTO CORRIGE (e é o pior tipo que existe) ──
-    Quando a rota falha (ex.: município do Marajó, sem estrada até uma ilha), a aplicação grava um FALLBACK:
-        Distancia = 0.0 · Municipio Origem = "Erro" · Municipio Destino = "Erro" · Status da Rota = "Erro"
-    O Comparador (que EU escrevi na 138ª) testava `_dr > 0` na REFERÊNCIA — mas **NUNCA testava `_da > 0`
-    na APLICAÇÃO**. Consequência aritmética:
-        diferença = 250 km (referência) − 0 km (falha) = **250 km de "economia"**
-        ⇒ Vencedor: APLICAÇÃO. ⇒ Economia: 250 km × inscritos.
-    **UMA FALHA DE ROTEAMENTO VIRAVA A MAIOR VITÓRIA POSSÍVEL.**
-
-    Este bug não quebra nada. Ele **MENTE, EM SILÊNCIO, A FAVOR DE QUEM O ESCREVEU** — e o relatório
-    executivo leva essa mentira à gestão. É a falha mais perigosa que um comparador pode ter: ela não
-    produz um erro, produz uma CONCLUSÃO FALSA que parece boa.
-
-    A app SEMPRE SOUBE quais linhas falharam (grava 'Status da Rota' = "Erro"). O Comparador é que ignorava
-    o sinal. Aqui ele passa a ser respeitado. PURO. Retorna (valida: bool, motivo: str)."""
-    def _txt(k):
-        return str(row.get(k, "") or "").strip().lower()
-
-    if _txt("Status da Rota").startswith("erro"):
-        return False, "O estudo da aplicação registrou **ERRO** ao processar esta rota."
-    for _c, _lbl in (("Municipio Origem", "município de origem"),
-                     ("Municipio Destino", "local de aplicação")):
-        if _txt(_c) in _SENTINELAS_FALHA:
-            return False, (f"O estudo da aplicação **não identificou o {_lbl}** "
-                           f"(gravou `{row.get(_c)}`).")
-    try:
-        _d = float(row.get("Distancia"))
-    except (TypeError, ValueError):
-        return False, "O estudo da aplicação não produziu uma **distância numérica** para esta rota."
-    if _d <= 0:
-        return False, ("O estudo da aplicação devolveu **distância ZERO** — nem a rota nem a geodésica "
-                       "puderam ser calculadas (coordenadas ausentes). **Não é comparável**: comparar "
-                       "contra zero faria a aplicação 'vencer' pela distância inteira.")
-    return True, ""
-
-
-def _tipo_de_distancia(row):
-    """[GEO-GARANTIDO - 162ª geração] A distância desta linha é VIÁRIA ou GEODÉSICA?
-
-    Municípios SEM ACESSO RODOVIÁRIO (ilhas do Marajó, calha do Solimões) não têm distância viária — ela
-    NÃO EXISTE. A partir da 162ª eles recebem a GEODÉSICA DE KARNEY (exata, oficial), e não mais zero.
-    Mas o usuário PRECISA SABER disso: comparar uma geodésica contra uma viária é comparar maçã com laranja.
-
-    Este rótulo torna a diferença VISÍVEL na planilha e nos painéis — nunca escondida. PURO."""
-    _f = str(row.get("Fonte Rota") or row.get("fonte_rota") or "").lower()
-    _m = str(row.get("Modo/Acesso") or "").lower()
-    if "karney" in _f or "geodés" in _f or "geodes" in _f or "sem acesso rodoviário" in _f:
-        return "📐 Geodésica (sem acesso rodoviário)"
-    if "fluvial" in _m or "hidro" in _m or "aquavi" in _m:
-        return "🚢 Fluvial/Aquaviário"
-    return "🛣️ Viária"
-
-
-def _diagnostico_estudo_app(df_app):
-    """[ANTI-FALHA - 161ª geração] AUDITORIA GLOBAL DO ESTUDO ANTES DE COMPARAR: quantas linhas do SEU
-    PRÓPRIO estudo falharam? Se muitas, o comparativo inteiro fica comprometido — e o usuário precisa saber
-    disso ANTES de ler qualquer percentual, não depois. PURO."""
-    _ok, _falhas = 0, []
-    for _r in (df_app.to_dict("records") if df_app is not None else []):
-        _v, _m = _linha_app_valida(_r)
-        if _v:
-            _ok += 1
-        else:
-            _falhas.append({"municipio": _r.get("Municipio Origem") or _r.get("Origem"),
-                            "uf": _r.get("UF Origem", ""),
-                            "cod_ibge": _r.get("Cod IBGE Origem", ""),
-                            "motivo": _m})
-    _tot = _ok + len(_falhas)
-    return {"total": _tot, "validas": _ok, "falhas": _falhas,
-            "n_falhas": len(_falhas),
-            "pct_falhas": round(100.0 * len(_falhas) / _tot, 1) if _tot else 0.0}
-
-
 def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
     """[COMPARADOR - 138ª geração] Concilia a saída da aba Locais de Aplicação (df_app) com a base externa
     de referência (df_ref), pela ORIGEM (município de candidatos). HIERARQUIA, do mais forte ao mais fraco:
@@ -8925,7 +8555,7 @@ def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
         idx_mun.setdefault(_chave_mun(_mun), i)
 
     linhas, aud = [], {"conciliados": 0, "por_ibge": 0, "por_mun_uf": 0, "por_mun": 0, "por_fuzzy": 0,
-                       "nao_conciliados": [], "nao_comparaveis": [], "total_ref": 0}
+                       "nao_conciliados": [], "total_ref": 0}
     _chaves_mun = list(idx_mun.keys())
     for r in df_ref.to_dict("records"):
         aud["total_ref"] += 1
@@ -8968,16 +8598,6 @@ def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
             continue
         a = app_rows[i_app]
         aud["conciliados"] += 1
-        # [ANTI-FALHA - 161ª geração] O estudo da APLICAÇÃO produziu resultado válido para esta linha?
-        # Se a rota falhou (Marajó: sem estrada até a ilha), a app gravou Distancia=0 e Municipio="Erro".
-        # Comparar isso contra a referência faria a aplicação "vencer pela distância inteira". É mentira.
-        _val_app, _mot_app = _linha_app_valida(a)
-        if not _val_app:
-            aud.setdefault("nao_comparaveis", []).append({
-                "origem_ref": str(_o_ref), "municipio": a.get("Municipio Origem") or a.get("Origem"),
-                "uf": a.get("UF Origem", ""), "cod_ibge": a.get("Cod IBGE Origem", ""),
-                "metodo_conciliacao": metodo, "motivo": _mot_app})
-            continue
         try:
             _dist_ref = float(_v(r, _mdist)) if _v(r, _mdist) is not None else None
         except (TypeError, ValueError):
@@ -9003,8 +8623,6 @@ def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
             "Balsa Aplicacao": a.get("Balsas", ""),
             "Sinuosidade Aplicacao": a.get("Fator Sinuosidade"),
             "Modo Aplicacao": a.get("Modo/Acesso", ""),
-            # [GEO-GARANTIDO - 162ª geração] o tipo de distância vai JUNTO, sempre visível.
-            "Tipo de Distancia": _tipo_de_distancia(a),
         })
     return linhas, aud
 
@@ -9032,11 +8650,7 @@ def _comparar_alocacoes(linhas, parse_tempo=None):
         d["Mesmo Destino"] = "Sim" if _mesmo else ("Não" if _mesmo is False else "—")
         _insc = float(d.get("Inscritos") or 0)
 
-        # [ANTI-FALHA - 161ª geração] A BARREIRA QUE FALTAVA. Antes: `if ... and _dr > 0:` — testava a
-        # REFERÊNCIA e NUNCA a APLICAÇÃO. Uma distância ZERO (rota falhada) virava economia de 250 km.
-        # Agora AMBAS precisam ser positivas. Cinto e suspensório: a conciliação já barra a linha
-        # inválida, mas esta função é PÚBLICA e pode receber dado de outra origem — ela se protege sozinha.
-        if _dr is not None and _da is not None and _dr > 0 and _da > 0:
+        if _dr is not None and _da is not None and _dr > 0:
             _dif = round(_dr - _da, 2)                    # + = aplicação mais curta
             d["Diferenca Abs (km)"] = _dif
             d["Diferenca Pct (%)"] = round(100.0 * _dif / _dr, 2)
@@ -9200,109 +8814,6 @@ def _fmt_num(x, casas=0):
     except (TypeError, ValueError):
         return str(x)
     return _t.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
-
-
-
-
-def _veredito_comparacao(stats, aud, linhas=None):
-    """[CMP-DIDATICO - 160ª geração] O VEREDITO: responde ANTES de justificar.
-
-    O PROBLEMA QUE ISTO RESOLVE: a aba mostrava **23 KPIs e 8 painéis** — uma PILHA DE FATOS, não uma
-    resposta. O usuário abria e tinha que MONTAR a conclusão sozinho, a partir de números como "economia
-    ponderada: 1.400.000 km-candidato" — uma unidade que a tela nunca explicava.
-
-    Aqui a ordem se inverte, como num parecer técnico de verdade:
-      1. **Posso confiar nisto?**  (se não, nada mais importa — e isso vem PRIMEIRO)
-      2. **Qual é a resposta?**    (uma frase, em português)
-      3. **Qual o tamanho disso?** (traduzido para ESCALA HUMANA: km a menos POR CANDIDATO)
-
-    A tradução para escala humana é o ponto: "1.400.000 km-candidato" não significa nada para ninguém.
-    "**Cada candidato anda 12,4 km a menos**" significa tudo. É o mesmo número, dividido pelo total de
-    candidatos — mas é a diferença entre um dado e um entendimento. PURO."""
-    br = stats.get("brasil", {}) if stats else {}
-    _tot_ref = aud.get("total_ref", 0) if aud else 0
-    _conc = aud.get("conciliados", 0) if aud else 0
-    _fuzzy = aud.get("por_fuzzy", 0) if aud else 0
-    _pct_conc = round(100.0 * _conc / _tot_ref, 1) if _tot_ref else 0.0
-    _nao = len(aud.get("nao_conciliados", []) or []) if aud else 0
-
-    # ---------- 1. CONFIANÇA (vem primeiro: se não dá para confiar, o resto é ruído) ----------
-    if _pct_conc >= 95 and _fuzzy == 0:
-        _conf, _ico_c = "ALTA", "🟢"
-        _conf_txt = (f"**{_fmt_num(_pct_conc, 1)}% dos municípios da referência foram conciliados**, todos por vínculo "
-                     "oficial (código IBGE ou município+UF). Pode confiar nos números abaixo.")
-    elif _pct_conc >= 80:
-        _conf, _ico_c = "MÉDIA", "🟡"
-        _partes = [f"**{_fmt_num(_pct_conc, 1)}% conciliados**"]
-        if _fuzzy:
-            _partes.append(f"**{_fuzzy} vínculo(s) por SIMILARIDADE textual** (não é vínculo oficial — "
-                           "confira-os na Auditoria)")
-        if _nao:
-            _partes.append(f"**{_nao} registro(s) ficaram FORA de todas as estatísticas**")
-        _conf_txt = " · ".join(_partes) + ". Leia os números abaixo com essa ressalva."
-    else:
-        _conf, _ico_c = "BAIXA", "🔴"
-        _conf_txt = (f"Apenas **{_fmt_num(_pct_conc, 1)}%** dos municípios foram conciliados. **Os percentuais abaixo NÃO "
-                     "representam o universo completo** — eles descrevem só a parte que casou. Corrija a "
-                     "planilha (adicione UF ou Código IBGE) antes de tirar conclusões.")
-
-    # ---------- 2. A RESPOSTA (uma frase) ----------
-    _p_app = br.get("pct_venceu_app", 0)
-    _p_ref = br.get("pct_venceu_ref", 0)
-    _p_emp = br.get("pct_empate", 0)
-    _econ = br.get("economia_ponderada_km", 0)
-    _insc = br.get("inscritos", 0)
-
-    if _p_app > _p_ref + 5:
-        _ico, _titulo = "🏆", "A SUA APLICAÇÃO produziu a melhor distribuição"
-        _frase = (f"Ela levou o candidato **mais perto do local de prova** em **{_p_app}% dos municípios**. "
-                  f"A referência venceu em {_p_ref}%, e {_p_emp}% empataram tecnicamente.")
-    elif _p_ref > _p_app + 5:
-        _ico, _titulo = "⚠️", "A BASE DE REFERÊNCIA produziu a melhor distribuição"
-        _frase = (f"Ela levou o candidato mais perto em **{_p_ref}% dos municípios**, contra {_p_app}% da sua "
-                  f"aplicação. Vale investigar antes de adotar a sua distribuição.")
-    else:
-        _ico, _titulo = "⚖️", "As duas soluções são tecnicamente EQUIVALENTES"
-        _frase = (f"Sua aplicação venceu em {_p_app}%, a referência em {_p_ref}%, e {_p_emp}% empataram. "
-                  "Nenhuma é claramente superior no conjunto — a escolha pode se dar por outros critérios.")
-
-    # ---------- 3. ESCALA HUMANA (o número que a pessoa entende) ----------
-    _km_por_cand = round(_econ / _insc, 1) if _insc else 0.0
-    _benef = br.get("candidatos_beneficiados", 0)
-    _prej = br.get("candidatos_prejudicados", 0)
-    _tempo_min = br.get("economia_tempo_ponderada_min", 0)
-
-    _humano = []
-    if _km_por_cand > 0:
-        _humano.append(f"Na prática: **cada candidato anda {_fmt_num(_km_por_cand, 1)} km A MENOS**, em média.")
-    elif _km_por_cand < 0:
-        _humano.append(f"Na prática: **cada candidato anda {_fmt_num(abs(_km_por_cand), 1)} km A MAIS**, em média.")
-    if _benef:
-        _humano.append(f"**{_fmt_num(_benef)} candidatos** ficaram mais perto")
-    if _prej:
-        _humano.append(f"**{_fmt_num(_prej)} ficaram mais longe**")
-    if _tempo_min:
-        _h = abs(_tempo_min) / 60.0
-        _humano.append(f"**{_fmt_num(_h)} horas-candidato** "
-                       f"{'poupadas' if _tempo_min > 0 else 'a mais'}")
-
-    # ---------- 4. O QUE FAZER AGORA ----------
-    _acao = None
-    if _p_ref > 20 and linhas:
-        _piores = sorted([l for l in linhas if (l.get("Diferenca Abs (km)") or 0) < -20],
-                         key=lambda l: float(l.get("Economia km x Inscritos") or 0))[:3]
-        if _piores:
-            _acao = ("🔎 **Onde olhar primeiro:** os municípios em que a sua aplicação levou o candidato "
-                     "MUITO mais longe — " +
-                     ", ".join(f"**{p.get('Origem')}/{p.get('UF', '')}** "
-                               f"({abs(float(p.get('Diferenca Abs (km)') or 0)):.0f} km a mais)"
-                               for p in _piores) +
-                     ". Pode ser escolha logística legítima (evitar balsa) — ou município mal identificado.")
-
-    return {"confianca": _conf, "icone_confianca": _ico_c, "texto_confianca": _conf_txt,
-            "icone": _ico, "titulo": _titulo, "frase": _frase,
-            "escala_humana": _humano, "acao": _acao,
-            "km_por_candidato": _km_por_cand, "pct_conciliado": _pct_conc}
 
 
 def _relatorio_executivo_comparacao(stats, aud, top_municipios=None):
@@ -11673,105 +11184,6 @@ def executar_pipeline_unificado(origem_cru, destino_cru, runner_up_info=None, mo
         
     return res
 
-def _fallback_geodesico_garantido(orig, dest, msg_erro, modo_oficial=None):
-    """[GEO-GARANTIDO - 162ª geração] O FALLBACK QUE NUNCA PERDE INFORMAÇÃO.
-
-    ── O BUG QUE ISTO CORRIGE ──
-    Quando o pipeline lançava exceção (ex.: município do Marajó, onde NÃO EXISTE ESTRADA e o roteador
-    quebra), o handler gravava: Distancia=0.0 · Municipio Origem="Erro" · Municipio Destino="Erro".
-    **Jogava fora TUDO que a aplicação já sabia.** O código IBGE 1504505 tinha resolvido perfeitamente para
-    MELGAÇO/PA, com as coordenadas oficiais em mãos — e mesmo assim gravava "Erro" e zero. Aquele zero
-    virava "vitória por 250 km" no Comparador (a mentira que a 161ª barrou).
-
-    ── A CURA ──
-    Se a identidade do município é conhecida (e ela É — o Código IBGE resolve OFFLINE, em O(1)), então o
-    MUNICÍPIO, a UF e as COORDENADAS OFICIAIS são conhecidos ⇒ a **DISTÂNCIA GEODÉSICA (Karney/WGS-84) é
-    EXATAMENTE calculável**. Não há razão nenhuma para gravar "Erro".
-
-    ── POR QUE A GEODÉSICA É A RESPOSTA CERTA (e não um paliativo) ──
-    Ela é o **PISO FÍSICO** de qualquer deslocamento real: ninguém percorre MENOS que a linha geodésica —
-    nem de barco, nem de avião. Para um município SEM ESTRADA, a distância viária **não existe**; inventá-la
-    seria pior que o zero. A geodésica é a única grandeza que é, ao mesmo tempo, **exata, oficial, sempre
-    disponível e fisicamente honesta**. Ela sai ROTULADA como geodésica — jamais disfarçada de viária — e o
-    Comparador passa a poder VALIDAR a referência contra ela: se a referência diz 100 km e a geodésica é
-    180 km, **a referência é fisicamente impossível**, e isso agora é detectável.
-
-    Devolve uma RotaPipeline COMPLETA e VÁLIDA. 100% offline."""
-    _lat_o = _lon_o = _lat_d = _lon_d = 0.0
-    _mun_o = _mun_d = ""
-    _uf_o = _uf_d = ""
-    _end_o, _end_d = str(orig), str(dest)
-    _fonte_o = _fonte_d = "N/A"
-
-    def _resolver(txt):
-        _t = str(txt or "").strip()
-        _cod = _e_codigo_ibge(_t)
-        if _cod:
-            _it = _indice_ibge_por_codigo().get(_cod)
-            if _it and _it.get("lat"):
-                _m = _titulo_municipio(_it["municipio"])
-                return (float(_it["lat"]), float(_it["lon"]), _m, _it["uf"],
-                        "IBGE (Base Oficial)", f"{_m}, {_it['uf']}, BRASIL")
-        _off = _resolver_municipio_offline(_t)
-        if _off:
-            _m = _titulo_municipio(_off["cidade"])
-            return (float(_off["lat"]), float(_off["lon"]), _m, _off["estado"],
-                    "IBGE (Base Oficial)", f"{_m}, {_off['estado']}, BRASIL")
-        return None
-
-    try:
-        _ro = _resolver(orig)
-        if _ro:
-            _lat_o, _lon_o, _mun_o, _uf_o, _fonte_o, _end_o = _ro
-        _rd = _resolver(dest)
-        if _rd:
-            _lat_d, _lon_d, _mun_d, _uf_d, _fonte_d, _end_d = _rd
-    except Exception as _e:
-        logger.error(f"[GEO-GARANTIDO] Falha ao resolver identidade offline: {_e}")
-
-    _geo, _status_geo = 0.0, "Coordenadas indisponíveis"
-    if _lat_o and _lon_o and _lat_d and _lon_d:
-        try:
-            _geo, _status_geo = calcular_distancia_linha_reta(
-                _lat_o, _lon_o, _lat_d, _lon_d,
-                contexto=f"Fallback geodésico garantido: {orig} -> {dest}")
-        except Exception as _e:
-            logger.error(f"[GEO-GARANTIDO] Falha no cálculo geodésico: {_e}")
-
-    _tem = bool(_geo and _geo > 0)
-    _min = int(round(_geo / 25.0 * 60.0)) if _tem else 0    # 25 km/h: fluvial/misto, conservador
-    _tempo = (f"{_min} min" if _min < 60 else f"{_min // 60} h {_min % 60} min") if _tem else "N/A"
-    _xai = [
-        f"⚠️ **A rota RODOVIÁRIA não pôde ser calculada.** ({msg_erro})",
-        (f"✅ **A identidade territorial FOI resolvida oficialmente:** {_mun_o or '?'}/{_uf_o or '?'} → "
-         f"{_mun_d or '?'}/{_uf_d or '?'}. O Código IBGE e as coordenadas oficiais estavam disponíveis o "
-         "tempo todo — nada aqui é 'Erro'."),
-        (f"📐 **Distância GEODÉSICA (Karney/WGS-84): {_geo:.2f} km.** NÃO é valor viário: é a linha reta "
-         "sobre o elipsoide. Ela é o **PISO FÍSICO** do deslocamento — ninguém percorre menos que isso, "
-         "por nenhum modo." if _tem else
-         "❌ Nem a geodésica foi possível (coordenadas ausentes)."),
-        ("🚢 **Causa provável: município SEM ACESSO RODOVIÁRIO** — ilhas do arquipélago do Marajó, calha do "
-         "Solimões/Purus, Fernando de Noronha. Nenhum roteador rodoviário encontra caminho até uma ilha. "
-         "O deslocamento real é **fluvial ou aéreo** e exige tratamento próprio."),
-    ]
-    return RotaPipeline(
-        distancia=round(_geo, 2), tempo=_tempo, link_rota="N/A", balsas="N/A",
-        dist_linha_reta=round(_geo, 2),
-        fonte_rota="Geodésica de Karney (sem acesso rodoviário)" if _tem else "Falha total",
-        score_rota=40.0 if _tem else 0.0,
-        confianca_origem="ALTA" if _mun_o else "BAIXA", score_num_origem=100.0 if _mun_o else 0.0,
-        distrito_origem="", municipio_origem=_mun_o or "Não identificado",
-        fonte_geo_origem=_fonte_o, endereco_oficial_origem=_end_o,
-        confianca_destino="ALTA" if _mun_d else "BAIXA", score_num_destino=100.0 if _mun_d else 0.0,
-        distrito_destino="", municipio_destino=_mun_d or "Não identificado",
-        fonte_geo_destino=_fonte_d, endereco_oficial_destino=_end_d,
-        lat_origem=_lat_o, lon_origem=_lon_o, lat_destino=_lat_d, lon_destino=_lon_d,
-        tempo_geocoding=0.0, tempo_roteamento=0.0, tempo_total=0.0,
-        xai_origem=_xai, xai_destino=_xai,
-        motivo_roteamento=("Rota RODOVIÁRIA indisponível (município provavelmente sem acesso por estrada). "
-                           f"Aplicada a distância GEODÉSICA oficial de Karney: {_geo:.2f} km — exata, "
-                           "porém NÃO viária."),
-        link_embed="", status_linha_reta=_status_geo)
 def embrulhar_task_paralela(item, modo_oficial=None):
     # [CONCORRENCIA - 147ª geração] `modo_oficial` chega por ARGUMENTO, capturado na thread principal.
     # Ler st.session_state aqui dentro seria um erro: workers não têm contexto de sessão do Streamlit.
@@ -11789,24 +11201,9 @@ def embrulhar_task_paralela(item, modo_oficial=None):
             res = tuple(list(res) + ["N/A"] * (35 - len(res)))
         return par_id, res
     except Exception as e: 
-        # [GEO-GARANTIDO - 162ª geração] NUNCA MAIS "Erro" e ZERO. O handler antigo jogava fora TUDO que a
-        # app já sabia: o Código IBGE tinha resolvido, as coordenadas oficiais estavam em mãos — e ele
-        # gravava Municipio="Erro", Distancia=0. Aquele zero virava "vitória por 250 km" no Comparador
-        # (a mentira que a 161ª barrou). Agora: resolve a identidade OFFLINE (O(1), sempre funciona) e
-        # calcula a GEODÉSICA DE KARNEY — exata, oficial, e o PISO FÍSICO de qualquer deslocamento.
-        # Rotulada como geodésica, JAMAIS disfarçada de viária.
         msg_erro = f"FALHA INTERNA: {str(e)}"
-        logger.error(f"[GEO-GARANTIDO] Pipeline falhou em ({orig} → {dest}): {e}. "
-                     "Aplicando fallback geodésico garantido.")
-        try:
-            return par_id, _fallback_geodesico_garantido(orig, dest, msg_erro, modo_oficial)
-        except Exception as _e2:
-            logger.error(f"[GEO-GARANTIDO] Até o fallback geodésico falhou: {_e2}")
-            fallback = (0.0, "N/A", "N/A", "N/A", 0.0, f"FALHA TOTAL: {msg_erro}", 0, "BAIXA", 0,
-                        "", "Não identificado", "N/A", str(orig), "BAIXA", 0, "", "Não identificado",
-                        "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                        [msg_erro], [msg_erro], msg_erro, "N/A", "Falha total", "N/A", 0.0, "N/A", "N/A")
-            return par_id, fallback
+        fallback = (0.0, "0 min", "Link Indisponível", "Não", 0.0, msg_erro, 0, "BAIXA", 0, "Erro", "Erro", "N/A", str(orig), "BAIXA", 0, "Erro", "Erro", "N/A", str(dest), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, [msg_erro], [msg_erro], msg_erro, "N/A", "Falha de Processamento Multithread", "N/A", 0.0, "N/A", "N/A")
+        return par_id, fallback
 
 def rodar_pipeline_lote(df, pares_unicos, tarefas_priorizadas, nome_operador, progress_bar, status_container, runner_up_map=None, progress_offset=0.0, progress_scale=1.0):
     resultados_unicos = {}
@@ -17392,32 +16789,7 @@ if _secao == _SECOES[3]:   # tab_comparador
             st.warning("⚠️ Rode primeiro a aba **🎯 Locais de Aplicação**. É o resultado dela que será comparado "
                        "com a sua base de referência.")
         if _tem_alo:
-            # [ANTI-FALHA - 161ª geração] DIAGNÓSTICO DO PRÓPRIO ESTUDO, antes de comparar qualquer coisa.
-            # Se linhas do SEU estudo falharam (rota impossível: ilha do Marajó, calha do Solimões), elas
-            # NÃO podem entrar na comparação — e você precisa saber disso ANTES de ler um percentual.
-            _dg = _diagnostico_estudo_app(_df_alo_cmp)
-            if _dg["n_falhas"] == 0:
-                st.success(f"✅ Resultado da aplicação carregado: **{len(_df_alo_cmp)} municípios**, "
-                           "todos com rota válida.")
-            if _dg["n_falhas"] > 0:
-                st.error(
-                    f"🔴 **{_dg['n_falhas']} de {_dg['total']} municípios ({_dg['pct_falhas']}%) do SEU ESTUDO "
-                    "falharam** — a rota não foi calculada para eles.\n\n"
-                    "**Eles NÃO entram na comparação**, e isso é deliberado: a aplicação gravou "
-                    "`Distância = 0` nessas linhas. Compará-las contra a referência faria a sua aplicação "
-                    "**“vencer” pela distância inteira, por uma rota que nem existe** — inflando "
-                    "artificialmente o seu próprio desempenho. Eles vão para a **auditoria**, com o motivo.")
-                # [UI-ESTAVEL] rótulo ESTÁTICO — a contagem vive no corpo (padrão da 132ª; a suíte me pegou).
-                with st.expander("🔎 Quais municípios falharam, e por quê", expanded=False):
-                    st.caption(f"**{_dg['n_falhas']} município(s)** com rota não calculada.")
-                    st.dataframe(_rotular_colunas(pd.DataFrame(_dg["falhas"])),
-                                 use_container_width=True, hide_index=True, height=260)
-                    st.caption(
-                        "💡 **A causa mais comum:** municípios **sem acesso rodoviário** — ilhas do "
-                        "arquipélago do **Marajó**, calha do **Solimões/Purus**, Fernando de Noronha. O "
-                        "Código IBGE deles é reconhecido perfeitamente; o que **não existe é a ESTRADA**. "
-                        "Para incluí-los no estudo, é preciso tratar o deslocamento **fluvial** à parte — "
-                        "nenhum roteador rodoviário vai encontrar caminho até uma ilha.")
+            st.success(f"✅ Resultado da aplicação carregado: **{len(_df_alo_cmp)} municípios** de origem.")
     # [CMP-DOC - 149ª geração] DOCUMENTAÇÃO ANTES DO UPLOAD. O usuário não pode adivinhar quais colunas
     # trazer. Container fixo, rótulo estático (padrão da 132ª).
     with st.expander("📋 Quais colunas a planilha precisa ter? (leia antes de subir)", expanded=False):
@@ -17593,104 +16965,7 @@ if _secao == _SECOES[3]:   # tab_comparador
             _aud_c = _res_c["aud"]
             _br = _res_c["stats"]["brasil"]
             st.divider()
-
-            # [CMP-DIDATICO - 160ª geração] O VEREDITO VEM PRIMEIRO. A aba mostrava 23 KPIs e 8 painéis —
-            # uma PILHA DE FATOS, não uma resposta. O usuário tinha que montar a conclusão sozinho, a partir
-            # de números como "1.400.000 km-candidato" — unidade que a tela NUNCA explicava.
-            # Agora a ordem é a de um parecer técnico: (1) posso confiar? (2) qual a resposta? (3) qual o
-            # tamanho, em escala HUMANA?
-            _vd = _veredito_comparacao(_res_c["stats"], _aud_c, _cmp)
-
-            st.markdown(f"## {_vd['icone']} {_vd['titulo']}")
-            st.markdown(_vd["frase"])
-            if _vd["escala_humana"]:
-                st.markdown(" · ".join(_vd["escala_humana"]))
-
-            _cx = st.success if _vd["confianca"] == "ALTA" else (
-                st.warning if _vd["confianca"] == "MÉDIA" else st.error)
-            _cx(f"{_vd['icone_confianca']} **Confiança desta comparação: {_vd['confianca']}** — "
-                f"{_vd['texto_confianca']}")
-            if _vd["acao"]:
-                st.info(_vd["acao"])
-
-            # [GEO-GARANTIDO - 162ª geração] AVISO quando há linhas GEODÉSICAS na comparação.
-            _n_geo = sum(1 for l in _cmp if "Geodésica" in str(l.get("Tipo de Distancia", "")))
-            with st.container():
-                if _n_geo:
-                    st.warning(
-                        f"📐 **{_n_geo} município(s) estão sendo comparados por distância GEODÉSICA**, não "
-                        "viária — eles **não têm acesso rodoviário** (ilhas do Marajó, calha do "
-                        "Solimões/Purus). A rota por estrada **não existe**; inventá-la seria pior que "
-                        "omiti-la.\n\n"
-                        "**O que fizemos:** a plataforma calcula a **geodésica de Karney (WGS-84)** a partir "
-                        "das **coordenadas oficiais do IBGE** — exata (erro < 1 mm) e sempre disponível. Ela "
-                        "é o **PISO FÍSICO** do deslocamento: ninguém percorre menos que isso, por nenhum "
-                        "modo.\n\n"
-                        "⚠️ **Leia com atenção:** se a sua base de referência usou uma distância **viária** "
-                        "para esses municípios, a comparação ali é **maçã com laranja**. Confira a coluna "
-                        "**Tipo de Distância** na tabela. (Na prática, bases de referência costumam usar "
-                        "linha reta nesses casos — pelo mesmo motivo que nós.)")
-
-            with st.expander("📖 Como ler esta análise (leia uma vez, entenda para sempre)", expanded=False):
-                st.markdown("""
-                #### 🧮 O que é “km-candidato”?
-
-                É a unidade central de tudo aqui — e é simples:
-
-                > **km-candidato = quilômetros economizados × número de candidatos**
-
-                **Por quê?** Porque poupar 10 km para **5.000 candidatos** (= 50.000 km-candidato) importa
-                muito mais que poupar 200 km para **10 candidatos** (= 2.000 km-candidato). Contar
-                *municípios* trataria os dois como iguais. Contar *km-candidato* mede o que realmente
-                acontece com **gente**.
-
-                💡 **Traduza sempre:** divida o total pelo número de candidatos e você tem
-                **“quantos km a menos cada candidato anda”** — que é o número que uma pessoa entende.
-
-                #### ⚖️ Por que “empate técnico”?
-
-                Diferenças abaixo de **1 km** são **ruído de geocodificação**, não vitória. Duas coordenadas
-                do mesmo município podem variar centenas de metros só por causa do geocodificador. Um
-                comparador que anuncia vitória por 300 metros está **vendendo ilusão** — este não anuncia.
-
-                #### 🔗 O que é “conciliar”?
-
-                É casar cada município da **sua planilha de referência** com o mesmo município do **seu
-                estudo**. A plataforma tenta, nesta ordem:
-
-                | Ordem | Método | Confiança |
-                |---|---|---|
-                | 1º | **Código IBGE** | 🟢 Oficial. Inquestionável. |
-                | 2º | **Município + UF** | 🟢 Oficial. |
-                | 3º | **Município** (sem UF) | 🟡 Arriscado se houver homônimo. |
-                | 4º | **Similaridade textual** | 🔴 **Não é oficial.** Confira na Auditoria. |
-                | — | **Não conciliado** | ⚫ Fica **FORA** de todas as estatísticas. |
-
-                ⚠️ **Se muitos registros não conciliaram, os percentuais não representam o universo completo.**
-                Por isso a **Confiança** aparece antes de qualquer número.
-
-                #### 🧭 Em que ordem ler os painéis
-
-                | # | Painel | Responde |
-                |---|---|---|
-                | 1 | **Veredito** (acima) | Quem venceu, e posso confiar? |
-                | 2 | **Painel Executivo** | Qual o tamanho do ganho? |
-                | 3 | **Estatística da diferença** | O ganho é parecido em todo lugar, ou concentrado? |
-                | 4 | **Pareto** | Quais poucos municípios explicam o resultado? |
-                | 5 | **Faixas** | Onde a referência ganhou de mim, e por quanto? |
-                | 6 | **Auditoria** | O que ficou de fora, e por quê? |
-                | 7 | **Relatório Executivo** | Tudo isso, escrito para apresentar à gestão. |
-
-                #### 🔴 Números NEGATIVOS: o que significam
-
-                Sempre a mesma convenção: **negativo = a SUA aplicação levou o candidato MAIS LONGE**.
-                Nas tabelas, esses valores aparecem **em vermelho**. Não são necessariamente erro — podem ser
-                escolha logística legítima (evitar uma balsa, por exemplo). Mas **merecem uma olhada**.
-                """)
-
             st.markdown("### 📊 Painel Executivo da Comparação")
-            st.caption("Os 4 números de cima respondem **“quem venceu”**. Os 4 de baixo respondem "
-                       "**“qual o tamanho disso”**.")
             _k1, _k2, _k3, _k4 = st.columns(4)
             _k1.metric("Aplicação venceu", f"{_br['pct_venceu_app']}%",
                        help="Municípios em que o deslocamento da aplicação é MENOR (diferença ≥ 1 km).")
@@ -17710,51 +16985,28 @@ if _secao == _SECOES[3]:   # tab_comparador
                 try:
                     _gc1, _gc2 = st.columns(2)
                     with _gc1:
-                        st.markdown("**Quem venceu (contagem de municípios)**")
+                        st.markdown("**Quem venceu (por município)**")
                         _vc = _df_c["Vencedor Distancia"].value_counts()
                         st.bar_chart(_vc)
-                        st.caption(
-                            "📖 **Como ler:** conta **MUNICÍPIOS**, não candidatos. Um município com 5 mil "
-                            "candidatos conta o mesmo que um com 10 aqui — por isso este gráfico responde "
-                            "*“onde”*, e o KPI **Economia ponderada** responde *“quanto”*.")
-                        st.caption(f"🔎 **O que este gráfico diz:** a aplicação venceu em "
+                        st.caption(f"Interpretação: a aplicação levou o candidato mais perto em "
                                    f"**{int(_vc.get('Aplicação', 0))}** município(s); a referência em "
-                                   f"**{int(_vc.get('Referência', 0))}**; **{int(_vc.get('Empate', 0))}** "
-                                   "**empataram** (diferença < 1 km — ruído de geocodificação, não vitória).")
+                                   f"**{int(_vc.get('Referência', 0))}**; **{int(_vc.get('Empate', 0))}** empataram "
+                                   "(diferença < 1 km, dentro do ruído).")
                     with _gc2:
                         st.markdown("**Economia ponderada por UF (km-candidato)**")
                         _eu = (_df_c.groupby("UF")["Economia km x Inscritos"].sum().sort_values(ascending=False))
                         st.bar_chart(_eu)
                         if len(_eu):
-                            _neg = _eu[_eu < 0]
-                            st.caption(
-                                "📖 **Como ler:** cada barra é uma UF. **Altura = km-candidato poupados** "
-                                "(km economizados × nº de candidatos). "
-                                "**Barra para CIMA = a sua aplicação ganhou** ali. "
-                                "**Barra para BAIXO = a referência ganhou** — a sua levou o candidato mais longe.")
-                            st.caption(
-                                f"🔎 **O que este gráfico diz:** **{_eu.index[0]}** é onde você mais ganha "
-                                f"(**{_fmt_num(_eu.iloc[0])} km-candidato**). "
-                                + (f"⚠️ **{len(_neg)} UF(s) com barra negativa** — comece a revisão por "
-                                   f"**{_neg.index[0]}** ({_fmt_num(abs(_neg.iloc[0]))} km-candidato a mais)."
-                                   if len(_neg) else
-                                   "✅ **Nenhuma UF com barra negativa** — você ganha ou empata em todo lugar."))
+                            st.caption(f"Interpretação: **{_eu.index[0]}** é a UF de maior ganho "
+                                       f"(**{_fmt_num(_eu.iloc[0])} km-candidato**). Barras negativas indicam UFs onde "
+                                       "a distribuição da aplicação levou o candidato **mais longe** — revise-as.")
                     st.markdown("**Distribuição da diferença de distância (km) — positivo = aplicação mais curta**")
                     _hist = pd.to_numeric(_df_c["Diferenca Abs (km)"], errors="coerce").dropna()
                     if len(_hist):
                         st.bar_chart(_hist.value_counts(bins=min(20, max(3, len(_hist)))).sort_index())
-                        _n_neg = int((_hist < -1).sum())
-                        st.caption(
-                            "📖 **Como ler:** o eixo horizontal é a **diferença de distância** (referência − "
-                            "sua aplicação). **Zero fica no meio.** A altura é **quantos municípios** caem "
-                            "naquela faixa. **Direita de zero = você ganhou. Esquerda = você perdeu.**")
-                        st.caption(
-                            f"🔎 **O que este gráfico diz:** a mediana é **{_fmt_num(_hist.median(), 1)} km**. "
-                            + (f"⚠️ **{_n_neg} município(s) à esquerda de zero** — nesses, a sua aplicação levou o "
-                               "candidato mais longe. Uma **cauda longa à esquerda** costuma ser sintoma de "
-                               "**município mal identificado** (homônimo), não de escolha logística."
-                               if _n_neg else
-                               "✅ Praticamente nada à esquerda de zero — você não piora quase ninguém."))
+                        st.caption(f"Interpretação: mediana de **{_fmt_num(_hist.median(), 1)} km**. A massa à direita "
+                                   "de zero é o ganho da aplicação; à esquerda, a perda. Uma cauda longa negativa "
+                                   "merece revisão manual (pode ser município homônimo mal identificado).")
                 except Exception as _e_g:
                     logger.error(f"[COMPARADOR] Falha nos gráficos: {_e_g}")
 
@@ -17771,12 +17023,6 @@ if _secao == _SECOES[3]:   # tab_comparador
                             cols_negativo_ruim=["Economia (km-candidato)"]),
                             use_container_width=True, hide_index=True)
                         st.bar_chart(_df_ef.set_index("faixa")["candidatos"])
-                        st.caption(
-                            "📖 **Como ler:** cada linha é uma FAIXA de diferença, **com sinal**. "
-                            "“**Aplicação melhor: 20 a 50 km**” = municípios onde a SUA solução levou o "
-                            "candidato entre 20 e 50 km mais perto. “**Referência melhor**” = o contrário. "
-                            "O sinal existe de propósito: **60 km a favor e 60 km contra NÃO são a mesma coisa**, "
-                            "e uma faixa sem sinal esconderia exatamente o que interessa.")
                         _fav = [f for f in _ef if f["faixa"].startswith("Aplicação melhor")]
                         _con = [f for f in _ef if f["faixa"].startswith("Referência melhor")]
                         _c_fav = sum(f["candidatos"] for f in _fav)
@@ -17792,8 +17038,7 @@ if _secao == _SECOES[3]:   # tab_comparador
                     logger.error(f"[COMPARADOR] Falha no painel de faixas: {_e_ef}")
 
             with st.expander("📋 Comparação município a município", expanded=False):
-                _cols_show = [c for c in ["Origem", "UF", "Inscritos", "Tipo de Distancia",
-                                          "Destino Referencia", "Destino Aplicacao",
+                _cols_show = [c for c in ["Origem", "UF", "Inscritos", "Destino Referencia", "Destino Aplicacao",
                                           "Mesmo Destino", "Distancia Referencia", "Distancia Aplicacao",
                                           "Diferenca Abs (km)", "Diferenca Pct (%)", "Faixa de Diferenca",
                                           "Vencedor Distancia", "Economia km x Inscritos", "Metodo Conciliacao",
@@ -17822,29 +17067,15 @@ if _secao == _SECOES[3]:   # tab_comparador
                         _e7.metric("Pior caso", f"{_sd['minimo']} km")
                         _e8.metric("Melhor caso", f"{_sd['maximo']} km")
                         _cv = _sd.get("coef_variacao") or 0
-                        st.caption(
-                            "📖 **Como ler cada número:**\n\n"
-                            "· **Mediana** — o município **TÍPICO**. Metade ganha mais que isso, metade menos. "
-                            "É a mais honesta.\n\n"
-                            "· **Média** — pode MENTIR. Uns poucos municípios com ganho enorme puxam a média "
-                            "para cima e escondem que a maioria mudou pouco.\n\n"
-                            "· **Q1 e Q3** — a **metade do meio**. Metade dos municípios cai entre esses dois "
-                            "valores. Se estão longe um do outro, o resultado é irregular.\n\n"
-                            "· **Coeficiente de variação (CV)** — o número mais importante daqui. Ele diz se o "
-                            "ganho é **parecido em todo lugar** (CV baixo) ou **concentrado em poucos** (CV alto). "
-                            "Duas comparações com a MESMA MÉDIA podem contar histórias OPOSTAS — o CV é o que "
-                            "as separa.")
-                        _leitura = ("🟢 **Ganho HOMOGÊNEO** (CV baixo): a sua aplicação melhora o deslocamento "
-                                    "em praticamente todo o país, de forma parecida. A melhoria é "
-                                    "**ESTRUTURAL** — não depende de poucos casos."
+                        _leitura = ("**ganho HOMOGÊNEO**: a aplicação melhora o deslocamento em praticamente "
+                                    "todo o país, de forma parecida. A melhoria é ESTRUTURAL."
                                     if _cv < 1.0 else
-                                    "🟡 **Ganho CONCENTRADO** (CV alto): poucos municípios têm ganho grande e a "
-                                    "maioria muda pouco. A melhoria é **PONTUAL** — vá ao **Pareto** abaixo "
-                                    "para descobrir EXATAMENTE em quais municípios ela acontece.")
-                        st.info(f"🔎 **O que estes números dizem:** a média é **{_fmt_num(_sd['media'], 1)} km**, "
-                                f"mas o município TÍPICO (mediana) tem **{_fmt_num(_sd['mediana'], 1)} km**. "
-                                f"Metade dos municípios está entre **{_fmt_num(_sd['q1'], 1)}** e "
-                                f"**{_fmt_num(_sd['q3'], 1)} km**. O CV é **{_fmt_num(_cv, 2)}**.\n\n{_leitura}")
+                                    "**ganho CONCENTRADO**: poucos municípios têm ganho grande e a maioria muda "
+                                    "pouco. A melhoria é PONTUAL — veja o Pareto abaixo para saber ONDE.")
+                        st.info(f"📖 **Como ler:** a média é **{_sd['media']} km**, mas o município TÍPICO "
+                                f"(mediana) tem **{_sd['mediana']} km**. Metade dos municípios está entre "
+                                f"**{_sd['q1']}** e **{_sd['q3']} km**. O coeficiente de variação é "
+                                f"**{_cv}** → {_leitura}")
                 except Exception as _e_sd:
                     logger.error(f"[CMP-STATS] Falha na distribuição: {_e_sd}")
 
@@ -17854,11 +17085,6 @@ if _secao == _SECOES[3]:   # tab_comparador
                     if not _pa["itens"]:
                         st.caption("Nenhum município com ganho positivo.")
                     if _pa["itens"]:
-                        st.caption(
-                            "📖 **O que é Pareto:** é a regra do “poucos vitais, muitos triviais”. A tabela "
-                            "ordena os municípios do **maior ganho para o menor** e mostra o **% acumulado**. "
-                            "A pergunta que ela responde: **quantos municípios explicam 80% de toda a economia?** "
-                            "Se forem poucos, o resultado é PONTUAL (foque neles). Se forem muitos, é ESTRUTURAL.")
                         st.success(f"🎯 **{_pa['n_para_80pct']} municípios** "
                                    f"({_pa['pct_municipios_para_80']}% dos {_pa['n_municipios_com_ganho']} com ganho) "
                                    f"concentram **80% de toda a economia** "
@@ -17885,35 +17111,12 @@ if _secao == _SECOES[3]:   # tab_comparador
                 _a3.metric("Por similaridade", _aud_c["por_fuzzy"],
                            help="Vínculos por fuzzy matching — NÃO são oficiais. Confira-os.")
                 _a4.metric("Não conciliados", len(_aud_c["nao_conciliados"]))
-                st.caption(
-                    "📖 **O que cada número significa:** **Código IBGE** e **Município+UF** são vínculos "
-                    "**OFICIAIS** — pode confiar. **Similaridade** é a plataforma ADIVINHANDO por parecença "
-                    "textual: **não é oficial**, e cada um desses merece uma conferida. **Não conciliados** "
-                    "ficam **FORA de todas as estatísticas** — se forem muitos, os percentuais do painel "
-                    "**não representam o universo completo**.")
                 if _aud_c["nao_conciliados"]:
                     st.warning(f"⚠️ **{len(_aud_c['nao_conciliados'])} registro(s) da referência ficaram FORA "
                                "de todas as estatísticas.** Nenhum foi descartado em silêncio — veja o motivo:")
                     st.dataframe(pd.DataFrame(_aud_c["nao_conciliados"]), use_container_width=True, hide_index=True)
                 if not _aud_c["nao_conciliados"]:
                     st.success("✅ Todos os registros da referência foram conciliados.")
-
-                # [ANTI-FALHA - 161ª geração] CONCILIADO ≠ COMPARÁVEL. São coisas DIFERENTES, e confundi-las
-                # foi a origem do bug: uma linha pode conciliar perfeitamente (Código IBGE, score 100) e
-                # ainda assim ser INCOMPARÁVEL — porque o estudo da aplicação FALHOU nela.
-                _ncomp = _aud_c.get("nao_comparaveis") or []
-                if _ncomp:
-                    st.error(
-                        f"⛔ **{len(_ncomp)} município(s) foram CONCILIADOS mas NÃO são COMPARÁVEIS.**\n\n"
-                        "Eles casaram perfeitamente com a referência (muitos por **Código IBGE, score 100**) "
-                        "— mas o **estudo da aplicação falhou** neles. Comparar contra uma distância zero "
-                        "faria a aplicação vencer pela distância inteira. **Ficam fora das estatísticas**, "
-                        "com o motivo registrado.")
-                    st.dataframe(_rotular_colunas(pd.DataFrame(_ncomp)),
-                                 use_container_width=True, hide_index=True, height=240)
-                if not _ncomp:
-                    st.success("✅ Todos os municípios conciliados também são **comparáveis** (o estudo da "
-                               "aplicação produziu rota válida para todos).")
 
             st.markdown("### 📝 Relatório Executivo (gerado automaticamente)")
             _rel_c = _res_c.get("relatorio") or _relatorio_executivo_comparacao(
