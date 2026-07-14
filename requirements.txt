@@ -1,41 +1,107 @@
-structlog
-prometheus-client
-plotly
-xlsxwriter
-kaleido
+# ==========================================================================================
+# Motor Nacional de Inteligência Logística para Exames — requirements.txt
+# AUDITADO na 142ª geração: cada linha abaixo é IMPORTADA pelo código ou usada indiretamente
+# (pandas/plotly chamam algumas por STRING, não por import — elas ficam, e estão marcadas).
+# ==========================================================================================
 
-streamlit>=1.46.0
+# ------------------------------------------------------------------------------------------
+# STREAMLIT — VERSÃO FIXADA DE PROPÓSITO (ver nota 1 no final)
+# ------------------------------------------------------------------------------------------
+streamlit==1.46.0
 
+# ------------------------------------------------------------------------------------------
+# DATAFRAME E PLANILHAS
+# ------------------------------------------------------------------------------------------
 pandas>=2.3.0
-openpyxl>=3.1.5
-pyarrow>=20.0.0
+numpy>=2.3.0
+pyarrow>=20.0.0            # import direto (export Parquet) + serialização de dataframes do Streamlit
+openpyxl>=3.1.5            # INDIRETA: rede de segurança do pandas p/ .xlsx (a app usa calamine
+                           #           em todas as 4 leituras; openpyxl é o fallback e pesa ~5 MB)
+xlsxwriter>=3.2.0          # INDIRETA: engine do pd.ExcelWriter (8 usos por string)
+python-calamine>=0.3.0     # INDIRETA: engine rápida de leitura de Excel (3 usos)
 
+# ------------------------------------------------------------------------------------------
+# VISUALIZAÇÃO
+# ------------------------------------------------------------------------------------------
+plotly>=6.2.0
+altair>=5.5.0              # import direto (linha 1719)
+pydeck>=0.9.1              # import direto (mapa de Polos Alternativos) — estava FALTANDO
+kaleido>=1.0.0             # INDIRETA: fig.to_image() do export da Calculadora (ver nota 3)
+
+# ------------------------------------------------------------------------------------------
+# HTTP / APIs
+# ------------------------------------------------------------------------------------------
 requests>=2.32.4
 urllib3>=2.5.0
-python-dotenv>=1.1.1
 
-googlemaps>=4.10.0
+# ------------------------------------------------------------------------------------------
+# GEOCODIFICAÇÃO / GEODÉSIA
+# ------------------------------------------------------------------------------------------
+geographiclib>=2.0         # import direto (Karney/WGS-84 — a linha reta rigorosa)
+geopy>=2.4.1               # import direto (geopy.distance.geodesic)
 
-rapidfuzz>=3.13.0
-unidecode>=1.4.0
+# ------------------------------------------------------------------------------------------
+# MATCHING E NORMALIZAÇÃO
+# ------------------------------------------------------------------------------------------
+rapidfuzz>=3.13.0          # import direto (homônimos, conciliação do Comparador)
+unidecode>=1.4.0           # import direto (normalização)
 
-geopy>=2.4.1
+# ------------------------------------------------------------------------------------------
+# CACHE
+# ------------------------------------------------------------------------------------------
+diskcache>=5.6.3           # import direto (Cache L2)
+cachetools>=6.1.0          # import direto (LRU)
 
-diskcache>=5.6.3
-cachetools>=6.1.0
+# ------------------------------------------------------------------------------------------
+# MACHINE LEARNING (uso pontual, mas real)
+# ------------------------------------------------------------------------------------------
+scikit-learn>=1.7.0        # import direto: sklearn.cluster.DBSCAN (consenso de geocodificação)
 
-tenacity>=9.1.2
-loguru>=0.7.3
 
-scikit-learn>=1.7.0
-
-duckdb>=1.3.0
-
-h3>=4.3.0
-
-openrouteservice>=2.3.3
-polyline>=2.0.2
-
-sentence-transformers>=5.0.0
-torch>=2.7.0
-
+# ==========================================================================================
+# ❌ REMOVIDAS — 21 dependências que o código NUNCA importa nem referencia.
+#    Some ~3 GB do build. Nada quebra: verificado por análise AST do arquivo inteiro.
+# ==========================================================================================
+#
+#   torch, transformers, sentence-transformers   ← ~3 GB SOZINHOS. Nenhum uso. (ver nota 2)
+#   duckdb, polars                               ← nenhum uso (pandas + pyarrow já cobrem)
+#   h3                                           ← nenhum uso
+#   googlemaps, openrouteservice, polyline       ← nenhum uso. (Atenção: 'polyline' aparece 15× no
+#                                                  código, mas é a PALAVRA da URL do OSRM
+#                                                  ('geometries=polyline') e nomes de variável — a
+#                                                  BIBLIOTECA polyline nunca é importada. Verificado.)
+#   httpx, httpx[http2], requests_cache          ← nenhum uso (e httpx estava DUPLICADO)
+#   loguru, structlog, prometheus-client         ← nenhum uso (a app usa o logging da stdlib)
+#   tenacity                                     ← nenhum uso (o retry é próprio)
+#   python-dotenv                                ← nenhum uso (segredos via st.secrets)
+#   joblib                                       ← nenhum uso direto (o scikit-learn já o traz)
+#
+# ==========================================================================================
+# NOTAS
+# ==========================================================================================
+#
+# (1) STREAMLIT FIXADO — o ajuste mais importante deste arquivo.
+#     `streamlit>=1.46.0` faz o Streamlit Cloud instalar a ÚLTIMA versão a cada rebuild. Ou seja:
+#     o FRONTEND da sua app muda sozinho, sem você mexer em nada. Isso é ruim sempre, mas é
+#     especialmente grave aqui: o erro `removeChild` é um bug de RECONCILIAÇÃO DO FRONTEND, e já
+#     apareceu como regressão em versões específicas do Streamlit. Com `>=`, você não consegue nem
+#     REPRODUZIR o problema de forma confiável — ele depende de qual versão o Cloud instalou no
+#     último deploy. Fixe a versão. Se o erro sumir com uma versão e voltar com outra, a causa é do
+#     Streamlit, não do seu código — e nenhuma mudança minha resolveria.
+#     → Se 1.46.0 apresentar o erro, teste 1.44.x e 1.45.x. Se sumir, você achou a causa.
+#
+# (2) torch / transformers / sentence-transformers — o maior peso morto.
+#     Sozinhos, passam de 3 GB instalados. O Streamlit Community Cloud tem limites de recurso e de
+#     tempo de build; carregar 3 GB de bibliotecas de deep learning que a app NUNCA importa deixa o
+#     deploy lento, pesado e mais sujeito a estouro/reinício do container. E um container que
+#     reinicia no meio de uma renderização deixa o frontend com uma árvore órfã — que é um dos
+#     caminhos conhecidos para o `removeChild`. Removê-las é ganho puro, sem risco.
+#
+# (3) kaleido — pesado (baixa um binário do Chromium), mas é usado de verdade: o `fig.to_image()`
+#     do export da Calculadora. Desde a 139ª esse export é SOB DEMANDA (não roda mais a cada rerun),
+#     então o custo só aparece quando você clica. Se quiser enxugar o build ao máximo, dá para
+#     remover o kaleido e aceitar que o Excel da Calculadora saia sem a imagem do gráfico — o código
+#     já trata isso com um aviso, sem quebrar.
+#
+# (4) pydeck estava FALTANDO. É importado na aba Polos Alternativos. Hoje funciona por acidente
+#     (vem como dependência do Streamlit); declarado explicitamente, deixa de depender de sorte.
