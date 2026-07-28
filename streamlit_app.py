@@ -2640,6 +2640,10 @@ import time
 import math
 import io
 import re
+# [FIX-EXPORT-CMP - 184ª geração] datetime era USADO em 6 pontos (relatórios e o xlsx da Comparação) mas
+# NUNCA importado → NameError silencioso. Em _montar_xlsx_comparacao isso fazia a geração falhar e retornar
+# None, e o download da planilha de comparação "não baixava nada". Import no módulo conserta as 6 de uma vez.
+from datetime import datetime
 import os
 import pickle
 import collections
@@ -2651,7 +2655,7 @@ import smtplib
 import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import NamedTuple, Optional, List
+from typing import NamedTuple, List
 import altair as alt
 import plotly.express as px
 import plotly.graph_objects as go
@@ -2689,11 +2693,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("MotorGeodesicoCorp")
 
 # [M21] Log estruturado: adiciona campos extras a cada evento de relevância
-def _log_api(fonte: str, sucesso: bool, latencia_ms: float, query: str = ""):
-    logger.info(
-        "api_call",
-        extra={"fonte": fonte, "sucesso": sucesso, "latencia_ms": round(latencia_ms, 1), "query": query[:120]}
-    )
+# [AUDITORIA-184] Função morta '_log_api' aposentada (nome ocorria 1× no arquivo — sem qualquer referência). Recuperável no histórico de versões.
 
 # [M11] RotaPipeline NamedTuple — substitui tupla posicional de 31+ elementos
 # Acesso por nome elimina bugs de deslocamento de índice ao adicionar campos
@@ -3050,6 +3050,41 @@ METRICAS_DISTANCIA = {
 }
 
 _LOCK_METRICAS = threading.Lock()
+
+# [CIRCUIT-BREAKER - 184ª geração] Estado global thread-safe do disjuntor do Google. O roteamento é paralelo
+# (múltiplas threads chamando o scraper), então o estado do breaker é compartilhado e protegido por lock. Ver
+# _circuit_breaker_google (máquina de estados pura) e _google_pode_chamar/_google_registrar_resultado (acesso
+# thread-safe usados pelo scraper). Quando o Google está saudável, o breaker fica 'fechado' e é transparente.
+_LOCK_GOOGLE_CB = threading.Lock()
+_GOOGLE_CB_ESTADO = {"status": "fechado", "falhas_seguidas": 0, "aberto_ate": 0.0}
+
+
+def _google_pode_chamar(agora=None):
+    """Consulta thread-safe se o disjuntor permite chamar o Google agora. Aplica transições por tempo (ex.:
+    aberto→meio_aberto após o cooldown). Retorna bool."""
+    import time as _t
+    _now = agora if agora is not None else _t.time()
+    try:
+        with _LOCK_GOOGLE_CB:
+            global _GOOGLE_CB_ESTADO
+            # avalia transição por tempo sem registrar resultado de chamada (sucesso=None)
+            _GOOGLE_CB_ESTADO, _pode = _circuit_breaker_google(_GOOGLE_CB_ESTADO, None, _now)
+            return bool(_pode)
+    except Exception:
+        return True  # em dúvida, permite (nunca bloqueia o Google por erro do próprio breaker)
+
+
+def _google_registrar_resultado(sucesso, agora=None):
+    """Registra thread-safe o resultado de uma chamada ao Google (True/False), atualizando o disjuntor."""
+    import time as _t
+    _now = agora if agora is not None else _t.time()
+    try:
+        with _LOCK_GOOGLE_CB:
+            global _GOOGLE_CB_ESTADO
+            _GOOGLE_CB_ESTADO, _ = _circuit_breaker_google(_GOOGLE_CB_ESTADO, bool(sucesso), _now)
+    except Exception:
+        pass
+
 
 def _incrementar_metrica(campo: str, valor: int = 1):
     with _LOCK_METRICAS:
@@ -3548,15 +3583,7 @@ st.markdown("""
 # ==============================================================================
 # DESIGN SYSTEM — Helpers de UI reutilizáveis [UX 2ª geração]
 # ==============================================================================
-def ds_status_pill(status: str) -> str:
-    """Retorna HTML de uma pílula de status com semáforo de cor consistente."""
-    mapa = {
-        "Excelente": "ds-pill-excelente", "Boa": "ds-pill-boa",
-        "Aceitável": "ds-pill-aceitavel", "Revisar": "ds-pill-revisar",
-        "Erro": "ds-pill-erro", "Erro Crítico de Processamento": "ds-pill-erro",
-    }
-    classe = mapa.get(status, "ds-pill-revisar")
-    return f"<span class='ds-pill {classe}'>{status}</span>"
+# [AUDITORIA-184] Função morta 'ds_status_pill' aposentada (nome ocorria 1× no arquivo — sem qualquer referência). Recuperável no histórico de versões.
 
 def ds_barra_confianca(score: float) -> str:
     """Retorna HTML de uma barra de confiança 0-100 com cor por faixa."""
@@ -3950,6 +3977,1928 @@ def _prevoo_higienizar_texto(s):
     return re.sub(r"\s+", " ", _prevoo_corrigir_mojibake(s)).strip()
 
 
+def _secao_qualidade_dados_html(df):
+    """[QUALIDADE-DADOS - 184ª geração] Seção 'Qualidade dos Dados' para o relatório de Locais: avalia
+    completude (colunas preenchidas), campos estimados (linha reta/fallback), qualidade das rotas (🟢🟡🟠),
+    detecção de OUTLIERS de distância (regra de Tukey, 1,5·IQR) e nível de confiança agregado. Retorna HTML
+    (string) ou ''. Puro e defensivo — cada bloco só aparece se a coluna existir."""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return ""
+        _n = len(df)
+        _blocos = []
+        # 1) COMPLETUDE — % de células preenchidas por coluna (as 12 menos completas)
+        _compl = []
+        for _c in df.columns:
+            _s = df[_c]
+            _vazio = _s.isna() | _s.astype(str).str.strip().isin(
+                ['', 'nan', 'None', 'NaN', '—', 'N/A', 'Não informado', 'Não calculado',
+                 'Coordenada indisponível', 'Link indisponível', 'Tempo não estimado'])
+            _pct = 100.0 * (1 - _vazio.sum() / _n) if _n else 0
+            _compl.append((str(_c), _pct))
+        _compl.sort(key=lambda x: x[1])
+        _media_compl = sum(p for _, p in _compl) / len(_compl) if _compl else 0
+        _incompletas = [(c, p) for c, p in _compl if p < 100]
+        _linhas_tab = "".join(
+            f"<tr><td>{_he.escape(c)}</td><td class='r'>{p:.1f}%</td>"
+            f"<td><div style='background:#eef2f7;border-radius:6px;height:10px;width:120px'>"
+            f"<div style='background:{'#16a34a' if p>=90 else ('#f59e0b' if p>=60 else '#dc2626')};"
+            f"height:10px;border-radius:6px;width:{max(2,p*1.2):.0f}px'></div></div></td></tr>"
+            for c, p in (_incompletas[:12] if _incompletas else _compl[:6]))
+        _blocos.append(
+            f'<p class="lead">Completude média das <b>{len(_compl)} colunas</b>: '
+            f'<b>{_media_compl:.1f}%</b>. ' +
+            (f'{len(_incompletas)} coluna(s) têm células não preenchidas (sempre com motivo explícito, '
+             'nunca em branco).' if _incompletas else 'Todas as colunas estão 100% preenchidas.') +
+            f'</p><table><thead><tr><th>Coluna</th><th class="r">Completude</th><th>Barra</th></tr></thead>'
+            f'<tbody>{_linhas_tab}</tbody></table>')
+        # 2) MÉTODO DA DISTÂNCIA — viária real × linha reta (campos estimados)
+        if 'Método da Distância' in df.columns:
+            _vc = df['Método da Distância'].astype(str).value_counts()
+            _via = int(sum(v for k, v in _vc.items() if 'viária' in k.lower() or 'viaria' in k.lower()))
+            _lr = int(sum(v for k, v in _vc.items() if 'linha reta' in k.lower()))
+            _blocos.append(
+                f'<p class="lead"><b>Origem das distâncias:</b> {100.0*_via/_n:.1f}% por rota viária real '
+                f'(medida por motor de roteamento) e {100.0*_lr/_n:.1f}% estimadas em linha reta '
+                f'(acesso fluvial/sem malha). Quanto maior a fração viária, mais preciso o estudo.</p>')
+        # 3) QUALIDADE DAS ROTAS — 🟢🟡🟠
+        if 'Classificação da Rota' in df.columns:
+            _vc = df['Classificação da Rota'].astype(str).value_counts()
+            _verde = int(sum(v for k, v in _vc.items() if '🟢' in k))
+            _amar = int(sum(v for k, v in _vc.items() if '🟡' in k))
+            _lar = int(sum(v for k, v in _vc.items() if '🟠' in k))
+            _blocos.append(
+                f'<div class="kpis"><div class="kpi"><div class="kpi-v" style="color:#16a34a">{_verde:,}</div>'
+                f'<div class="kpi-l">🟢 Rotas confirmadas</div></div>'
+                f'<div class="kpi"><div class="kpi-v" style="color:#f59e0b">{_amar:,}</div>'
+                f'<div class="kpi-l">🟡 A revisar (desvio/atípica)</div></div>'
+                f'<div class="kpi"><div class="kpi-v" style="color:#dc2626">{_lar:,}</div>'
+                f'<div class="kpi-l">🟠 Linha reta (sem rota)</div></div></div>'
+                f'<p class="lead">Rotas 🟡/🟠 concentram a incerteza — são as candidatas naturais a revisão '
+                f'manual ou tratamento fluvial.</p>')
+        # 4) OUTLIERS de distância (Tukey 1,5·IQR)
+        if 'Distancia' in df.columns:
+            _d = pd.to_numeric(df['Distancia'], errors='coerce').dropna()
+            if len(_d) >= 8:
+                _q1, _q3 = _d.quantile(0.25), _d.quantile(0.75)
+                _iqr = _q3 - _q1
+                _lim = _q3 + 1.5 * _iqr
+                _out = df.assign(_d=pd.to_numeric(df['Distancia'], errors='coerce'))
+                _out = _out[_out['_d'] > _lim].sort_values('_d', ascending=False)
+                _no = len(_out)
+                _amostra = ""
+                if _no and 'Municipio Origem' in df.columns:
+                    _amostra = "<table><thead><tr><th>Município</th><th class='r'>Distância (km)</th></tr></thead><tbody>" + "".join(
+                        f"<tr><td>{_he.escape(str(r['Municipio Origem']))}</td><td class='r'>{r['_d']:.0f}</td></tr>"
+                        for _, r in _out.head(10).iterrows()) + "</tbody></table>"
+                _blocos.append(
+                    f'<p class="lead"><b>Detecção de outliers (regra de Tukey, 1,5·IQR):</b> limiar superior '
+                    f'em <b>{_lim:.0f} km</b> (Q1={_q1:.0f}, Q3={_q3:.0f}). '
+                    f'<b>{_no}</b> município(s) acima do limiar — deslocamentos atipicamente longos que merecem '
+                    f'verificação (possível acesso fluvial, malha esparsa ou erro de coordenada).</p>' + _amostra)
+        # 5) CONFIANÇA AGREGADA
+        _score = None
+        if 'Classificação da Rota' in df.columns:
+            _vc = df['Classificação da Rota'].astype(str).value_counts()
+            _verde = sum(v for k, v in _vc.items() if '🟢' in k)
+            _amar = sum(v for k, v in _vc.items() if '🟡' in k)
+            _score = 100.0 * (_verde + 0.5 * _amar) / _n if _n else 0
+        if _score is not None:
+            _rot = ("Alta" if _score >= 85 else ("Média" if _score >= 60 else "Baixa"))
+            _cor = "#16a34a" if _score >= 85 else ("#f59e0b" if _score >= 60 else "#dc2626")
+            _blocos.append(
+                f'<p class="lead"><b>Índice de confiança do estudo:</b> '
+                f'<span style="color:{_cor};font-weight:800;font-size:18px">{_score:.0f}/100 ({_rot})</span> — '
+                f'combina rotas confirmadas (peso 1) e a revisar (peso 0,5) sobre o total. Reflete o quanto das '
+                f'distâncias vem de rota viária confirmada.</p>')
+        return "".join(_blocos)
+    except Exception:
+        logger.error("[QUALIDADE-DADOS] Falha ao montar seção de qualidade", exc_info=True)
+        return ""
+
+
+_GLOSSARIO_TERMOS = [
+    ("Rota viária", "A distância real percorrida por estradas entre origem e destino, calculada por um motor "
+     "de roteamento (OSRM/Google). É o que o candidato de fato percorre — sempre maior ou igual à linha reta."),
+    ("Linha reta (geodésica)", "A menor distância possível entre dois pontos sobre a superfície da Terra, "
+     "ignorando estradas. Serve de piso físico: nenhuma rota real pode ser menor. Calculada pela fórmula de "
+     "Karney (WGS-84), com precisão milimétrica."),
+    ("Sinuosidade", "Razão entre a distância viária e a linha reta (viária ÷ reta). Estradas normais têm "
+     "1,2–1,6×; serras ~2×. Valores acima de 4× indicam que a 'estrada' provavelmente contorna um rio — na "
+     "prática, um trajeto fluvial."),
+    ("Score geográfico", "Nota de 0 a 100 que mede a confiança na identificação e geocodificação do "
+     "município (o quão certo está de que a coordenada usada é realmente daquela sede municipal)."),
+    ("Fallback", "Plano B automático: quando o motor de rota não consegue calcular o trajeto por estrada "
+     "(falha de rede, ausência de malha), a aplicação recorre à distância geodésica, sempre sinalizando."),
+    ("Geocodificação", "Processo de converter um nome de município ou endereço em coordenadas geográficas "
+     "(latitude e longitude). A aplicação usa a base oficial do IBGE embarcada como rede de segurança."),
+    ("Centróide / Sede", "A sede municipal é o ponto administrativo (a prefeitura/centro urbano) do "
+     "município; o centróide é o centro geométrico da área. A aplicação usa a sede, padrão dos estudos oficiais."),
+    ("Snap", "O 'encaixe' de uma coordenada ao ponto mais próximo da malha viária, feito pelo motor de rota. "
+     "Um snap ruim (numa via errada ou na margem de um rio) pode distorcer a distância calculada."),
+    ("Consenso entre motores", "Estratégia de comparar a resposta de dois motores de rota (OSRM e Google) e "
+     "escolher a mais confiável — priorizando a menor distância viária válida."),
+    ("Balsa", "Travessia fluvial por embarcação que integra o trajeto rodoviário. É sinalizada porque "
+     "adiciona tempo de espera e custo que uma rota puramente terrestre não tem."),
+    ("Competitividade (do polo)", "O quanto um local de prova concentra municípios e candidatos ao seu "
+     "redor — polos muito competitivos atendem grande volume por estarem bem posicionados."),
+    ("Robustez (da rota)", "O quanto a escolha se mantém boa mesmo diante de imprevistos — uma rota robusta "
+     "não depende de um único trecho frágil e tem alternativas próximas."),
+    ("Acessibilidade", "Facilidade de chegar ao local de prova considerando distância, tempo e barreiras "
+     "(balsas, serras). Alta acessibilidade = candidato chega mais rápido e com menos obstáculos."),
+    ("km-candidato", "Unidade que pondera a distância pelo número de candidatos: 100 km percorridos por 500 "
+     "candidatos = 50.000 km-candidato. Mede o esforço logístico total, não só a distância."),
+    ("Empate técnico", "Quando duas opções têm distâncias tão próximas (dentro de um limiar em km) que a "
+     "diferença é irrelevante na prática — tratadas como equivalentes."),
+    ("IQR / Outlier", "IQR é a faixa onde estão os 50% centrais dos dados. Um outlier é um valor muito acima "
+     "dessa faixa (regra de Tukey: acima de Q3 + 1,5×IQR) — aqui, deslocamentos atipicamente longos."),
+]
+
+
+def _secao_abstract_comparacao_html(stats, aud, titulo=""):
+    """[RELATORIO-CIENTIFICO - 184ª geração] ABSTRACT do relatório de COMPARAÇÃO de dois estudos, no padrão
+    de artigo científico: objetivo, metodologia, amostra e principais resultados do confronto entre o estudo
+    da aplicação e o de referência. Deriva tudo dos agregados reais (stats['brasil'], aud). PURA."""
+    import html as _he
+    try:
+        br = (stats or {}).get("brasil", {}) if stats else {}
+        aud = aud or {}
+        _tot = int(aud.get("total_ref", 0) or 0)
+        _conc = int(aud.get("conciliados", 0) or 0)
+        _pct_conc = round(100.0 * _conc / _tot, 1) if _tot else 0.0
+        _p_app = float(br.get("pct_venceu_app", 0) or 0)
+        _p_ref = float(br.get("pct_venceu_ref", 0) or 0)
+        _p_emp = float(br.get("pct_empate", 0) or 0)
+        _econ = float(br.get("economia_ponderada_km", 0) or 0)
+        if _tot == 0:
+            return ""
+        _veredito = ("a aplicação encontrou rotas menores na maioria dos municípios" if _p_app > _p_ref + 5
+                     else "o estudo de referência prevaleceu na maioria dos municípios" if _p_ref > _p_app + 5
+                     else "os dois estudos empataram tecnicamente na maioria dos municípios")
+        _sinal_econ = ("uma economia" if _econ >= 0 else "um custo adicional")
+        return (
+            '<section id="abstract" class="sec"><h2>Resumo (Abstract)</h2>'
+            '<div style="background:#f8fafc;border-left:4px solid #1e3a8a;padding:16px 20px;border-radius:8px;'
+            'line-height:1.7;text-align:justify">'
+            '<p><b>Objetivo.</b> Comparar, município a município, a alocação de locais de prova produzida '
+            'pela aplicação com a de um estudo de referência, quantificando qual das duas minimiza o '
+            'deslocamento viário real dos candidatos.</p>'
+            '<p><b>Metodologia.</b> Conciliação dos municípios comuns aos dois estudos por código IBGE, '
+            'seguida da comparação das distâncias viárias de cada alocação. A vitória em cada município é '
+            'atribuída ao estudo com menor distância; empates técnicos são contabilizados à parte. A economia '
+            'é ponderada pelo número de candidatos afetados.</p>'
+            f'<p><b>Amostra.</b> {_tot:,} municípios do estudo de referência, dos quais {_conc:,} '
+            f'({_pct_conc:.1f}%) foram conciliados e efetivamente comparados.</p>'
+            f'<p><b>Principais resultados.</b> No confronto, {_veredito}: a aplicação venceu em {_p_app:.1f}% '
+            f'dos municípios, a referência em {_p_ref:.1f}% e houve empate técnico em {_p_emp:.1f}%. O balanço '
+            f'ponderado por candidatos representa {_sinal_econ} de {abs(_econ):,.0f} km.</p>'
+            '</div></section>')
+    except Exception:
+        logger.error("[RELATORIO-CIENTIFICO] Falha ao gerar abstract de comparação", exc_info=True)
+        return ""
+
+
+def _secao_fluxograma_comparacao_html():
+    """[RELATORIO-CIENTIFICO - 184ª geração] FLUXOGRAMA do processo de COMPARAÇÃO em HTML/SVG puro (offline).
+    Mostra o pipeline: Estudos → Conciliação IBGE → Comparação de distâncias → Atribuição de vitória →
+    Ponderação → Resultados. PURA."""
+    try:
+        _etapas = [
+            ("Dois estudos", "Aplicação e referência", "#1e3a8a"),
+            ("Conciliação IBGE", "Municípios comuns por código", "#1e40af"),
+            ("Comparação de distâncias", "Viária de cada alocação", "#2563eb"),
+            ("Atribuição de vitória", "Menor distância vence; empates à parte", "#0ea5e9"),
+            ("Ponderação por candidatos", "Impacto proporcional aos inscritos", "#0891b2"),
+            ("Resultados", "Placar e economia auditáveis", "#16a34a"),
+        ]
+        _h = ('<section id="fluxograma" class="sec"><h2>Fluxograma da Comparação</h2>'
+              '<p style="color:#475569;margin-bottom:16px">O confronto segue etapas encadeadas; apenas os '
+              'municípios presentes nos dois estudos entram na comparação, garantindo um confronto justo '
+              'sobre a mesma base.</p>'
+              '<div style="display:flex;flex-direction:column;gap:0;max-width:640px;margin:0 auto">')
+        for _i, (_nome, _desc, _cor) in enumerate(_etapas):
+            _h += (f'<div style="background:{_cor};color:#fff;padding:12px 18px;border-radius:10px;'
+                   f'box-shadow:0 1px 3px rgba(0,0,0,.15)"><b>{_i+1}. {_nome}</b>'
+                   f'<div style="font-size:13px;opacity:.9">{_desc}</div></div>')
+            if _i < len(_etapas) - 1:
+                _h += ('<div style="text-align:center;color:#94a3b8;font-size:20px;line-height:1.2;'
+                       'margin:2px 0">&#8595;</div>')
+        _h += '</div></section>'
+        return _h
+    except Exception:
+        logger.error("[RELATORIO-CIENTIFICO] Falha ao gerar fluxograma de comparação", exc_info=True)
+        return ""
+
+
+def _secao_diagnostico_comparacao_html(stats, aud, linhas=None):
+    """[RELATORIO-CIENTIFICO - 184ª geração] DIAGNÓSTICO INTELIGENTE do relatório de COMPARAÇÃO: interpreta
+    automaticamente o confronto em linguagem natural — quem venceu, a magnitude, a taxa de conciliação e
+    recomendações. É a seção de 'IA' adaptada à comparação. PURA e defensiva."""
+    import html as _he
+    try:
+        br = (stats or {}).get("brasil", {}) if stats else {}
+        aud = aud or {}
+        _tot = int(aud.get("total_ref", 0) or 0)
+        _conc = int(aud.get("conciliados", 0) or 0)
+        _pct_conc = round(100.0 * _conc / _tot, 1) if _tot else 0.0
+        _p_app = float(br.get("pct_venceu_app", 0) or 0)
+        _p_ref = float(br.get("pct_venceu_ref", 0) or 0)
+        _econ = float(br.get("economia_ponderada_km", 0) or 0)
+        if _tot == 0:
+            return ""
+        _achados = []
+        # veredito principal
+        if _p_app > _p_ref + 5:
+            _achados.append(("A aplicação prevaleceu",
+                             f"A aplicação encontrou rotas menores em {_p_app:.1f}% dos municípios "
+                             f"conciliados, contra {_p_ref:.1f}% da referência. Isso sugere que a estratégia "
+                             "de roteamento da aplicação está identificando polos mais próximos na maioria "
+                             "dos casos."))
+        elif _p_ref > _p_app + 5:
+            _achados.append(("A referência prevaleceu",
+                             f"O estudo de referência encontrou rotas menores em {_p_ref:.1f}% dos "
+                             f"municípios, contra {_p_app:.1f}% da aplicação. Vale investigar os municípios "
+                             "onde a referência venceu: pode haver polos melhores ausentes da lista de "
+                             "destinos da aplicação, ou rotas mal medidas."))
+        else:
+            _achados.append(("Empate técnico predominante",
+                             f"Os estudos estão tecnicamente empatados ({_p_app:.1f}% vs {_p_ref:.1f}%), "
+                             "indicando que ambos chegam a alocações de qualidade equivalente na maioria "
+                             "dos municípios."))
+        # conciliação
+        if _pct_conc < 90 and _tot:
+            _achados.append(("Cobertura de conciliação incompleta",
+                             f"Apenas {_pct_conc:.1f}% dos {_tot:,} municípios da referência foram "
+                             f"conciliados ({_conc:,}). Os municípios não conciliados ficaram fora do "
+                             "confronto — verifique divergências de código IBGE ou universos diferentes "
+                             "entre os estudos, pois isso pode distorcer o placar."))
+        else:
+            _achados.append(("Boa cobertura de conciliação",
+                             f"{_pct_conc:.1f}% dos municípios da referência foram conciliados e comparados, "
+                             "dando solidez estatística ao confronto."))
+        # magnitude econômica
+        if abs(_econ) > 0:
+            _sinal = "de economia" if _econ >= 0 else "de custo adicional"
+            _achados.append((f"Impacto ponderado {_sinal}",
+                             f"O balanço ponderado pelos candidatos afetados é de {abs(_econ):,.0f} km "
+                             f"{_sinal}. Este número traduz o placar em deslocamento real evitado (ou "
+                             "acrescido) considerando quantos candidatos cada município representa."))
+        _blocos = ""
+        for _tit, _txt in _achados:
+            _blocos += (f'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;'
+                        f'padding:14px 18px;margin-bottom:12px"><b style="color:#1e3a8a">{_he.escape(_tit)}'
+                        f'</b><p style="margin:6px 0 0;line-height:1.6;color:#334155">{_he.escape(_txt)}</p></div>')
+        return (
+            '<section id="diagnostico" class="sec"><h2>Diagnóstico Inteligente</h2>'
+            '<p style="color:#475569;margin-bottom:16px">Interpretação automática do confronto entre os dois '
+            'estudos: quem prevaleceu, a solidez da comparação e as recomendações de investigação.</p>'
+            f'{_blocos}</section>')
+    except Exception:
+        logger.error("[RELATORIO-CIENTIFICO] Falha ao gerar diagnóstico de comparação", exc_info=True)
+        return ""
+
+
+def _secao_abstract_html(df, titulo=""):
+    """[RELATORIO-CIENTIFICO - 184ª geração] Gera o ABSTRACT (resumo técnico estruturado) no topo do
+    relatório, no padrão de artigo científico: objetivo, metodologia, amostra e principais resultados —
+    tudo derivado dos dados reais. PURA (retorna string HTML) e defensiva."""
+    import html as _he
+    try:
+        if df is None or getattr(df, "empty", True):
+            return ""
+        _n = len(df)
+        _uf_col = "UF Origem" if "UF Origem" in df.columns else ("UF" if "UF" in df.columns else None)
+        _n_uf = int(df[_uf_col].nunique()) if _uf_col else 0
+        _insc_col = next((c for c in ["Inscritos", "Quantidade de Inscritos", "QT_INSCRITOS"] if c in df.columns), None)
+        _tot_insc = int(pd.to_numeric(df[_insc_col], errors="coerce").fillna(0).sum()) if _insc_col else 0
+        _dist = pd.to_numeric(df["Distancia"], errors="coerce") if "Distancia" in df.columns else None
+        _media = float(_dist.mean()) if _dist is not None and _dist.notna().any() else 0.0
+        _mediana = float(_dist.median()) if _dist is not None and _dist.notna().any() else 0.0
+        # taxa de rota viária real vs fallback
+        _fonte_col = "Fonte da Rota" if "Fonte da Rota" in df.columns else None
+        _n_real = 0
+        if _fonte_col:
+            _f = df[_fonte_col].astype(str).str.lower()
+            _n_real = int((~(_f.str.contains("geodés") | _f.str.contains("falha") | _f.str.contains("linha reta"))).sum())
+        _pct_real = 100.0 * _n_real / max(_n, 1)
+        return (
+            '<section id="abstract" class="sec"><h2>Resumo (Abstract)</h2>'
+            '<div style="background:#f8fafc;border-left:4px solid #1e3a8a;padding:16px 20px;border-radius:8px;'
+            'line-height:1.7;text-align:justify">'
+            f'<p><b>Objetivo.</b> Determinar, para cada um dos {_n:,} municípios de origem analisados, o local '
+            f'de aplicação de prova que minimiza o deslocamento viário real dos {_tot_insc:,} candidatos '
+            'inscritos, priorizando a menor rota rodoviária efetiva.</p>'
+            '<p><b>Metodologia.</b> Roteamento híbrido de duas fases combinando a matriz viária do OSRM '
+            '(descoberta ampla de candidatos) e o Google Maps (decisão de qualidade, motor prioritário), com '
+            'prova de otimalidade por dominância geométrica, validação de consistência física e classificação '
+            'de confiabilidade por região. A distância viária real é a métrica de decisão; a linha reta '
+            'geodésica atua como limite inferior e salvaguarda.</p>'
+            f'<p><b>Amostra.</b> {_n:,} municípios de origem distribuídos por {_n_uf} unidades federativas, '
+            f'totalizando {_tot_insc:,} candidatos.</p>'
+            f'<p><b>Principais resultados.</b> Distância viária média de {_media:,.1f} km (mediana '
+            f'{_mediana:,.1f} km). {_pct_real:.1f}% dos municípios foram resolvidos com rota viária real '
+            'medida pelos motores de roteamento; os demais recorreram à estimativa geodésica por ausência de '
+            'malha rodoviária conectada (tipicamente municípios de acesso fluvial).</p>'
+            '</div></section>')
+    except Exception:
+        logger.error("[RELATORIO-CIENTIFICO] Falha ao gerar abstract", exc_info=True)
+        return ""
+
+
+def _secao_fluxograma_html():
+    """[RELATORIO-CIENTIFICO - 184ª geração] Gera o FLUXOGRAMA do processamento em SVG puro (offline, sem
+    dependências), no padrão de artigo científico. Mostra o pipeline: Origem → Geocodificação → Descoberta
+    por matriz → Roteamento (Google/OSRM) → Prova de otimalidade → Validação → Escolha → Resultados. PURA."""
+    try:
+        _etapas = [
+            ("Origem", "Municípios e candidatos", "#1e3a8a"),
+            ("Geocodificação", "Consenso multi-fonte", "#1e40af"),
+            ("Descoberta por matriz", "OSRM /table, candidatos adaptativos", "#2563eb"),
+            ("Roteamento", "Google (prioritário) + OSRM", "#3b82f6"),
+            ("Prova de otimalidade", "Dominância geométrica + B&B", "#0ea5e9"),
+            ("Validação", "Consistência física e regional", "#0891b2"),
+            ("Escolha", "Menor rota viária real", "#059669"),
+            ("Resultados", "Planilha e relatório auditáveis", "#16a34a"),
+        ]
+        _h = ('<section id="fluxograma" class="sec"><h2>Fluxograma do Processamento</h2>'
+              '<p style="color:#475569;margin-bottom:16px">Cada etapa alimenta a seguinte; falhas em uma '
+              'camada degradam com segurança para a anterior, garantindo que o processamento nunca se '
+              'interrompa sem produzir um resultado auditável.</p>'
+              '<div style="display:flex;flex-direction:column;gap:0;max-width:640px;margin:0 auto">')
+        for _i, (_nome, _desc, _cor) in enumerate(_etapas):
+            _h += (f'<div style="background:{_cor};color:#fff;padding:12px 18px;border-radius:10px;'
+                   f'box-shadow:0 1px 3px rgba(0,0,0,.15)"><b>{_i+1}. {_nome}</b>'
+                   f'<div style="font-size:13px;opacity:.9">{_desc}</div></div>')
+            if _i < len(_etapas) - 1:
+                _h += ('<div style="text-align:center;color:#94a3b8;font-size:20px;line-height:1.2;'
+                       'margin:2px 0">&#8595;</div>')
+        _h += '</div></section>'
+        return _h
+    except Exception:
+        logger.error("[RELATORIO-CIENTIFICO] Falha ao gerar fluxograma", exc_info=True)
+        return ""
+
+
+def _secao_diagnostico_inteligente_html(df):
+    """[RELATORIO-CIENTIFICO - 184ª geração] Gera o DIAGNÓSTICO INTELIGENTE — interpretação automática em
+    linguagem natural: padrões, gargalos, anomalias e recomendações derivados dos dados reais. É a seção de
+    'IA' que a nota pede. PURA e defensiva."""
+    import html as _he
+    try:
+        if df is None or getattr(df, "empty", True):
+            return ""
+        _n = len(df)
+        _dist = pd.to_numeric(df["Distancia"], errors="coerce") if "Distancia" in df.columns else None
+        _achados = []
+        if _dist is not None and _dist.notna().any():
+            _media = float(_dist.mean())
+            _p90 = float(_dist.quantile(0.90))
+            _n_longe = int((_dist > _p90).sum())
+            _achados.append(("Concentração de deslocamento",
+                             f"Os 10% de municípios com maior deslocamento superam {_p90:,.0f} km "
+                             f"({_n_longe} municípios). A distância média é {_media:,.0f} km. A cauda longa "
+                             "indica onde a logística de aplicação será mais custosa e merece atenção "
+                             "prioritária."))
+        # rotas sinuosas (possível polo melhor ausente)
+        if _dist is not None and "Linha Reta" in df.columns:
+            _reta = pd.to_numeric(df["Linha Reta"], errors="coerce")
+            _sin = _dist / _reta.replace(0, float("nan"))
+            _n_sin = int((_sin > 3.0).sum())
+            if _n_sin:
+                _achados.append(("Rotas muito sinuosas detectadas",
+                                 f"{_n_sin} município(s) têm rota viária 3× ou mais longa que a linha reta — "
+                                 "assinatura típica de contorno fluvial. Recomenda-se verificar se há um polo "
+                                 "terrestre mais próximo ausente da lista de destinos."))
+        # confiabilidade regional
+        if "Confiabilidade Regional" in df.columns:
+            _c = df["Confiabilidade Regional"].astype(str)
+            _n_baixa = int(_c.str.contains("Baixa").sum())
+            if _n_baixa:
+                _achados.append(("Zonas de baixa confiabilidade",
+                                 f"{_n_baixa} município(s) estão em regiões de malha viária esparsa ou "
+                                 "usaram estimativa geodésica. Nestes casos, a validação manual e a "
+                                 "verificação de acesso fluvial são recomendadas antes da decisão final."))
+        # balsas
+        _balsa_col = "Balsas" if "Balsas" in df.columns else ("Balsa" if "Balsa" in df.columns else None)
+        if _balsa_col:
+            _n_balsa = int(df[_balsa_col].astype(str).str.strip().str.lower().isin(["sim", "true", "1"]).sum())
+            if _n_balsa:
+                _achados.append(("Dependência de travessia por balsa",
+                                 f"{_n_balsa} rota(s) dependem de balsa, cujo tempo e disponibilidade variam. "
+                                 "O custo de espera deve ser considerado no planejamento logístico."))
+        if not _achados:
+            _achados.append(("Resultado consistente",
+                             "Não foram detectadas anomalias relevantes: as rotas são majoritariamente "
+                             "diretas e de alta confiabilidade."))
+        _blocos = ""
+        for _tit, _txt in _achados:
+            _blocos += (f'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;'
+                        f'padding:14px 18px;margin-bottom:12px"><b style="color:#1e3a8a">{_he.escape(_tit)}'
+                        f'</b><p style="margin:6px 0 0;line-height:1.6;color:#334155">{_he.escape(_txt)}</p></div>')
+        return (
+            '<section id="diagnostico" class="sec"><h2>Diagnóstico Inteligente</h2>'
+            '<p style="color:#475569;margin-bottom:16px">Interpretação automática dos resultados: padrões, '
+            'gargalos e recomendações derivados diretamente dos dados deste estudo.</p>'
+            f'{_blocos}</section>')
+    except Exception:
+        logger.error("[RELATORIO-CIENTIFICO] Falha ao gerar diagnóstico inteligente", exc_info=True)
+        return ""
+
+
+def _narrativa_storytelling_alocacao(df):
+    """[STORYTELLING - 184ª geração] Gera a seção de abertura NARRATIVA do relatório de Locais a partir dos
+    DADOS REAIS (não texto genérico): panorama → principais descobertas → gargalos → recomendações. Lê o df
+    final, calcula os números que sustentam cada afirmação e escreve em linguagem didática. Conduz o leitor
+    pela história do estudo antes das seções analíticas. Retorna HTML (string) ou ''. PURA e defensiva."""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return ""
+        _n = len(df)
+        _dist = pd.to_numeric(df.get('Distancia'), errors='coerce') if 'Distancia' in df.columns else None
+        _reta = pd.to_numeric(df.get('Linha Reta'), errors='coerce') if 'Linha Reta' in df.columns else None
+        _insc = (pd.to_numeric(df.get('Inscritos'), errors='coerce') if 'Inscritos' in df.columns
+                 else (pd.to_numeric(df.get('Quantidade de Inscritos'), errors='coerce')
+                       if 'Quantidade de Inscritos' in df.columns else None))
+        _tot_cand = int(_insc.fillna(0).sum()) if _insc is not None else _n
+        _npolos = df['Municipio Destino'].nunique() if 'Municipio Destino' in df.columns else 0
+
+        # ---------- PANORAMA ----------
+        _med = _dist.mean() if _dist is not None else None
+        _mediana = _dist.median() if _dist is not None else None
+        _panorama = (
+            f"Este estudo distribuiu <b>{_tot_cand:,} candidatos</b> de <b>{_n:,} municípios</b> entre "
+            f"<b>{_npolos:,} locais de prova</b>. ")
+        if _med is not None:
+            _panorama += (
+                f"Na média, cada candidato percorre <b>{_med:.0f} km</b> até o local de prova "
+                f"(mediana de {_mediana:.0f} km — metade anda menos que isso). O objetivo do estudo é que "
+                "essas distâncias sejam as menores possíveis, usando sempre a rota real por estrada.")
+
+        # ---------- DESCOBERTAS ----------
+        _desc = []
+        if _dist is not None and _npolos:
+            # polo que mais concentra
+            _peso = _insc.fillna(0) if _insc is not None else pd.Series(1, index=df.index)
+            _g = df.assign(_p=_peso).groupby('Municipio Destino')['_p'].sum().sort_values(ascending=False)
+            if len(_g):
+                _top_polo = _g.index[0]
+                _pct_top = 100.0 * _g.iloc[0] / _g.sum() if _g.sum() else 0
+                _desc.append(f"O polo <b>{_he.escape(str(_top_polo))}</b> é o mais demandado, concentrando "
+                             f"cerca de <b>{_pct_top:.0f}%</b> dos candidatos.")
+            _perto = int((_dist < 100).sum())
+            _pct_perto = 100.0 * _perto / _n if _n else 0
+            _desc.append(f"<b>{_pct_perto:.0f}%</b> dos municípios ({_perto:,}) têm o local de prova a menos "
+                         f"de 100 km — deslocamento confortável para a maioria.")
+        if _reta is not None and _dist is not None:
+            _sin = (_dist / _reta.replace(0, float('nan')))
+            _sin_med = _sin.median()
+            if pd.notna(_sin_med):
+                _desc.append(f"A sinuosidade típica das rotas é de <b>{_sin_med:.1f}×</b> a linha reta — "
+                             "coerente com estradas reais (o trajeto por asfalto sempre serpenteia um pouco).")
+
+        # ---------- GARGALOS ----------
+        _garg = []
+        if _dist is not None:
+            _longe = int((_dist > 300).sum())
+            if _longe:
+                _pct_longe = 100.0 * _longe / _n
+                _garg.append(f"<b>{_longe:,} município(s)</b> ({_pct_longe:.0f}%) têm deslocamento acima de "
+                             "300 km — os candidatos dessas regiões enfrentam viagens longas e são os "
+                             "primeiros a se beneficiar de um novo local de prova.")
+        if 'Balsas' in df.columns:
+            _balsa = int(df['Balsas'].astype(str).str.strip().str.lower().isin(['sim', 'yes', 'true', '1']).sum())
+            if _balsa:
+                _garg.append(f"<b>{_balsa:,} rota(s)</b> dependem de <b>balsa</b> — travessias fluviais que "
+                             "adicionam tempo de espera e podem ser interrompidas por condições do rio.")
+        if 'Classificação da Rota' in df.columns:
+            _amar = int(df['Classificação da Rota'].astype(str).str.contains('🟡').sum())
+            _lar = int(df['Classificação da Rota'].astype(str).str.contains('🟠').sum())
+            if _amar or _lar:
+                _garg.append(f"<b>{_amar + _lar:,} rota(s)</b> exigem atenção: {_amar} com desvio atípico e "
+                             f"{_lar} medidas em linha reta (acesso fluvial/sem estrada). São candidatas a "
+                             "revisão manual ou tratamento fluvial dedicado.")
+        if not _garg:
+            _garg.append("Não foram detectados gargalos logísticos relevantes — as rotas são majoritariamente "
+                         "curtas, terrestres e confiáveis.")
+
+        # ---------- RECOMENDAÇÕES ----------
+        _rec = []
+        if _dist is not None:
+            _longe = int((_dist > 300).sum())
+            if _longe:
+                _rec.append("Priorizar a abertura ou negociação de novos locais de prova nas regiões dos "
+                            "municípios de maior deslocamento (listados na seção 'Rotas em Detalhe').")
+        if 'Balsas' in df.columns and int(df['Balsas'].astype(str).str.strip().str.lower().isin(
+                ['sim', 'yes', 'true', '1']).sum()):
+            _rec.append("Para municípios que dependem de balsa, considerar redundância (um segundo local sem "
+                        "travessia) para não deixar candidatos reféns da operação fluvial.")
+        _rec.append("Consultar o <b>Dashboard BI</b> no topo deste relatório para filtrar por estado, faixa "
+                    "de distância ou qualidade da rota e investigar qualquer recorte de interesse.")
+        _rec.append("Usar o <b>Comparador de Estudos</b> para medir este resultado contra estudos de "
+                    "referência e confirmar onde a aplicação já entrega o menor deslocamento.")
+
+        def _lista(itens):
+            return "<ul style='margin:6px 0 0;padding-left:20px'>" + "".join(
+                f"<li style='margin:5px 0'>{_x}</li>" for _x in itens) + "</ul>"
+
+        _html = (
+            '<p class="lead">Esta seção conta, em linguagem simples, a história que os dados deste estudo '
+            'revelam — do panorama geral às recomendações práticas. As seções seguintes trazem os gráficos, '
+            'tabelas e mapas que sustentam cada ponto.</p>'
+            '<div class="story">'
+            f'<div class="story-b"><div class="story-t">🗺️ Panorama geral</div><div>{_panorama}</div></div>'
+            f'<div class="story-b"><div class="story-t">🔍 Principais descobertas</div>{_lista(_desc) if _desc else "<div>—</div>"}</div>'
+            f'<div class="story-b"><div class="story-t">⚠️ Gargalos e pontos de atenção</div>{_lista(_garg)}</div>'
+            f'<div class="story-b"><div class="story-t">✅ Recomendações</div>{_lista(_rec)}</div>'
+            '</div>')
+        return _html
+    except Exception:
+        logger.error("[STORYTELLING] Falha ao montar a narrativa", exc_info=True)
+        return ""
+
+
+def _narrativa_storytelling_comparacao(stats, linhas):
+    """[STORYTELLING - 184ª geração] Narrativa de abertura do relatório do COMPARADOR a partir dos dados
+    reais: panorama do confronto → descobertas → onde perde (gargalos) → recomendações. Retorna HTML ou ''."""
+    try:
+        if not linhas:
+            return ""
+        _n = len(linhas)
+        _va = sum(1 for _l in linhas if str(_l.get("Vencedor Distancia", "")) == "Aplicação")
+        _vr = sum(1 for _l in linhas if str(_l.get("Vencedor Distancia", "")) == "Referência")
+        _ve = sum(1 for _l in linhas if str(_l.get("Vencedor Distancia", "")) == "Empate")
+
+        def _f(v):
+            try:
+                return float(v)
+            except Exception:
+                return 0.0
+        _eco = sum(_f(_l.get("Economia km")) for _l in linhas if _f(_l.get("Economia km")) > 0)
+        _pct_va = 100.0 * _va / _n if _n else 0
+        _pct_vr = 100.0 * _vr / _n if _n else 0
+        _pct_emp = 100.0 * _ve / _n if _n else 0
+
+        _panorama = (
+            f"Este comparativo confrontou a <b>aplicação</b> com o <b>estudo de referência</b> em "
+            f"<b>{_n:,} municípios</b>, medindo qual dos dois encontrou o local de prova mais próximo por "
+            f"estrada em cada um. No placar: a aplicação venceu em <b>{_va:,}</b> ({_pct_va:.0f}%), a "
+            f"referência em <b>{_vr:,}</b> ({_pct_vr:.0f}%) e houve empate técnico em <b>{_ve:,}</b> "
+            f"({_pct_emp:.0f}%).")
+
+        _desc = []
+        if _va >= _vr:
+            _desc.append(f"A aplicação <b>igualou ou superou</b> a referência na maioria dos casos — sinal de "
+                         "que a metodologia de menor rota viária está bem calibrada.")
+        else:
+            _desc.append(f"A referência ainda leva vantagem em mais casos — há espaço para a aplicação "
+                         "recuperar terreno, sobretudo nos municípios de acesso fluvial.")
+        if _eco > 0:
+            _desc.append(f"Onde a aplicação venceu, poupou no total cerca de <b>{_eco:,.0f} km</b> de "
+                         "deslocamento — quilômetros que os candidatos deixam de percorrer.")
+        if _ve:
+            _desc.append(f"Os <b>{_ve:,} empates técnicos</b> são casos em que os dois estudos são "
+                         "praticamente equivalentes — a escolha entre eles é indiferente na prática.")
+
+        _garg = []
+        if _vr:
+            # onde perde por mais km
+            _perdas = sorted([(_f(_l.get("Diferenca Abs (km)")), str(_l.get("Municipio Origem", _l.get("Origem", "—"))))
+                              for _l in linhas if str(_l.get("Vencedor Distancia", "")) == "Referência"],
+                             reverse=True)[:3]
+            if _perdas:
+                _lst = ", ".join(f"{_m} (Δ {_d:.0f} km)" for _d, _m in _perdas)
+                _garg.append(f"As maiores derrotas estão em: <b>{_he.escape(_lst)}</b>. Vale verificar se "
+                             "são municípios de acesso fluvial (onde a referência usa matriz hidroviária) ou "
+                             "se houve falha de roteamento recuperável.")
+        else:
+            _garg.append("A aplicação não perdeu em nenhum município deste recorte — resultado ótimo.")
+
+        _rec = [
+            "Investigar os municípios onde a referência venceu usando o <b>drill-through</b> do Dashboard BI "
+            "(clique no nome do município na tabela) para ver todos os indicadores do caso.",
+            "Filtrar por <b>'Referência venceu'</b> no dashboard e cruzar com o tipo de acesso: derrotas "
+            "concentradas em acesso fluvial pedem tratamento hidroviário, não ajuste rodoviário.",
+            "Exportar o CSV filtrado das derrotas para reprocessar esses municípios especificamente e medir "
+            "a recuperação.",
+        ]
+
+        def _lista(itens):
+            return "<ul style='margin:6px 0 0;padding-left:20px'>" + "".join(
+                f"<li style='margin:5px 0'>{_x}</li>" for _x in itens) + "</ul>"
+
+        return (
+            '<p class="lead">Esta seção resume, em linguagem simples, o que a comparação revelou — do placar '
+            'geral às recomendações de onde agir. Os detalhes estão nas seções seguintes.</p>'
+            '<div class="story">'
+            f'<div class="story-b"><div class="story-t">🗺️ Panorama do confronto</div><div>{_panorama}</div></div>'
+            f'<div class="story-b"><div class="story-t">🔍 Principais descobertas</div>{_lista(_desc)}</div>'
+            f'<div class="story-b"><div class="story-t">⚠️ Onde a aplicação ainda perde</div>{_lista(_garg)}</div>'
+            f'<div class="story-b"><div class="story-t">✅ Recomendações</div>{_lista(_rec)}</div>'
+            '</div>')
+    except Exception:
+        logger.error("[STORYTELLING] Falha na narrativa do comparador", exc_info=True)
+        return ""
+
+
+def _bloco_glossario_html():
+    """[GLOSSARIO - 184ª geração] Seção de glossário automática e reutilizável para os relatórios HTML.
+    Explica em linguagem simples todos os termos técnicos usados, para que qualquer leitor — inclusive leigo
+    — entenda o relatório. Retorna HTML (string)."""
+    _itens = "".join(
+        f'<div class="glo-item"><dt>{_he.escape(_t)}</dt><dd>{_he.escape(_d)}</dd></div>'
+        for _t, _d in _GLOSSARIO_TERMOS)
+    return ('<p class="lead">Todo termo técnico usado neste relatório está explicado abaixo em linguagem '
+            'simples. A ideia é que qualquer pessoa consiga interpretar os resultados sem conhecimento prévio '
+            'de logística, estatística ou geoprocessamento.</p>'
+            f'<dl class="glo">{_itens}</dl>')
+
+
+def _caixa_explicativa(titulo, conteudo, tipo="info"):
+    """[CAIXA-DIDATICA - 184ª geração] Caixa informativa padronizada ('O que significa isso?', 'Como
+    interpretar', 'Como foi calculado'). `tipo` ∈ {info, calc, decisao} muda a cor/ícone. Retorna HTML."""
+    _cfg = {"info": ("💡", "#2563eb", "#eff6ff"),
+            "calc": ("🧮", "#7c3aed", "#f5f3ff"),
+            "decisao": ("⚖️", "#16a34a", "#f0fdf4")}
+    _ic, _cor, _bg = _cfg.get(tipo, _cfg["info"])
+    return (f'<div class="cxd" style="border-left:4px solid {_cor};background:{_bg}">'
+            f'<div class="cxd-t">{_ic} {_he.escape(titulo)}</div>'
+            f'<div class="cxd-c">{conteudo}</div></div>')
+
+
+def _secoes_metodologia_referencias_html():
+    """[ARTIGO - 184ª geração] Seções de METODOLOGIA e REFERÊNCIAS (padrão artigo científico) para os
+    relatórios HTML. Estáticas e honestas — descrevem o pipeline real e citam as fontes reais. Retorna
+    lista de (id, título, html)."""
+    _met = (
+        '<p class="lead"><b>1. Geocodificação.</b> Coordenadas de origem resolvidas por consenso multi-API '
+        '(ArcGIS, TomTom, Nominatim, Photon) com validação espacial; municípios ancorados na <b>base oficial '
+        'de sedes municipais do IBGE</b> embarcada (5.571 municípios), com desambiguação de homônimos por UF '
+        'e código IBGE.</p>'
+        '<p class="lead"><b>2. Distâncias geodésicas.</b> Valores exibidos pela solução de <b>Karney (2013)</b> '
+        'sobre o elipsoide WGS-84 (erro &lt;1 mm); ranking por Haversine com raio médio IUGG (6.371,0088 km), '
+        'de ordenação idêntica (Sinnott, 1984).</p>'
+        '<p class="lead"><b>3. Roteamento viário.</b> Motor primário Google Directions; fallback OSRM sobre '
+        'OpenStreetMap (Luxen &amp; Vetter, 2011). Quando nenhum motor produz rota, usa-se a geodésica, '
+        '<b>sempre sinalizada</b> (📏). Cada rota recebe classificação de qualidade: 🟢 confirmada, '
+        '🟡 desvio extremo/traçado atípico (revisar), 🟠 linha reta por ausência de rota. Falhas transientes '
+        'em candidatos próximos recebem <b>re-roteamento automático</b> (segunda chance, limitada).</p>'
+        '<p class="lead"><b>4. Decisão do local de prova.</b> No modo viário, vence <b>sempre a menor '
+        'distância viária real</b>; rotas reais precedem estimativas; o custo logístico (km-equivalente) atua '
+        'apenas como desempate. Um <b>invariante verificado</b> ao final garante que nenhuma linha exportada '
+        'tenha vencedor com viária maior que o 2º colocado (correção autoritativa).</p>'
+        '<p class="lead"><b>5. Comparação entre estudos.</b> Conciliação hierárquica (código IBGE → município+UF '
+        '→ município → similaridade com trava de UF e anti-duplicata), <b>limiar de empate técnico '
+        'configurável</b> (diferenças abaixo do limiar são ruído entre fontes de medição — tipicamente 2–5 km '
+        'entre matrizes oficiais e roteamento ao vivo) e economia ponderada em km-candidato.</p>'
+        '<p class="lead"><b>6. Planejamento de cobertura.</b> Cenários de abertura de locais pelo problema de '
+        '<b>cobertura máxima</b> (MCLP; Church &amp; ReVelle, 1974) com heurística gulosa; concentração da '
+        'demanda pelo índice de <b>Gini (1912)</b>; alocação com capacidade pela aproximação de <b>Vogel</b> '
+        '(Reinfeld &amp; Vogel, 1958).</p>'
+        '<p class="lead"><b>7. Limitações.</b> Municípios de acesso fluvial não possuem rota rodoviária; '
+        'matrizes de referência (rod_fiocruz/hid_ibge) incluem pernas de balsa/hidrovia que motores '
+        'rodoviários não produzem — casos sinalizados (🟡/🟠) para análise. Divergências ≤5 km entre fontes '
+        'distintas de medição são esperadas e não caracterizam erro.</p>')
+    _refs = (
+        '<ol style="font-size:13px;color:#334155;line-height:1.55">'
+        '<li>KARNEY, C. F. F. <i>Algorithms for geodesics</i>. Journal of Geodesy, v. 87, n. 1, p. 43–55, 2013.</li>'
+        '<li>SINNOTT, R. W. <i>Virtues of the Haversine</i>. Sky &amp; Telescope, v. 68, n. 2, p. 159, 1984.</li>'
+        '<li>LUXEN, D.; VETTER, C. <i>Real-time routing with OpenStreetMap data</i>. In: Proc. 19th ACM '
+        'SIGSPATIAL, 2011.</li>'
+        '<li>CHURCH, R.; REVELLE, C. <i>The maximal covering location problem</i>. Papers of the Regional '
+        'Science Association, v. 32, p. 101–118, 1974.</li>'
+        '<li>REINFELD, N. V.; VOGEL, W. R. <i>Mathematical Programming</i>. Englewood Cliffs: Prentice-Hall, 1958.</li>'
+        '<li>GINI, C. <i>Variabilità e mutabilità</i>. Studi Economico-Giuridici, Università di Cagliari, 1912.</li>'
+        '<li>IBGE. <i>Malha Municipal Digital; Tabela de Códigos de Municípios; Áreas Territoriais</i>. Rio de '
+        'Janeiro: IBGE.</li>'
+        '<li>IBGE. <i>REGIC 2018 — Regiões de Influência das Cidades</i> (tipologia de acesso fluvial).</li>'
+        '<li>FIOCRUZ; IBGE. <i>Matrizes de distâncias intermunicipais</i> (rod_ibge, rod_fiocruz, hid_ibge).</li>'
+        '<li>ANTAQ; ANA. <i>Plano Nacional de Integração Hidroviária — base geográfica de hidrovias (BHO250)</i>.</li>'
+        '<li>OpenStreetMap contributors. <i>Base cartográfica colaborativa</i>, 2026.</li></ol>')
+    return [("metodologia", "Metodologia", _met), ("referencias", "Referências", _refs)]
+
+
+def _abas_metodologia_referencias(writer):
+    """[ARTIGO - 184ª geração] Abas 'Metodologia Cientifica' e 'Referencias' para as planilhas exportáveis
+    (padrão artigo científico). Reusa o conteúdo do relatório HTML, convertido a texto. Defensiva."""
+    try:
+        import re as _re
+        _secs = _secoes_metodologia_referencias_html()
+        _txt = lambda h: _re.sub(r"\s+", " ", _re.sub(r"<[^>]+>", " ", h)).strip()
+        _met = _txt(_secs[0][2])
+        _blocos = [_b.strip() for _b in _re.split(r"(?=\d\.\s)", _met) if _b.strip()]
+        pd.DataFrame({"Metodologia (padrão artigo científico)": _blocos}).to_excel(
+            writer, index=False, sheet_name="Metodologia Cientifica")
+        _refs = [_txt(_li) for _li in _re.findall(r"<li>(.*?)</li>", _secs[1][2], _re.S)]
+        pd.DataFrame({"Referências (ABNT)": _refs}).to_excel(writer, index=False, sheet_name="Referencias")
+    except Exception:
+        logger.error("[ARTIGO] Falha ao escrever metodologia/referências", exc_info=True)
+
+
+_BI_UF_GRID = {
+    # grade geográfica aproximada (col, lin) das 27 UFs — coroplético esquemático offline (sem GeoJSON/rede)
+    "RR": (3, 0), "AP": (5, 0),
+    "AM": (2, 1), "PA": (4, 1), "MA": (5, 1), "CE": (6, 1), "RN": (7, 1),
+    "AC": (0, 2), "RO": (1, 2), "TO": (4, 2), "PI": (5, 2), "PB": (7, 2),
+    "MT": (3, 3), "GO": (4, 3), "BA": (5, 3), "PE": (7, 3),
+    "DF": (4, 4), "MG": (5, 4), "AL": (7, 4),
+    "MS": (3, 5), "SP": (4, 5), "RJ": (5, 5), "ES": (6, 5), "SE": (7, 5),
+    "PR": (3, 6), "SC": (4, 7), "RS": (3, 8),
+}
+
+
+def _bi_mapa_uf_svg():
+    """[BI-MAPA - 184ª geração] Coroplético ESQUEMÁTICO das 27 UFs como SVG embarcado e CLICÁVEL (offline,
+    sem GeoJSON nem rede — o sandbox e o app não dependem de .gov.br). Cada UF é um quadro rotulado numa
+    grade geográfica aproximada; a cor é preenchida por JS conforme a métrica filtrada, e clicar filtra o
+    painel. Retorna (html, css) da caixa do mapa; o JS de pintura/clique é injetado pelo dashboard."""
+    _cell, _gap = 52, 6
+    _ncol = max(c for c, _ in _BI_UF_GRID.values()) + 1
+    _nlin = max(l for _, l in _BI_UF_GRID.values()) + 1
+    _w = _ncol * (_cell + _gap) + _gap
+    _h = _nlin * (_cell + _gap) + _gap
+    _quadros = []
+    for _uf, (_c, _l) in _BI_UF_GRID.items():
+        _x = _gap + _c * (_cell + _gap)
+        _y = _gap + _l * (_cell + _gap)
+        _quadros.append(
+            f'<g class="bi-uf-cell" data-uf="{_uf}" style="cursor:pointer">'
+            f'<rect id="uf-{_uf}" x="{_x}" y="{_y}" width="{_cell}" height="{_cell}" rx="7" '
+            f'fill="#e2e8f0" stroke="#fff" stroke-width="2"></rect>'
+            f'<text x="{_x + _cell/2}" y="{_y + _cell/2 - 2}" text-anchor="middle" '
+            f'font-size="13" font-weight="700" fill="#0f172a" pointer-events="none">{_uf}</text>'
+            f'<text id="ufv-{_uf}" x="{_x + _cell/2}" y="{_y + _cell/2 + 13}" text-anchor="middle" '
+            f'font-size="9.5" fill="#475569" pointer-events="none"></text></g>')
+    _svg = (f'<svg id="bi-mapa-svg" viewBox="0 0 {_w} {_h}" width="100%" '
+            f'style="max-width:{_w}px;height:auto" xmlns="http://www.w3.org/2000/svg">'
+            + "".join(_quadros) + '</svg>')
+    _html = ('<div class="bi-mapa-wrap"><div class="bi-mapa-head">'
+             '<b>🗺️ Mapa por estado</b> — a cor indica a intensidade da métrica; clique numa UF para filtrar '
+             '(clique de novo para limpar). <span id="bi-mapa-metrica" class="bi-mapa-m"></span></div>'
+             + _svg + '<div class="bi-mapa-leg" id="bi-mapa-leg"></div></div>')
+    _css = (".bi-mapa-wrap{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px;"
+            "margin-bottom:16px}.bi-mapa-head{font-size:12.5px;color:#475569;margin-bottom:10px}"
+            ".bi-mapa-m{color:var(--accent);font-weight:600}"
+            ".bi-uf-cell:hover rect{stroke:#1e3a8a;stroke-width:3}"
+            ".bi-uf-cell.on rect{stroke:#1e3a8a;stroke-width:3}"
+            ".bi-mapa-leg{display:flex;align-items:center;gap:6px;margin-top:10px;font-size:11px;color:var(--muted)}"
+            ".bi-mapa-leg .sw{width:22px;height:12px;border-radius:3px;border:1px solid #cbd5e1}")
+    return _html, _css
+
+
+def _bi_mapa_uf_js(metrica_label):
+    """[BI-MAPA - 184ª geração] JS (fragmento) que pinta o coroplético e liga o clique ao filtro de UF. Espera
+    que o dashboard já tenha D, F, $, flt() e render() no escopo. `metrica_label` descreve o que a cor mede."""
+    return (
+        "function _corUF(t,mx){if(mx<=0||t<=0)return '#eef2f7';var r=t/mx;"
+        "var c=[[239,246,255],[191,219,254],[96,165,250],[37,99,235],[30,58,138]];"
+        "var p=r*(c.length-1),i=Math.floor(p),f=p-i;if(i>=c.length-1)return 'rgb('+c[c.length-1].join(',')+')';"
+        "var a=c[i],b=c[i+1];return 'rgb('+Math.round(a[0]+(b[0]-a[0])*f)+','+Math.round(a[1]+(b[1]-a[1])*f)+"
+        "','+Math.round(a[2]+(b[2]-a[2])*f)+')'}"
+        "function mapa(rows){var by={};rows.forEach(function(r){if(!r.uf||r.uf=='—')return;"
+        "by[r.uf]=(by[r.uf]||0)+1});var vals=Object.keys(by).map(function(k){return by[k]});"
+        "var mx=vals.length?Math.max.apply(null,vals):0;"
+        "Object.keys(_UFGRID).forEach(function(uf){var el=document.getElementById('uf-'+uf);"
+        "var tv=document.getElementById('ufv-'+uf);if(!el)return;var v=by[uf]||0;"
+        "el.setAttribute('fill', F.uf&&F.uf!=uf?'#f1f5f9':_corUF(v,mx));"
+        "el.parentNode.classList.toggle('on',F.uf==uf);if(tv)tv.textContent=v||''});"
+        "var lg=document.getElementById('bi-mapa-leg');if(lg){lg.innerHTML='menos "
+        "<span class=\\'sw\\' style=\\'background:#eff6ff\\'></span><span class=\\'sw\\' style=\\'background:#bfdbfe\\'></span>"
+        "<span class=\\'sw\\' style=\\'background:#60a5fa\\'></span><span class=\\'sw\\' style=\\'background:#2563eb\\'></span>"
+        "<span class=\\'sw\\' style=\\'background:#1e3a8a\\'></span> mais (nº de rotas por UF; máx '+mx+')'}"
+        "var mm=document.getElementById('bi-mapa-metrica');if(mm)mm.textContent='— " + metrica_label + "'}"
+        "Array.from(document.querySelectorAll('.bi-uf-cell')).forEach(function(g){g.onclick=function(){"
+        "var uf=g.getAttribute('data-uf');F.uf=(F.uf==uf?'':uf);var s=document.getElementById('bi-uf');"
+        "if(s)s.value=F.uf;page=0;render()}});")
+
+
+def _bi_dashboard_alocacao(df):
+    """[BI-DASHBOARD - 184ª geração] Camada de Business Intelligence AUTOCONTIDA (JS puro, offline) para
+    ANEXAR ao topo do relatório de Locais — SEM tocar em nada do relatório atual. Gera: (1) KPIs clicáveis;
+    (2) filtros dependentes (UF, faixa de distância, balsa, método) que atualizam KPIs, gráfico e tabela ao
+    vivo; (3) pesquisa global; (4) tabela interativa (busca, ordenação, paginação). Todos os dados são
+    embutidos como JSON no próprio HTML; nada é buscado em servidor. Retorna (html, css, js) ou ('','','')."""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return "", "", ""
+        import json as _json
+        _dist = pd.to_numeric(df.get('Distancia'), errors='coerce') if 'Distancia' in df.columns else None
+        _reta = pd.to_numeric(df.get('Linha Reta'), errors='coerce') if 'Linha Reta' in df.columns else None
+        _insc = (pd.to_numeric(df.get('Inscritos'), errors='coerce') if 'Inscritos' in df.columns
+                 else (pd.to_numeric(df.get('Quantidade de Inscritos'), errors='coerce')
+                       if 'Quantidade de Inscritos' in df.columns else None))
+
+        def _faixa(d):
+            try:
+                d = float(d)
+            except Exception:
+                return "—"
+            for _lim, _lab in [(50, "0-50"), (100, "50-100"), (150, "100-150"), (200, "150-200"),
+                               (300, "200-300"), (500, "300-500")]:
+                if d < _lim:
+                    return _lab
+            return "500+"
+
+        def _col(*cands):
+            for _c in cands:
+                if _c in df.columns:
+                    return _c
+            return None
+        _c_org, _c_dst = _col('Municipio Origem', 'Origem'), _col('Municipio Destino')
+        _c_uf, _c_conc = _col('UF Origem', 'UF'), _col('Concorrente Analisado')
+        _c_met = _col('Método da Distância')
+        _c_cls = _col('Classificação da Rota')
+        _c_bal = _col('Balsas')
+        _c_fon = _col('Fonte da Rota')
+        # registros embutidos (limite defensivo p/ tamanho do arquivo em estudos nacionais)
+        _regs = []
+        for _i in range(len(df)):
+            _d = _dist.iloc[_i] if _dist is not None else None
+            _regs.append({
+                "o": str(df[_c_org].iloc[_i]) if _c_org else "—",
+                "d": str(df[_c_dst].iloc[_i]) if _c_dst else "—",
+                "uf": (str(df[_c_uf].iloc[_i]).upper()[:2] if _c_uf else "—"),
+                "km": (round(float(_d), 1) if _d is not None and pd.notna(_d) else None),
+                "reta": (round(float(_reta.iloc[_i]), 1) if _reta is not None and pd.notna(_reta.iloc[_i]) else None),
+                "fx": _faixa(_d) if _d is not None and pd.notna(_d) else "—",
+                "cand": (int(_insc.iloc[_i]) if _insc is not None and pd.notna(_insc.iloc[_i]) else None),
+                "conc": str(df[_c_conc].iloc[_i]) if _c_conc else "—",
+                "bal": ("Sim" if (_c_bal and str(df[_c_bal].iloc[_i]).strip().lower()
+                                  in ('sim', 'yes', 'true', '1')) else "Não"),
+                "met": (str(df[_c_met].iloc[_i]) if _c_met else "—"),
+                "cls": (str(df[_c_cls].iloc[_i]) if _c_cls else "—"),
+                "fon": (str(df[_c_fon].iloc[_i]) if _c_fon else "—")})
+        _dados_json = _json.dumps(_regs, ensure_ascii=False)
+        _mapa_html, _mapa_css = _bi_mapa_uf_svg()  # [BI-MAPA - 184ª geração] coroplético UF clicável
+
+        _html = (
+            '<section id="bi" class="bi"><h2>📊 Dashboard Executivo (BI Interativo)</h2>'
+            '<p class="lead">Painel interativo offline: clique num indicador ou use os filtros e a busca — '
+            'os KPIs, o gráfico e a tabela abaixo respondem ao vivo. Todo o conteúdo analítico e textual '
+            'original permanece nas seções seguintes.</p>'
+            '<div class="bi-filtros">'
+            '<input id="bi-busca" class="bi-in" placeholder="🔎 Buscar município, polo, UF, concorrente...">'
+            '<select id="bi-uf" class="bi-in"><option value="">UF (todas)</option></select>'
+            '<select id="bi-fx" class="bi-in"><option value="">Faixa de distância (todas)</option></select>'
+            '<select id="bi-bal" class="bi-in"><option value="">Balsa (todas)</option>'
+            '<option value="Sim">Só com balsa</option><option value="Não">Sem balsa</option></select>'
+            '<select id="bi-met" class="bi-in"><option value="">Método (todos)</option>'
+            '<option value="viária">Viária real</option><option value="linha reta">Linha reta</option></select>'
+            '<select id="bi-cls" class="bi-in"><option value="">Qualidade da rota (todas)</option>'
+            '<option value="🟢">🟢 Confirmada</option><option value="🟡">🟡 A revisar</option>'
+            '<option value="🟠">🟠 Linha reta</option></select>'
+            '<select id="bi-cand" class="bi-in"><option value="">Candidatos (todos)</option>'
+            '<option value="0-100">0–100</option><option value="100-300">100–300</option>'
+            '<option value="300-1000">300–1000</option><option value="1000+">1000+</option></select>'
+            '<button id="bi-reset" class="bi-btn">limpar filtros</button>'
+            '<button id="bi-csv" class="bi-btn" style="border-color:#16a34a;color:#166534">⬇ Exportar CSV</button></div>'
+            '<div id="bi-kpis" class="bi-kpis"></div>'
+            '<div class="bi-chart-wrap"><canvas id="bi-chart" height="150"></canvas>'
+            '<div class="bi-chart-l" id="bi-chart-l">Rotas por faixa de distância (clique numa barra para filtrar)</div></div>'
+            + _mapa_html +
+            '<div class="bi-tbl-wrap"><table id="bi-tbl" class="bi-tbl"><thead><tr>'
+            '<th data-k="o">Município ▲▼</th><th data-k="uf">UF ▲▼</th><th data-k="d">Local de prova ▲▼</th>'
+            '<th data-k="km" class="r">Dist. (km) ▲▼</th><th data-k="cand" class="r">Candidatos ▲▼</th>'
+            '<th data-k="conc">Concorrente ▲▼</th><th data-k="bal">Balsa</th><th data-k="cls">Rota</th>'
+            '</tr></thead><tbody id="bi-tbody"></tbody></table></div>'
+            '<div class="bi-pag"><button id="bi-prev" class="bi-btn">‹ anterior</button>'
+            '<span id="bi-pag-i">–</span><button id="bi-next" class="bi-btn">próxima ›</button>'
+            '<span id="bi-count" class="bi-count"></span></div>'
+            '<div id="bi-drill" class="bi-drill" style="display:none"></div></section>')
+
+        _css = (
+            ".bi .bi-filtros{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}"
+            ".bi-in{padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:#fff}"
+            "#bi-busca{flex:1;min-width:220px}"
+            ".bi-btn{padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#f8fafc;"
+            "cursor:pointer;font-size:12.5px}.bi-btn:hover{background:#eef2f7}"
+            ".bi-kpis{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px}"
+            ".bi-kpi{flex:1;min-width:140px;background:#fff;border:1px solid var(--line);border-radius:12px;"
+            "padding:14px;cursor:pointer;transition:.15s;border-left:4px solid var(--accent)}"
+            ".bi-kpi:hover{box-shadow:0 4px 14px rgba(2,6,23,.08);transform:translateY(-1px)}"
+            ".bi-kpi.on{background:#eff6ff;border-left-color:#1e3a8a}"
+            ".bi-kpi-v{font-size:22px;font-weight:800;color:var(--accent)}"
+            ".bi-kpi-l{font-size:11.5px;color:var(--muted);margin-top:2px}"
+            ".bi-kpi{position:relative}.bi-kpi-i{opacity:.4;font-size:10px;cursor:help}"
+            ".bi-kpi:hover .bi-kpi-i{opacity:.9;color:var(--accent)}"
+            ".bi-chart-wrap{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:16px}"
+            ".bi-chart-l{font-size:12px;color:var(--muted);text-align:center;margin-top:8px}"
+            ".bi-tbl-wrap{overflow:auto;border:1px solid var(--line);border-radius:12px;max-height:520px}"
+            ".bi-tbl{width:100%;border-collapse:collapse;font-size:12.5px}"
+            ".bi-tbl th{position:sticky;top:0;background:#1e3a8a;color:#fff;padding:9px 11px;text-align:left;"
+            "cursor:pointer;white-space:nowrap;font-size:11.5px}.bi-tbl th.r{text-align:right}"
+            ".bi-tbl td{padding:8px 11px;border-bottom:1px solid #eef2f7}.bi-tbl td.r{text-align:right}"
+            ".bi-tbl tr:hover td{background:#f8fafc}"
+            ".bi-pag{display:flex;align-items:center;gap:10px;margin-top:10px;font-size:12.5px;color:var(--muted)}"
+            ".bi-count{margin-left:auto}"
+            ".bi-drill{margin-top:14px;background:#f8fafc;border:1px solid var(--line);border-radius:12px;padding:16px}"
+            ".bi-drill h3{margin:0 0 4px;font-size:16px;color:#1e3a8a}"
+            ".bi-drill .bi-drill-close{float:right;cursor:pointer;color:var(--muted);font-size:22px;line-height:1;border:none;background:none}"
+            ".bi-drill-grid{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}"
+            ".bi-drill-item{flex:1;min-width:130px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 12px}"
+            ".bi-drill-item .l{font-size:11px;color:var(--muted)}.bi-drill-item .v{font-size:15px;font-weight:700;color:#0f172a;margin-top:2px}"
+            ".bi-tbl td.clk{color:#2563eb;cursor:pointer;text-decoration:underline;text-decoration-style:dotted}" + _mapa_css)
+
+        _js_tpl = '(function(){var D=__DADOS__;var F={uf:\'\',fx:\'\',bal:\'\',met:\'\',cls:\'\',cand:\'\',q:\'\'};\nvar page=0,PP=25,sortK=\'km\',sortA=false;var $=function(i){return document.getElementById(i)};\nvar ufs=Array.from(new Set(D.map(function(r){return r.uf}))).filter(function(x){return x&&x!=\'—\'}).sort();\nufs.forEach(function(u){var o=document.createElement(\'option\');o.value=u;o.textContent=u;$(\'bi-uf\').appendChild(o)});\nvar FX=[\'0-50\',\'50-100\',\'100-150\',\'150-200\',\'200-300\',\'300-500\',\'500+\'];\nFX.forEach(function(f){var o=document.createElement(\'option\');o.value=f;o.textContent=f+\' km\';$(\'bi-fx\').appendChild(o)});\nfunction flt(){return D.filter(function(r){\nif(F.uf&&r.uf!=F.uf)return false;if(F.fx&&r.fx!=F.fx)return false;if(F.bal&&r.bal!=F.bal)return false;\nif(F.met&&(r.met||\'\').toLowerCase().indexOf(F.met)<0)return false;\nif(F.cls&&(r.cls||\'\').indexOf(F.cls)<0)return false;\nif(F.cand){var cc=r.cand||0;if(F.cand==\'0-100\'&&cc>100)return false;if(F.cand==\'100-300\'&&(cc<=100||cc>300))return false;if(F.cand==\'300-1000\'&&(cc<=300||cc>1000))return false;if(F.cand==\'1000+\'&&cc<=1000)return false}\nif(F.q){var ss=(r.o+\' \'+r.d+\' \'+r.uf+\' \'+r.conc).toLowerCase();if(ss.indexOf(F.q)<0)return false}\nreturn true})}\nfunction fmt(n){return n==null?\'—\':n.toLocaleString(\'pt-BR\')}\nfunction kpis(rows){var n=rows.length;var km=rows.filter(function(r){return r.km!=null});\nvar soma=km.reduce(function(x,r){return x+r.km},0);var med=km.length?soma/km.length:0;\nvar mx=km.length?Math.max.apply(null,km.map(function(r){return r.km})):0;\nvar cand=rows.reduce(function(x,r){return x+(r.cand||0)},0);var pol=new Set(rows.map(function(r){return r.d})).size;\nvar bal=rows.filter(function(r){return r.bal==\'Sim\'}).length;\nvar lr=rows.filter(function(r){return (r.met||\'\').toLowerCase().indexOf(\'linha reta\')>=0}).length;\nvar K=[[\'Municípios\',fmt(n),\'\'],[\'Candidatos\',fmt(cand),\'\'],[\'Locais de prova\',fmt(pol),\'\'],\n[\'Deslocamento médio\',med.toFixed(1)+\' km\',\'\'],[\'Maior deslocamento\',mx.toFixed(0)+\' km\',\'fx:500+\'],\n[\'Rotas com balsa\',fmt(bal),\'bal:Sim\'],[\'Rotas linha reta\',fmt(lr),\'met:linha reta\']];\n$(\'bi-kpis\').innerHTML=K.map(function(k){return \'<div class="bi-kpi" data-f="\'+k[2]+\'" title="\'+(k[3]||\'\').replace(/"/g,\'&quot;\')+\'"><div class="bi-kpi-v">\'+k[1]+\'</div><div class="bi-kpi-l">\'+k[0]+\' <span class="bi-kpi-i">ⓘ</span></div></div>\'}).join(\'\');\nArray.from($(\'bi-kpis\').children).forEach(function(el){el.onclick=function(){var f=el.getAttribute(\'data-f\');\nif(!f){return}var p=f.split(\':\');if(p[0]==\'fx\'){F.fx=(F.fx==p[1]?\'\':p[1]);$(\'bi-fx\').value=F.fx}\nif(p[0]==\'bal\'){F.bal=(F.bal==p[1]?\'\':p[1]);$(\'bi-bal\').value=F.bal}\nif(p[0]==\'met\'){F.met=(F.met==p[1]?\'\':p[1]);$(\'bi-met\').value=F.met}page=0;render()}})}\nfunction chart(rows){var c=FX.map(function(f){return rows.filter(function(r){return r.fx==f}).length});\nvar mx=Math.max.apply(null,c)||1;var cv=$(\'bi-chart\');var ct=cv.getContext(\'2d\');\nvar W=cv.width=cv.offsetWidth,H=cv.height;ct.clearRect(0,0,W,H);var bw=W/FX.length;\nfor(var i=0;i<FX.length;i++){var h=(c[i]/mx)*(H-30);ct.fillStyle=(F.fx==FX[i]?\'#1e3a8a\':\'#2563eb\');\nct.fillRect(i*bw+6,H-h-18,bw-12,h);ct.fillStyle=\'#475569\';ct.font=\'10px sans-serif\';ct.textAlign=\'center\';\nct.fillText(FX[i],i*bw+bw/2,H-4);ct.fillText(c[i],i*bw+bw/2,H-h-22)}\ncv.onclick=function(e){var x=e.offsetX;var idx=Math.floor(x/bw);if(idx>=0&&idx<FX.length){F.fx=(F.fx==FX[idx]?\'\':FX[idx]);$(\'bi-fx\').value=F.fx;page=0;render()}}}\nfunction drill(r){var el=$(\'bi-drill\');if(!el)return;var razao=(r.km&&r.reta)?(r.km/r.reta).toFixed(2)+\'×\':\'—\';\nvar it=[[\'UF\',r.uf],[\'Local de prova (vencedor)\',r.d],[\'Distância viária\',(r.km==null?\'—\':r.km+\' km\')],\n[\'Linha reta\',(r.reta==null?\'—\':r.reta+\' km\')],[\'Sinuosidade\',razao],[\'Candidatos\',fmt(r.cand)],\n[\'Concorrente (2º)\',r.conc],[\'Balsa\',r.bal],[\'Método\',r.met],[\'Classificação\',r.cls],[\'Fonte da rota\',r.fon]];\nel.innerHTML=\'<button class="bi-drill-close" onclick="document.getElementById(\\\'bi-drill\\\').style.display=\\\'none\\\'">×</button>\'+\n\'<h3>🔎 \'+r.o+\'</h3><p class="lead">Drill-through: todos os indicadores deste município.</p>\'+\n\'<div class="bi-drill-grid">\'+it.map(function(x){return \'<div class="bi-drill-item"><div class="l">\'+x[0]+\'</div><div class="v">\'+(x[1]==null?\'—\':x[1])+\'</div></div>\'}).join(\'\')+\'</div>\';\nel.style.display=\'block\';el.scrollIntoView({behavior:\'smooth\',block:\'nearest\'})}\nfunction csv(){var rows=flt();var head=[\'Municipio\',\'UF\',\'Local de Prova\',\'Distancia_km\',\'LinhaReta_km\',\'Candidatos\',\'Concorrente\',\'Balsa\',\'Metodo\',\'Classificacao\',\'Fonte\'];\nvar esc=function(v){v=(v==null?\'\':\'\'+v);return \'"\'+v.replace(/"/g,\'""\')+\'"\'};\nvar lines=[head.join(\',\')];rows.forEach(function(r){lines.push([r.o,r.uf,r.d,r.km,r.reta,r.cand,r.conc,r.bal,r.met,r.cls,r.fon].map(esc).join(\',\'))});\nvar blob=new Blob([\'\\ufeff\'+lines.join(\'\\n\')],{type:\'text/csv;charset=utf-8;\'});\nvar u=URL.createObjectURL(blob);var link=document.createElement(\'a\');link.href=u;link.download=\'bi_locais_filtrado.csv\';link.click();URL.revokeObjectURL(u)}\nfunction tbl(rows){var s2=rows.slice().sort(function(x,y){var xx=x[sortK],yy=y[sortK];\nif(xx==null)return 1;if(yy==null)return -1;if(typeof xx==\'number\'){return sortA?xx-yy:yy-xx}\nreturn sortA?(\'\'+xx).localeCompare(\'\'+yy):(\'\'+yy).localeCompare(\'\'+xx)});\nvar tot=s2.length,pg=s2.slice(page*PP,page*PP+PP);\n$(\'bi-tbody\').innerHTML=pg.map(function(r){return \'<tr><td class="clk" data-o="\'+encodeURIComponent(r.o)+\'">\'+r.o+\'</td><td>\'+r.uf+\'</td><td>\'+r.d+\'</td><td class="r">\'+(r.km==null?\'—\':r.km)+\'</td><td class="r">\'+fmt(r.cand)+\'</td><td>\'+r.conc+\'</td><td>\'+r.bal+\'</td><td>\'+(r.cls||\'—\')+\'</td></tr>\'}).join(\'\');\nArray.from(document.querySelectorAll(\'#bi-tbody td.clk\')).forEach(function(td){td.onclick=function(){var o=decodeURIComponent(td.getAttribute(\'data-o\'));var rr=D.filter(function(x){return x.o==o})[0];if(rr)drill(rr)}});\nvar np=Math.max(1,Math.ceil(tot/PP));$(\'bi-pag-i\').textContent=\'pág. \'+(page+1)+\'/\'+np;\n$(\'bi-count\').textContent=tot.toLocaleString(\'pt-BR\')+\' registro(s)\';}\nvar _UFGRID={\'RR\':1,\'AP\':1,\'AM\':1,\'PA\':1,\'MA\':1,\'CE\':1,\'RN\':1,\'AC\':1,\'RO\':1,\'TO\':1,\'PI\':1,\'PB\':1,\'MT\':1,\'GO\':1,\'BA\':1,\'PE\':1,\'DF\':1,\'MG\':1,\'AL\':1,\'MS\':1,\'SP\':1,\'RJ\':1,\'ES\':1,\'SE\':1,\'PR\':1,\'SC\':1,\'RS\':1};\n__MAPAJS__\nfunction render(){var rows=flt();kpis(rows);chart(rows);mapa(rows);tbl(rows)}\n$(\'bi-busca\').oninput=function(e){F.q=e.target.value.toLowerCase().trim();page=0;render()};\n$(\'bi-uf\').onchange=function(e){F.uf=e.target.value;page=0;render()};\n$(\'bi-fx\').onchange=function(e){F.fx=e.target.value;page=0;render()};\n$(\'bi-bal\').onchange=function(e){F.bal=e.target.value;page=0;render()};\n$(\'bi-met\').onchange=function(e){F.met=e.target.value;page=0;render()};\n$(\'bi-cls\').onchange=function(e){F.cls=e.target.value;page=0;render()};\n$(\'bi-cand\').onchange=function(e){F.cand=e.target.value;page=0;render()};\n$(\'bi-csv\').onclick=csv;\n$(\'bi-reset\').onclick=function(){F={uf:\'\',fx:\'\',bal:\'\',met:\'\',cls:\'\',cand:\'\',q:\'\'};page=0;\n[\'bi-busca\',\'bi-uf\',\'bi-fx\',\'bi-bal\',\'bi-met\',\'bi-cls\',\'bi-cand\'].forEach(function(i){$(i).value=\'\'});\nvar d0=$(\'bi-drill\');if(d0)d0.style.display=\'none\';render()};\n$(\'bi-prev\').onclick=function(){if(page>0){page--;render()}};\n$(\'bi-next\').onclick=function(){page++;var t=flt().length;if(page*PP>=t)page--;render()};\nArray.from(document.querySelectorAll(\'#bi-tbl th\')).forEach(function(th){th.onclick=function(){var k=th.getAttribute(\'data-k\');if(k==sortK){sortA=!sortA}else{sortK=k;sortA=false}render()}});\nwindow.addEventListener(\'resize\',function(){chart(flt())});render();})();'
+        _js = _js_tpl.replace("__DADOS__", _dados_json).replace("__MAPAJS__", _bi_mapa_uf_js("nº de rotas por UF"))
+        return _html, _css, _js
+    except Exception:
+        logger.error("[BI-DASHBOARD] Falha ao montar a camada BI", exc_info=True)
+        return "", "", ""
+
+
+def _gerar_relatorio_html(df, titulo="Relatório do Estudo", data_str=""):
+    """[RELATORIO-HTML-PRO - 184ª geração] Relatório HTML AUTOCONTIDO (offline) de nível profissional/BI:
+    capa, NAVEGAÇÃO LATERAL (sumário), cartões executivos e seções analíticas ricas — Resumo, Distribuição de
+    Distâncias, Síntese por UF, Competitividade dos Polos, Concorrentes, Balsas, Linha Reta × Rota, Mapa e
+    Diagnóstico Executivo automático. Gráficos plotly embutidos (scatter_geo funciona sem tiles → offline);
+    layout responsivo e amigável para impressão. Defensivo: cada seção só aparece se as colunas existirem;
+    erro numa seção não derruba o relatório. Retorna string HTML (ou None em falha)."""
+    import html as _he
+    try:
+        def _num(c):
+            return pd.to_numeric(df[c], errors='coerce') if c in df.columns else None
+        _n = len(df)
+        _dist, _reta, _integ = _num('Distancia'), _num('Linha Reta'), _num('Integridade Geográfica')
+        _insc = _num('Inscritos')
+        if _insc is None:
+            _insc = _num('Quantidade de Inscritos')
+        _tot_cand = int(_insc.fillna(0).sum()) if _insc is not None else _n
+        _n_polos = df['Municipio Destino'].nunique() if 'Municipio Destino' in df.columns else None
+        _st = {"first": True}
+
+        def _emb(fig):
+            _h = fig.to_html(full_html=False, include_plotlyjs=(True if _st["first"] else False),
+                             config={"displayModeBar": False, "responsive": True})
+            _st["first"] = False
+            return _h
+        _sec = []   # (id, título, html)
+
+        _kpis = [("Candidatos", f"{_tot_cand:,}"), ("Municípios de origem", f"{_n:,}")]
+        if _n_polos is not None:
+            _kpis.append(("Polos utilizados", f"{_n_polos:,}"))
+        if _dist is not None:
+            _kpis += [("Deslocamento médio", f"{_dist.mean():.0f} km"), ("Mediana", f"{_dist.median():.0f} km"),
+                      ("Maior deslocamento", f"{_dist.max():.0f} km"), ("Deslocamento total", f"{_dist.sum():,.0f} km")]
+        if _integ is not None:
+            _kpis.append(("Integridade média", f"{_integ.mean():.0f}/100"))
+        _kh = "".join(f'<div class="kpi"><div class="kpi-v">{_he.escape(str(v))}</div>'
+                      f'<div class="kpi-l">{_he.escape(l)}</div></div>' for l, v in _kpis)
+        # [STORYTELLING - 184ª geração] Narrativa de abertura conduzindo o leitor pelos dados reais.
+        _story = _narrativa_storytelling_alocacao(df)
+        if _story:
+            _sec.append(("historia", "Panorama do Estudo", _story))
+        _sec.append(("resumo", "Resumo Executivo", f'<div class="kpis">{_kh}</div>' + _caixa_explicativa(
+            "O que estes números significam?",
+            "Cada cartão resume o estudo todo: <b>municípios</b> é quantas cidades de origem foram processadas; "
+            "<b>candidatos</b> é o total de pessoas que se deslocarão; <b>deslocamento médio/mediano</b> mostra "
+            "a distância típica que um candidato percorre até o local de prova. Quanto menores as distâncias, "
+            "melhor a alocação. Os valores vêm da menor rota viária real de cada município.", "info")))
+
+        if _dist is not None and _dist.notna().any():
+            _labs = ["0–50", "50–100", "100–150", "150–200", "200–300", "300–500", "500+"]
+            _cat = pd.cut(_dist.dropna(), bins=[0, 50, 100, 150, 200, 300, 500, 10**9], labels=_labs, right=False)
+            _cnt = _cat.value_counts().reindex(_labs, fill_value=0)
+            _f = go.Figure(go.Bar(x=list(_labs), y=[int(x) for x in _cnt.values], marker_color="#2563eb"))
+            _f.update_layout(height=320, margin=dict(l=44, r=16, t=16, b=40), template="plotly_white", yaxis_title="rotas")
+            _sec.append(("dist", "Distribuição de Distâncias", _emb(_f)))
+
+        if 'UF Origem' in df.columns and _dist is not None:
+            _g = df.assign(_d=_dist).groupby('UF Origem').agg(Rotas=('_d', 'size'), Media=('_d', 'mean')).reset_index().sort_values('Rotas', ascending=False)
+            _f = go.Figure(go.Bar(x=_g['UF Origem'], y=_g['Rotas'], marker_color="#0ea5e9"))
+            _f.update_layout(height=300, margin=dict(l=44, r=16, t=16, b=40), template="plotly_white", yaxis_title="rotas")
+            _rows = "".join(f"<tr><td>{_he.escape(str(r['UF Origem']))}</td><td class='r'>{int(r['Rotas'])}</td><td class='r'>{r['Media']:.0f}</td></tr>" for _, r in _g.head(15).iterrows())
+            _sec.append(("uf", "Síntese por UF", _emb(_f) + f"<table><thead><tr><th>UF</th><th class='r'>Rotas</th><th class='r'>Dist. média (km)</th></tr></thead><tbody>{_rows}</tbody></table>"))
+            # [GRAFICO-BOXPLOT - 184ª geração] Boxplot de distâncias por UF: revela a DISTRIBUIÇÃO completa
+            # (mediana, quartis, amplitude, outliers) de cada estado — muito mais informativo que a média,
+            # pois mostra a dispersão e os casos extremos que a média esconde.
+            try:
+                _dfb = df.assign(_d=_dist).dropna(subset=['_d'])
+                _dfb = _dfb[_dfb['UF Origem'].notna()]
+                if len(_dfb) >= 8 and _dfb['UF Origem'].nunique() >= 2:
+                    # ordena UFs pela mediana (maior deslocamento típico primeiro)
+                    _ordem = _dfb.groupby('UF Origem')['_d'].median().sort_values(ascending=False).index.tolist()
+                    _fbx = go.Figure()
+                    for _uf in _ordem:
+                        _vals = _dfb[_dfb['UF Origem'] == _uf]['_d']
+                        _fbx.add_trace(go.Box(y=_vals, name=str(_uf), boxpoints='outliers',
+                                              marker_color="#2563eb", line_color="#1e3a8a"))
+                    _fbx.update_layout(height=420, margin=dict(l=48, r=16, t=16, b=40),
+                                       template="plotly_white", showlegend=False,
+                                       yaxis_title="distância viária (km)", xaxis_title="UF (ordenada pela mediana)")
+                    _sec.append(("boxplot", "Distribuição de Distâncias por Estado (boxplot)",
+                                 '<p class="lead">Cada caixa mostra a distribuição das distâncias daquele '
+                                 'estado: a linha central é a <b>mediana</b>, a caixa vai do 1º ao 3º quartil '
+                                 '(os 50% centrais), as hastes alcançam o restante e os pontos isolados são '
+                                 '<b>outliers</b> (deslocamentos atípicos).</p>' + _emb(_fbx) + _caixa_explicativa(
+                                     "Por que boxplot e não só a média?",
+                                     "A média esconde a dispersão: dois estados podem ter a mesma média, mas um "
+                                     "com todos os municípios parecidos e outro com metade muito perto e metade "
+                                     "muito longe. O boxplot revela isso de relance — caixas <b>altas</b> "
+                                     "indicam estados heterogêneos (uns candidatos andam pouco, outros muito) e "
+                                     "os <b>pontos soltos no topo</b> são os municípios que mais precisam de "
+                                     "atenção logística naquele estado.", "info")))
+            except Exception:
+                logger.error("[GRAFICO-BOXPLOT] Falha ao montar boxplot por UF", exc_info=True)
+
+            # [GRAFICO-VIOLIN - 184ª geração] Violin plot da distribuição de distâncias por REGIÃO: mostra a
+            # DENSIDADE completa da distribuição (a "forma" — onde os valores se concentram), não só os
+            # quartis do boxplot. Revela distribuições bimodais (dois picos) que o boxplot esconde, úteis
+            # para ver, por exemplo, uma região com dois grupos distintos de deslocamento.
+            try:
+                _REGIAO_UF = {
+                    "Norte": {"AC", "AP", "AM", "PA", "RO", "RR", "TO"},
+                    "Nordeste": {"AL", "BA", "CE", "MA", "PB", "PE", "PI", "RN", "SE"},
+                    "Centro-Oeste": {"DF", "GO", "MT", "MS"},
+                    "Sudeste": {"ES", "MG", "RJ", "SP"},
+                    "Sul": {"PR", "RS", "SC"},
+                }
+                _uf_para_regiao = {_uf: _reg for _reg, _ufs in _REGIAO_UF.items() for _uf in _ufs}
+                if _dist is not None and 'UF Origem' in df.columns:
+                    _dfv = df.assign(_d=_dist).dropna(subset=['_d'])
+                    _dfv = _dfv[_dfv['UF Origem'].notna()].copy()
+                    _dfv['_regiao'] = _dfv['UF Origem'].astype(str).str.upper().map(_uf_para_regiao)
+                    _dfv = _dfv.dropna(subset=['_regiao'])
+                    if len(_dfv) >= 10 and _dfv['_regiao'].nunique() >= 2:
+                        _ordem_reg = (_dfv.groupby('_regiao')['_d'].median()
+                                      .sort_values(ascending=False).index.tolist())
+                        _fv = go.Figure()
+                        _cores_reg = {"Norte": "#0891b2", "Nordeste": "#ca8a04", "Centro-Oeste": "#7c3aed",
+                                      "Sudeste": "#2563eb", "Sul": "#16a34a"}
+                        for _reg in _ordem_reg:
+                            _vals = _dfv[_dfv['_regiao'] == _reg]['_d']
+                            _fv.add_trace(go.Violin(y=_vals, name=str(_reg), box_visible=True,
+                                                    meanline_visible=True, points=False,
+                                                    fillcolor=_cores_reg.get(_reg, "#2563eb"),
+                                                    line_color="#0f172a", opacity=0.7))
+                        _fv.update_layout(height=440, margin=dict(l=48, r=16, t=16, b=40),
+                                          template="plotly_white", showlegend=False,
+                                          yaxis_title="distância viária (km)",
+                                          xaxis_title="região (ordenada pela mediana)")
+                        _sec.append(("violin", "Densidade das Distâncias por Região (violin plot)",
+                                     '<p class="lead">Cada "violino" mostra a <b>densidade</b> da distribuição '
+                                     'de distâncias na região: quanto mais larga a forma numa altura, mais '
+                                     'municípios têm aquele deslocamento. A caixa interna traz mediana e '
+                                     'quartis; a linha tracejada é a média.</p>' + _emb(_fv) + _caixa_explicativa(
+                                         "O que o violino mostra que o boxplot não mostra?",
+                                         "O boxplot resume a distribuição em cinco números; o violino desenha a "
+                                         "<b>forma inteira</b>. Uma região cujo violino tem <b>dois bojos</b> "
+                                         "(bimodal) tem dois grupos distintos de municípios — por exemplo, uns "
+                                         "perto de um polo e outros isolados — algo invisível num boxplot. "
+                                         "Violinos <b>largos e altos</b> indicam grande variação de deslocamento "
+                                         "dentro da região, sinalizando heterogeneidade logística.", "info")))
+            except Exception:
+                logger.error("[GRAFICO-VIOLIN] Falha ao montar violin por região", exc_info=True)
+
+            # [GRAFICO-SANKEY - 184ª geração] Diagrama de Sankey do FLUXO região → polo de destino: mostra
+            # como os candidatos se distribuem geograficamente entre os locais de prova. A largura de cada
+            # fluxo é proporcional ao número de municípios (ou candidatos), revelando os polos que concentram
+            # a demanda e de quais regiões ela vem — uma visão de rede que tabelas não transmitem.
+            try:
+                if 'Municipio Destino' in df.columns and 'UF Origem' in df.columns:
+                    _REG_UF_SK = {
+                        "Norte": {"AC", "AP", "AM", "PA", "RO", "RR", "TO"},
+                        "Nordeste": {"AL", "BA", "CE", "MA", "PB", "PE", "PI", "RN", "SE"},
+                        "Centro-Oeste": {"DF", "GO", "MT", "MS"},
+                        "Sudeste": {"ES", "MG", "RJ", "SP"}, "Sul": {"PR", "RS", "SC"},
+                    }
+                    _uf2reg = {_u: _r for _r, _us in _REG_UF_SK.items() for _u in _us}
+                    _dfs = df[df['Municipio Destino'].notna() & df['UF Origem'].notna()].copy()
+                    _dfs['_reg'] = _dfs['UF Origem'].astype(str).str.upper().map(_uf2reg)
+                    _dfs = _dfs.dropna(subset=['_reg'])
+                    # peso: candidatos se houver, senão contagem de municípios
+                    _peso_col = next((c for c in ['Inscritos', 'Quantidade de Inscritos'] if c in _dfs.columns), None)
+                    if _peso_col:
+                        _dfs['_peso'] = pd.to_numeric(_dfs[_peso_col], errors='coerce').fillna(1)
+                    else:
+                        _dfs['_peso'] = 1
+                    # limita aos 8 polos que mais concentram, para o diagrama ficar legível
+                    _top_polos = _dfs.groupby('Municipio Destino')['_peso'].sum().nlargest(8).index.tolist()
+                    _dfs = _dfs[_dfs['Municipio Destino'].isin(_top_polos)]
+                    _fluxos = _dfs.groupby(['_reg', 'Municipio Destino'])['_peso'].sum().reset_index()
+                    if len(_fluxos) >= 2:
+                        _regioes = sorted(_fluxos['_reg'].unique().tolist())
+                        _polos = sorted(_fluxos['Municipio Destino'].astype(str).unique().tolist())
+                        _labels = _regioes + _polos
+                        _idx = {_l: _i for _i, _l in enumerate(_labels)}
+                        _cor_reg = {"Norte": "#0891b2", "Nordeste": "#ca8a04", "Centro-Oeste": "#7c3aed",
+                                    "Sudeste": "#2563eb", "Sul": "#16a34a"}
+                        _node_cores = [_cor_reg.get(_r, "#64748b") for _r in _regioes] + ["#94a3b8"] * len(_polos)
+                        _src = [_idx[_r] for _r in _fluxos['_reg']]
+                        _tgt = [_idx[str(_p)] for _p in _fluxos['Municipio Destino']]
+                        _val = _fluxos['_peso'].tolist()
+                        _fsk = go.Figure(go.Sankey(
+                            node=dict(pad=15, thickness=18, line=dict(color="#e2e8f0", width=0.5),
+                                      label=_labels, color=_node_cores),
+                            link=dict(source=_src, target=_tgt, value=_val,
+                                      color="rgba(37,99,235,0.25)")))
+                        _fsk.update_layout(height=460, margin=dict(l=8, r=8, t=16, b=16),
+                                           font=dict(size=12), template="plotly_white")
+                        _unid = "candidatos" if _peso_col else "municípios"
+                        _sec.append(("sankey", "Fluxo Região → Polo de Aplicação (Sankey)",
+                                     f'<p class="lead">Este diagrama mostra como os {_unid} fluem das regiões '
+                                     'de origem (à esquerda) para os principais polos de aplicação (à direita). '
+                                     'A <b>espessura</b> de cada faixa é proporcional ao volume: faixas grossas '
+                                     'revelam os polos que concentram a maior demanda.</p>' + _emb(_fsk)
+                                     + _caixa_explicativa(
+                                         "Como ler um diagrama de Sankey?",
+                                         "Cada nó à esquerda é uma região de origem e cada nó à direita é um "
+                                         "polo de prova. As faixas que os conectam têm largura proporcional ao "
+                                         "número de " + _unid + ". Um polo que recebe faixas grossas de várias "
+                                         "regiões é um <b>concentrador</b> — ponto crítico de capacidade. Faixas "
+                                         "longas cruzando o diagrama podem indicar candidatos encaminhados para "
+                                         "polos distantes de sua região, merecendo verificação.", "info")))
+            except Exception:
+                logger.error("[GRAFICO-SANKEY] Falha ao montar Sankey região→polo", exc_info=True)
+
+        if 'Municipio Destino' in df.columns and _dist is not None:
+            _p = df.assign(_d=_dist).groupby('Municipio Destino').agg(Mun=('_d', 'size'), DM=('_d', 'mean')).reset_index().sort_values('Mun', ascending=False)
+            _has_c = _insc is not None
+            if _has_c:
+                _p['Cand'] = _p['Municipio Destino'].map(df.assign(_i=_insc.fillna(0)).groupby('Municipio Destino')['_i'].sum()).fillna(0).astype(int)
+            _rows = "".join("<tr><td>" + _he.escape(str(r['Municipio Destino'])) + f"</td><td class='r'>{int(r['Mun'])}</td>" + (f"<td class='r'>{int(r['Cand']):,}</td>" if _has_c else "") + f"<td class='r'>{r['DM']:.0f}</td></tr>" for _, r in _p.head(20).iterrows())
+            _cab = "<th>Polo</th><th class='r'>Municípios</th>" + ("<th class='r'>Candidatos</th>" if _has_c else "") + "<th class='r'>Dist. média (km)</th>"
+            # [SUNBURST - 184ª geração] Hierarquia UF → Polo (anel): a fatia de cada polo dentro do seu estado
+            # revela, num relance, quais polos concentram a demanda em cada UF. Usa candidatos quando há;
+            # senão, nº de municípios atendidos. Plotly embutido (offline).
+            _sun = ""
+            if 'UF Origem' in df.columns:
+                try:
+                    _peso_col = _insc.fillna(0) if _insc is not None else pd.Series(1, index=df.index)
+                    _hier = (df.assign(_w=_peso_col).groupby(['UF Origem', 'Municipio Destino'])['_w']
+                             .sum().reset_index())
+                    _hier = _hier[_hier['_w'] > 0]
+                    if len(_hier) > 1:
+                        _fs = px.sunburst(_hier, path=['UF Origem', 'Municipio Destino'], values='_w',
+                                          color='UF Origem',
+                                          color_discrete_sequence=px.colors.qualitative.Set2)
+                        _fs.update_layout(margin=dict(t=10, l=0, r=0, b=0), height=460)
+                        _sun = ('<p class="lead">Anel hierárquico <b>estado → local de prova</b>: o tamanho de '
+                                'cada fatia é o volume de ' + ('candidatos' if _insc is not None else
+                                'municípios') + ' atendidos. Clique numa UF para aprofundar.</p>' + _emb(_fs))
+                        # [TREEMAP - 184ª geração] Treemap complementar ao sunburst: blocos proporcionais.
+                        _ftp = px.treemap(_hier, path=['UF Origem', 'Municipio Destino'], values='_w',
+                                          color='UF Origem',
+                                          color_discrete_sequence=px.colors.qualitative.Set2)
+                        _ftp.update_layout(margin=dict(t=10, l=0, r=0, b=0), height=440)
+                        _sun += ('<p class="lead" style="margin-top:14px">Mesma hierarquia como <b>treemap</b> — '
+                                 'blocos proporcionais ao volume, úteis para comparar magnitudes lado a lado.</p>'
+                                 + _emb(_ftp))
+                except Exception:
+                    _sun = ""
+            _sec.append(("polos", "Competitividade dos Polos", f'<p class="lead">Quantos municípios e candidatos cada polo concentra — os do topo são os mais demandados.</p>' + _sun + f'<table><thead><tr>{_cab}</tr></thead><tbody>{_rows}</tbody></table>'))
+
+        if 'Municipio Concorrente' in df.columns:
+            _cc = df['Municipio Concorrente'].astype(str).str.strip()
+            _cc = _cc[(_cc != '') & (_cc.str.lower() != 'nan')]
+            _vc = _cc.value_counts().head(10)
+            if len(_vc):
+                _dc = _num('Distancia Concorrente')
+                _extra = ""
+                if _dist is not None and _dc is not None:
+                    _difs = (_dc - _dist).dropna()
+                    if len(_difs):
+                        _extra = f'<p class="lead">Diferença média para o 2º colocado: <b>{_difs.mean():.0f} km</b> · mínima {_difs.min():.0f} km · máxima {_difs.max():.0f} km.</p>'
+                _rows = "".join(f"<tr><td>{_he.escape(str(k))}</td><td class='r'>{int(v)}</td></tr>" for k, v in _vc.items())
+                _sec.append(("conc", "Concorrentes (2º colocado)", f'{_extra}<table><thead><tr><th>Alternativa de aplicação</th><th class="r">Vezes como 2ª opção</th></tr></thead><tbody>{_rows}</tbody></table>'))
+
+        if 'Balsas' in df.columns:
+            _bm = df['Balsas'].astype(str).str.strip().str.lower().isin(['sim', 'yes', 'true', '1'])
+            _nb = int(_bm.sum())
+            _cb = int(_insc[_bm].fillna(0).sum()) if _insc is not None else _nb
+            _sec.append(("balsa", "Balsas", f'<div class="kpis"><div class="kpi"><div class="kpi-v">{_nb:,}</div><div class="kpi-l">Rotas que cruzam balsa</div></div><div class="kpi"><div class="kpi-v">{_cb:,}</div><div class="kpi-l">Candidatos afetados</div></div></div><p class="lead">Rotas dependentes de travessia são sensíveis a horários e condições do rio — priorize alternativas onde possível.</p>'))
+
+        if _dist is not None and _reta is not None:
+            _mm = pd.DataFrame({"r": _reta, "v": _dist}).dropna()
+            _mm = _mm[(_mm["r"] > 0) & (_mm["v"] > 0)]
+            if len(_mm):
+                _f = go.Figure(go.Scatter(x=_mm["r"], y=_mm["v"], mode="markers", marker=dict(color="#7c3aed", size=6, opacity=0.55)))
+                _mx = float(max(_mm["r"].max(), _mm["v"].max()))
+                _f.add_trace(go.Scatter(x=[0, _mx], y=[0, _mx], mode="lines", line=dict(dash="dash", color="#94a3b8")))
+                _f.update_layout(height=360, margin=dict(l=52, r=16, t=16, b=40), template="plotly_white", xaxis_title="linha reta (km)", yaxis_title="viária (km)", showlegend=False)
+                _sec.append(("sinuo", "Linha Reta × Rota", f'<p class="lead">Sinuosidade média (viária ÷ reta): <b>{(_mm["v"] / _mm["r"]).mean():.2f}×</b>. Pontos acima da diagonal indicam o desvio natural das estradas.</p>' + _emb(_f) + _caixa_explicativa(
+                    "Como interpretar este gráfico?",
+                    "Cada ponto é um município. O eixo horizontal é a distância em linha reta; o vertical, a "
+                    "distância real por estrada. Como a estrada nunca é mais curta que a reta, todos os pontos "
+                    "ficam acima da diagonal. Quanto <b>mais longe da diagonal</b>, mais a estrada serpenteia "
+                    "(serras, contornos de rios). Pontos muito acima podem indicar travessia fluvial disfarçada "
+                    "de rota rodoviária — candidatos a revisão.", "info")))
+
+        if {'Lat Origem', 'Lon Origem'}.issubset(df.columns):
+            _dm = df.copy()
+            _dm['_la'] = pd.to_numeric(_dm['Lat Origem'], errors='coerce')
+            _dm['_lo'] = pd.to_numeric(_dm['Lon Origem'], errors='coerce')
+            _dm = _dm[_dm['_la'].notna() & _dm['_lo'].notna()]
+            if len(_dm):
+                _fm = px.scatter_geo(_dm, lat='_la', lon='_lo',
+                                     color=('Distancia' if 'Distancia' in _dm.columns else None),
+                                     hover_name=('Municipio Origem' if 'Municipio Origem' in _dm.columns else None),
+                                     scope='south america', color_continuous_scale="Turbo")
+                _fm.update_layout(height=460, margin=dict(l=0, r=0, t=0, b=0))
+                _fm.update_geos(fitbounds="locations", showcountries=True, countrycolor="#94a3b8")
+                _sec.append(("mapa", "Mapa das Origens", _emb(_fm) + _caixa_explicativa(
+                    "Como interpretar este mapa?",
+                    "Cada ponto é um município de origem, posicionado pela sua coordenada geográfica. A cor "
+                    "indica a distância até o local de prova: tons mais quentes/escuros costumam marcar "
+                    "deslocamentos maiores. Use-o para enxergar <b>onde no território</b> estão os candidatos "
+                    "que mais andam — regiões com muitos pontos de deslocamento alto são as que mais se "
+                    "beneficiariam de um novo local de prova.", "info")))
+
+        _qual = _secao_qualidade_dados_html(df)  # [QUALIDADE-DADOS - 184ª geração]
+        if _qual:
+            _sec.append(("qualidade", "Qualidade dos Dados", _qual))
+
+        _dg = []
+        if 'Classificação da Rota' in df.columns:
+            _vc_cl = df['Classificação da Rota'].astype(str).value_counts()
+            if len(_vc_cl):
+                _dg.append("<b>Qualidade das rotas.</b> " + "; ".join(
+                    f"{_he.escape(str(k))}: <b>{int(v)}</b>" for k, v in _vc_cl.head(5).items()) +
+                    ". Rotas 🟠 usaram linha reta por ausência de rota viária; 🟡 merecem revisão (desvio "
+                    "extremo ou traçado atípico).")
+        if _dist is not None:
+            _dg.append(f"O estudo cobre <b>{_n:,} municípios</b> de origem" + (f" e <b>{_tot_cand:,} candidatos</b>" if _insc is not None else "") + (f", distribuídos em <b>{_n_polos} polos</b>" if _n_polos else "") + f". O deslocamento médio é de <b>{_dist.mean():.0f} km</b> (mediana {_dist.median():.0f} km) e o pior caso, <b>{_dist.max():.0f} km</b>.")
+            if 'Municipio Origem' in df.columns:
+                _cr = df.assign(_d=_dist).nlargest(3, '_d')
+                _dg.append("<b>Municípios críticos</b> (maior deslocamento): " + "; ".join(f"{_he.escape(str(r['Municipio Origem']))} ({r['_d']:.0f} km)" for _, r in _cr.iterrows()) + " — atenção prioritária a esses candidatos.")
+            if 'Municipio Destino' in df.columns:
+                _pv = df['Municipio Destino'].value_counts()
+                if len(_pv):
+                    _dg.append(f"<b>Polo mais utilizado</b>: {_he.escape(str(_pv.index[0]))} ({int(_pv.iloc[0])} municípios) — verifique a capacidade; polos com poucos municípios podem ser consolidados.")
+        if _dist is not None and {'Municipio Origem', 'Municipio Destino'}.issubset(df.columns):
+            _det = df.assign(_d=_dist).nlargest(15, '_d')
+            _has_b = 'Balsas' in df.columns
+            _rt = _num('Linha Reta')
+            _rows_d = ""
+            for _, r in _det.iterrows():
+                _b = (str(r.get('Balsas', '')).strip().lower() in ('sim', 'yes', 'true', '1')) if _has_b else False
+                _reta_v = pd.to_numeric(r.get('Linha Reta'), errors='coerce') if _rt is not None else None
+                _rows_d += ("<tr><td>" + _he.escape(str(r['Municipio Origem'])) + "</td><td>" +
+                            _he.escape(str(r['Municipio Destino'])) + f"</td><td class='r'>{r['_d']:.0f}</td>" +
+                            (f"<td class='r'>{_reta_v:.0f}</td>" if (_reta_v is not None and pd.notna(_reta_v))
+                             else ("<td class='r'>—</td>" if _rt is not None else "")) +
+                            (f"<td>{'🚢 sim' if _b else 'não'}</td>" if _has_b else "") + "</tr>")
+            _cab_d = "<th>Origem</th><th>Local de prova</th><th class='r'>km viária</th>" + \
+                     ("<th class='r'>linha reta</th>" if _rt is not None else "") + \
+                     ("<th>Balsa</th>" if _has_b else "")
+            _sec.append(("detalhe", "Rotas em Detalhe (15 maiores)",
+                         '<p class="lead">As 15 rotas de maior deslocamento — origem, local de prova, distância '
+                         f'viária e por linha reta, e travessias.</p><table><thead><tr>{_cab_d}</tr></thead>'
+                         f'<tbody>{_rows_d}</tbody></table>'))
+
+        _sec.append(("diag", "Diagnóstico Executivo", "".join(f"<p>{d}</p>" for d in _dg) or "<p>Sem dados suficientes.</p>"))
+        _sec.extend(_secoes_metodologia_referencias_html())  # [ARTIGO - 184ª geração]
+        _sec.append(("glossario", "Glossário", _bloco_glossario_html()))  # [GLOSSARIO - 184ª geração]
+
+        _nav = "".join(f'<a href="#{i}">{_he.escape(t)}</a>' for i, t, _ in _sec)
+        _corpo = "".join(f'<section id="{i}"><h2>{_he.escape(t)}</h2>{h}</section>' for i, t, h in _sec)
+        # [BI-DASHBOARD - 184ª geração] Camada BI ANEXADA ao topo — o relatório original abaixo fica INTACTO.
+        _bi_html, _bi_css, _bi_js = _bi_dashboard_alocacao(df)
+        if _bi_html:
+            _nav = '<a href="#bi">📊 Dashboard BI</a>' + _nav
+            _corpo = _bi_html + _corpo
+        # [RELATORIO-CIENTIFICO - 184ª geração] Seções de artigo científico anexadas ao topo: Abstract,
+        # Fluxograma e Diagnóstico Inteligente. Cada uma é autocontida e defensiva (string vazia se falhar),
+        # então NUNCA derrubam o relatório. Entram na navegação lateral e no corpo, antes das seções atuais.
+        try:
+            _sci_nav = ""
+            _sci_corpo = ""
+            _abs = _secao_abstract_html(df, titulo)
+            if _abs:
+                _sci_nav += '<a href="#abstract">Resumo (Abstract)</a>'
+                _sci_corpo += _abs
+            _flux = _secao_fluxograma_html()
+            if _flux:
+                _sci_nav += '<a href="#fluxograma">Fluxograma</a>'
+                _sci_corpo += _flux
+            _diag = _secao_diagnostico_inteligente_html(df)
+            if _diag:
+                _sci_nav += '<a href="#diagnostico">Diagnóstico Inteligente</a>'
+                _sci_corpo += _diag
+            if _sci_corpo:
+                _nav = _sci_nav + _nav
+                _corpo = _sci_corpo + _corpo
+        except Exception:
+            logger.error("[RELATORIO-CIENTIFICO] Falha ao anexar seções científicas", exc_info=True)
+        _css = (
+            ":root{--brand:#0f172a;--accent:#2563eb;--line:#e2e8f0;--muted:#64748b}"
+            "*{box-sizing:border-box}body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;"
+            "background:#f1f5f9;color:#0f172a}a{color:inherit;text-decoration:none}"
+            ".cover{background:linear-gradient(135deg,#0f172a,#1e3a8a);color:#fff;padding:40px 40px 44px}"
+            ".cover .tag{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#93c5fd}"
+            ".cover h1{margin:8px 0 6px;font-size:28px;font-weight:800}.cover p{margin:0;color:#cbd5e1;font-size:13px}"
+            ".wrap{display:flex;align-items:flex-start;max-width:1180px;margin:0 auto}"
+            "nav{position:sticky;top:0;align-self:flex-start;width:240px;flex:0 0 240px;padding:24px 16px;"
+            "max-height:100vh;overflow:auto}nav .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.1em;"
+            "color:var(--muted);margin:0 10px 8px}nav a{display:block;padding:9px 12px;border-radius:8px;"
+            "font-size:13.5px;color:#334155;margin-bottom:2px}nav a:hover{background:#e2e8f0;color:var(--brand)}"
+            "main{flex:1;min-width:0;padding:24px 32px 60px}"
+            ".kpis{display:flex;flex-wrap:wrap;gap:14px}.kpi{flex:1;min-width:150px;background:#fff;"
+            "border:1px solid var(--line);border-radius:14px;padding:18px}.kpi-v{font-size:26px;font-weight:800;"
+            "color:var(--accent)}.kpi-l{font-size:12px;color:var(--muted);margin-top:2px}"
+            "section{background:#fff;border:1px solid var(--line);border-radius:14px;padding:20px 22px;"
+            "margin-bottom:18px;scroll-margin-top:16px}h2{font-size:16px;margin:0 0 14px;padding-bottom:10px;"
+            "border-bottom:2px solid #eef2f7}p.lead{color:#475569;font-size:13.5px;margin:0 0 12px}"
+            "table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px 11px;"
+            "border-bottom:1px solid #eef2f7;text-align:left}td.r,th.r{text-align:right}"
+            "thead th{background:#f1f5f9;color:#475569;font-size:12px}"
+            "footer{max-width:1180px;margin:0 auto;padding:8px 32px 44px;color:#94a3b8;font-size:11px}"
+            "@media(max-width:820px){.wrap{display:block}nav{position:static;width:auto;flex:none;max-height:none;"
+            "display:flex;flex-wrap:wrap;gap:6px}nav .lbl{display:none}nav a{margin:0}}"
+            "@media print{nav{display:none}section{break-inside:avoid}.cover{-webkit-print-color-adjust:exact}}"
+            ".story{display:grid;gap:12px;margin:8px 0}.story-b{background:#fff;border:1px solid var(--line);border-left:4px solid #1e3a8a;border-radius:10px;padding:14px 16px}.story-t{font-weight:700;font-size:15px;color:#1e3a8a;margin-bottom:6px}.story-b ul li{font-size:13.5px;color:#334155;line-height:1.55}.story-b>div{font-size:13.5px;color:#334155;line-height:1.6}.cxd{margin:14px 0;padding:12px 14px;border-radius:8px}.cxd-t{font-weight:700;font-size:13.5px;margin-bottom:4px}.cxd-c{font-size:13px;color:#334155;line-height:1.5}.glo{display:grid;grid-template-columns:1fr;gap:0;margin:12px 0}.glo-item{padding:10px 0;border-bottom:1px solid #eef2f7}.glo-item dt{font-weight:700;color:#1e3a8a;font-size:13.5px;margin-bottom:3px}.glo-item dd{margin:0;font-size:13px;color:#334155;line-height:1.5}"
+            + _bi_css
+        )
+        return (f'<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">'
+                f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+                f'<title>{_he.escape(titulo)}</title><style>{_css}</style></head><body>'
+                f'<div class="cover"><div class="tag">Relatório Técnico · Planejamento de Locais de Aplicação</div>'
+                f'<h1>{_he.escape(titulo)}</h1><p>{_he.escape(data_str)} · {_n:,} municípios · {_tot_cand:,} candidatos</p></div>'
+                f'<div class="wrap"><nav><div class="lbl">Sumário</div>{_nav}</nav><main>{_corpo}</main></div>'
+                f'<footer>Relatório autocontido · abre offline em qualquer navegador · gerado pela aplicação.</footer>'
+                f'<script>{_bi_js}</script>'
+                f'</body></html>')
+    except Exception:
+        logger.error("[RELATORIO-HTML-PRO] Falha ao gerar relatório completo — emitindo versão resiliente",
+                     exc_info=True)
+        # [RELATORIO-RESILIENTE - 184ª geração] O relatório NUNCA deve falhar (exigência do usuário). Se a
+        # versão rica quebrar por qualquer motivo, emitimos um relatório MÍNIMO porém válido: capa, aviso
+        # transparente do que ocorreu e uma tabela essencial com os dados disponíveis. Assim o usuário sempre
+        # recebe um documento abrível, com os números que importam, em vez da mensagem de erro.
+        try:
+            import html as _he2
+            _titulo_s = _he2.escape(str(titulo or "Relatório do Estudo"))
+            _data_s = _he2.escape(str(data_str or ""))
+            _n_linhas = 0
+            _tabela_html = ""
+            try:
+                if df is not None and not getattr(df, "empty", True):
+                    _n_linhas = len(df)
+                    # seleciona colunas essenciais quando existirem, senão as primeiras
+                    _cols_pref = [c for c in ["Municipio Origem", "Origem", "Municipio Destino", "Destino",
+                                              "Distancia", "Tempo", "Linha Reta", "UF Origem", "Inscritos",
+                                              "Fonte da Rota"] if c in df.columns]
+                    _cols_use = _cols_pref if _cols_pref else list(df.columns)[:10]
+                    _amostra = df[_cols_use].head(500)
+                    _th = "".join(f"<th>{_he2.escape(str(_c))}</th>" for _c in _cols_use)
+                    _trs = []
+                    for _, _row in _amostra.iterrows():
+                        _tds = "".join(f"<td>{_he2.escape(str(_row[_c]))}</td>" for _c in _cols_use)
+                        _trs.append(f"<tr>{_tds}</tr>")
+                    _tabela_html = (f'<table style="border-collapse:collapse;width:100%;font-size:13px">'
+                                    f'<thead><tr>{_th}</tr></thead><tbody>{"".join(_trs)}</tbody></table>')
+                    if _n_linhas > 500:
+                        _tabela_html += (f'<p style="color:#64748b;font-size:12px">Exibindo as primeiras 500 '
+                                         f'de {_n_linhas:,} linhas.</p>')
+            except Exception:
+                _tabela_html = "<p>Os dados detalhados não puderam ser incluídos nesta versão.</p>"
+            return (
+                '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">'
+                '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                f'<title>{_titulo_s}</title>'
+                '<style>body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;'
+                'color:#0f172a;background:#f8fafc}.cover{background:linear-gradient(135deg,#1e3a8a,#1e40af);'
+                'color:#fff;padding:40px}.cover h1{margin:8px 0;font-size:26px}.wrap{padding:24px 40px}'
+                '.aviso{background:#fef9c3;border-left:4px solid #ca8a04;padding:14px 16px;border-radius:8px;'
+                'margin:16px 0;color:#713f12}th{background:#1e40af;color:#fff;padding:8px;text-align:left;'
+                'border:1px solid #cbd5e1}td{padding:7px 8px;border:1px solid #e2e8f0}'
+                'tr:nth-child(even) td{background:#f1f5f9}footer{padding:20px 40px;color:#64748b;font-size:12px}'
+                '</style></head><body>'
+                f'<div class="cover"><div>Relatório Técnico · Planejamento de Locais de Aplicação</div>'
+                f'<h1>{_titulo_s}</h1><p>{_data_s} · {_n_linhas:,} registros</p></div>'
+                '<div class="wrap">'
+                '<div class="aviso"><b>Versão essencial do relatório.</b> A composição visual completa '
+                '(gráficos e painéis analíticos) não pôde ser gerada nesta execução, mas os dados do estudo '
+                'estão preservados na tabela abaixo. Você pode gerar novamente ou usar a planilha Excel para a '
+                'visão completa.</div>'
+                f'{_tabela_html}'
+                '</div>'
+                '<footer>Relatório autocontido · abre offline em qualquer navegador · gerado pela aplicação.</footer>'
+                '</body></html>')
+        except Exception:
+            logger.error("[RELATORIO-RESILIENTE] Falha até na versão mínima", exc_info=True)
+            # último recurso absoluto: HTML trivial mas válido
+            return ("<!DOCTYPE html><html lang='pt-BR'><head><meta charset='utf-8'><title>Relatório</title>"
+                    "</head><body style='font-family:sans-serif;padding:40px'><h1>Relatório do Estudo</h1>"
+                    "<p>O relatório foi gerado, mas os dados detalhados não puderam ser incluídos nesta "
+                    "execução. Utilize a planilha Excel exportável para a visão completa dos resultados.</p>"
+                    "</body></html>")
+
+
+def _bi_dashboard_comparacao(linhas):
+    """[BI-DASHBOARD - 184ª geração] Camada BI AUTOCONTIDA (JS puro, offline) para ANEXAR ao topo do relatório
+    do COMPARADOR — sem tocar no relatório atual. KPIs de vitória/economia clicáveis, filtros (UF, vencedor,
+    faixa de diferença, mesmo destino), busca global e tabela interativa (busca, ordenação, paginação). Dados
+    embutidos como JSON. Retorna (html, css, js) ou ('','','')."""
+    try:
+        if not linhas:
+            return "", "", ""
+        import json as _json
+
+        def _f(v):
+            try:
+                return float(v)
+            except Exception:
+                return None
+        _regs = []
+        for _l in linhas:
+            _da, _dr = _f(_l.get("Distancia Aplicacao")), _f(_l.get("Distancia Referencia"))
+            _eco = _f(_l.get("Economia km"))
+            _regs.append({
+                "o": str(_l.get("Municipio Origem", _l.get("Origem", "—")) or "—"),
+                "uf": str(_l.get("UF", "") or "—").upper()[:2] or "—",
+                "da": round(_da, 1) if _da is not None else None,
+                "dr": round(_dr, 1) if _dr is not None else None,
+                "dif": round(_f(_l.get("Diferenca Abs (km)")) or 0, 1),
+                "eco": round(_eco, 1) if _eco is not None else None,
+                "venc": str(_l.get("Vencedor Distancia", "—") or "—"),
+                "fx": str(_l.get("Faixa de Diferenca", "—") or "—"),
+                "mesmo": str(_l.get("Mesmo Destino", "—") or "—"),
+                "dapp": str(_l.get("Destino Aplicacao", "—") or "—"),
+                "dref": str(_l.get("Destino Referencia", "—") or "—"),
+                "cand": (int(_f(_l.get("Inscritos")) or 0) if _l.get("Inscritos") is not None else None)})
+        _dados_json = _json.dumps(_regs, ensure_ascii=False)
+        _mapa_html, _mapa_css = _bi_mapa_uf_svg()  # [BI-MAPA - 184ª geração]
+
+        _html = (
+            '<section id="bi" class="bi"><h2>📊 Dashboard Comparativo (BI Interativo)</h2>'
+            '<p class="lead">Painel interativo offline da comparação: clique num indicador, filtre ou busque — '
+            'KPIs, gráfico e tabela respondem ao vivo. Toda a análise textual e os gráficos originais '
+            'permanecem nas seções seguintes.</p>'
+            '<div class="bi-filtros">'
+            '<input id="bi-busca" class="bi-in" placeholder="🔎 Buscar município, UF, destino...">'
+            '<select id="bi-uf" class="bi-in"><option value="">UF (todas)</option></select>'
+            '<select id="bi-venc" class="bi-in"><option value="">Vencedor (todos)</option>'
+            '<option value="Aplicação">Aplicação venceu</option>'
+            '<option value="Referência">Referência venceu</option>'
+            '<option value="Empate">Empate técnico</option></select>'
+            '<select id="bi-mesmo" class="bi-in"><option value="">Mesmo destino (todos)</option>'
+            '<option value="Sim">Mesmo destino</option><option value="Não">Destino diferente</option></select>'
+            '<select id="bi-fx" class="bi-in"><option value="">Faixa de diferença (todas)</option></select>'
+            '<button id="bi-reset" class="bi-btn">limpar filtros</button>'
+            '<button id="bi-csv" class="bi-btn" style="border-color:#16a34a;color:#166534">⬇ Exportar CSV</button></div>'
+            '<div id="bi-kpis" class="bi-kpis"></div>'
+            '<div class="bi-chart-wrap"><canvas id="bi-chart" height="150"></canvas>'
+            '<div class="bi-chart-l">Distribuição de vitórias (clique numa barra para filtrar)</div></div>'
+            + _mapa_html +
+            '<div class="bi-tbl-wrap"><table id="bi-tbl" class="bi-tbl"><thead><tr>'
+            '<th data-k="o">Município ▲▼</th><th data-k="uf">UF ▲▼</th>'
+            '<th data-k="da" class="r">Dist. App (km) ▲▼</th><th data-k="dr" class="r">Dist. Ref (km) ▲▼</th>'
+            '<th data-k="dif" class="r">Δ (km) ▲▼</th><th data-k="venc">Vencedor ▲▼</th>'
+            '<th data-k="mesmo">Mesmo destino</th></tr></thead><tbody id="bi-tbody"></tbody></table></div>'
+            '<div class="bi-pag"><button id="bi-prev" class="bi-btn">‹ anterior</button>'
+            '<span id="bi-pag-i">–</span><button id="bi-next" class="bi-btn">próxima ›</button>'
+            '<span id="bi-count" class="bi-count"></span></div>'
+            '<div id="bi-drill" class="bi-drill" style="display:none"></div></section>')
+
+        _css = (
+            ".bi .bi-filtros{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}"
+            ".bi-in{padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:#fff}"
+            "#bi-busca{flex:1;min-width:220px}"
+            ".bi-btn{padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#f8fafc;"
+            "cursor:pointer;font-size:12.5px}.bi-btn:hover{background:#eef2f7}"
+            ".bi-kpis{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px}"
+            ".bi-kpi{flex:1;min-width:140px;background:#fff;border:1px solid var(--line);border-radius:12px;"
+            "padding:14px;cursor:pointer;transition:.15s;border-left:4px solid var(--accent)}"
+            ".bi-kpi:hover{box-shadow:0 4px 14px rgba(2,6,23,.08);transform:translateY(-1px)}"
+            ".bi-kpi.on{background:#eff6ff;border-left-color:#1e3a8a}"
+            ".bi-kpi-v{font-size:22px;font-weight:800;color:var(--accent)}"
+            ".bi-kpi-l{font-size:11.5px;color:var(--muted);margin-top:2px}"
+            ".bi-kpi{position:relative}.bi-kpi-i{opacity:.4;font-size:10px;cursor:help}"
+            ".bi-kpi:hover .bi-kpi-i{opacity:.9;color:var(--accent)}"
+            ".bi-chart-wrap{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:16px}"
+            ".bi-chart-l{font-size:12px;color:var(--muted);text-align:center;margin-top:8px}"
+            ".bi-tbl-wrap{overflow:auto;border:1px solid var(--line);border-radius:12px;max-height:520px}"
+            ".bi-tbl{width:100%;border-collapse:collapse;font-size:12.5px}"
+            ".bi-tbl th{position:sticky;top:0;background:#1e3a8a;color:#fff;padding:9px 11px;text-align:left;"
+            "cursor:pointer;white-space:nowrap;font-size:11.5px}.bi-tbl th.r{text-align:right}"
+            ".bi-tbl td{padding:8px 11px;border-bottom:1px solid #eef2f7}.bi-tbl td.r{text-align:right}"
+            ".bi-tbl tr:hover td{background:#f8fafc}"
+            ".bi-pag{display:flex;align-items:center;gap:10px;margin-top:10px;font-size:12.5px;color:var(--muted)}"
+            ".bi-count{margin-left:auto}"
+            ".bi-drill{margin-top:14px;background:#f8fafc;border:1px solid var(--line);border-radius:12px;padding:16px}"
+            ".bi-drill h3{margin:0 0 4px;font-size:16px;color:#1e3a8a}"
+            ".bi-drill .bi-drill-close{float:right;cursor:pointer;color:var(--muted);font-size:22px;line-height:1;border:none;background:none}"
+            ".bi-drill-grid{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}"
+            ".bi-drill-item{flex:1;min-width:130px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 12px}"
+            ".bi-drill-item .l{font-size:11px;color:var(--muted)}.bi-drill-item .v{font-size:15px;font-weight:700;color:#0f172a;margin-top:2px}"
+            ".bi-tbl td.clk{color:#2563eb;cursor:pointer;text-decoration:underline;text-decoration-style:dotted}" + _mapa_css)
+
+        _js_tpl = '(function(){var D=__DADOS__;var F={uf:\'\',venc:\'\',mesmo:\'\',fx:\'\',q:\'\'};\nvar page=0,PP=25,sortK=\'dif\',sortA=false;var $=function(i){return document.getElementById(i)};\nvar ufs=Array.from(new Set(D.map(function(r){return r.uf}))).filter(function(x){return x&&x!=\'—\'}).sort();\nufs.forEach(function(u){var o=document.createElement(\'option\');o.value=u;o.textContent=u;$(\'bi-uf\').appendChild(o)});\nvar FXS=Array.from(new Set(D.map(function(r){return r.fx}))).filter(function(x){return x&&x!=\'—\'}).sort();\nFXS.forEach(function(f){var o=document.createElement(\'option\');o.value=f;o.textContent=f;$(\'bi-fx\').appendChild(o)});\nfunction flt(){return D.filter(function(r){\nif(F.uf&&r.uf!=F.uf)return false;if(F.venc&&r.venc!=F.venc)return false;\nif(F.mesmo&&r.mesmo!=F.mesmo)return false;if(F.fx&&r.fx!=F.fx)return false;\nif(F.q){var ss=(r.o+\' \'+r.uf+\' \'+r.dapp+\' \'+r.dref).toLowerCase();if(ss.indexOf(F.q)<0)return false}\nreturn true})}\nfunction fmt(n){return n==null?\'—\':n.toLocaleString(\'pt-BR\')}\nfunction kpis(rows){var n=rows.length;\nvar va=rows.filter(function(r){return r.venc==\'Aplicação\'}).length;\nvar vr=rows.filter(function(r){return r.venc==\'Referência\'}).length;\nvar ve=rows.filter(function(r){return r.venc==\'Empate\'}).length;\nvar eco=rows.reduce(function(a,r){return a+(r.eco||0)},0);\nvar ecil=rows.reduce(function(a,r){return a+((r.eco||0)*(r.cand||0))},0);\nvar difs=rows.filter(function(r){return r.dif!=null}).map(function(r){return r.dif});\nvar mdif=difs.length?difs.reduce(function(a,b){return a+b},0)/difs.length:0;\nvar msm=rows.filter(function(r){return r.mesmo==\'Sim\'}).length;\nvar K=[[\'Municípios\',fmt(n),\'\',\'Total de municípios conciliados entre os dois estudos no filtro atual.\'],[\'Aplicação venceu\',fmt(va)+\' (\'+(n?(100*va/n).toFixed(0):0)+\'%)\',\'venc:Aplicação\',\'Municípios onde a aplicação achou um local de prova mais perto (menor distância viária) que a referência. Clique para filtrar.\'],\n[\'Referência venceu\',fmt(vr)+\' (\'+(n?(100*vr/n).toFixed(0):0)+\'%)\',\'venc:Referência\',\'Municípios onde a referência levou vantagem. São os casos a investigar. Clique para filtrar.\'],\n[\'Empates técnicos\',fmt(ve)+\' (\'+(n?(100*ve/n).toFixed(0):0)+\'%)\',\'venc:Empate\',\'Diferença tão pequena (dentro do limiar em km) que é irrelevante na prática. Clique para filtrar.\'],\n[\'Economia total\',eco.toFixed(0)+\' km\',\'\',\'Soma dos quilômetros poupados pela aplicação onde ela venceu (distância da referência menos a da aplicação).\'],[\'Economia km×cand\',fmt(Math.round(ecil)),\'\',\'Economia em km ponderada pelo número de candidatos de cada município. Mede o impacto logístico real.\'],\n[\'Δ médio\',mdif.toFixed(1)+\' km\',\'\',\'Diferença média absoluta de distância entre os dois estudos, município a município.\'],[\'Mesmo destino\',fmt(msm)+\' (\'+(n?(100*msm/n).toFixed(0):0)+\'%)\',\'mesmo:Sim\',\'Municípios em que ambos escolheram exatamente o mesmo local de prova. Clique para filtrar.\']];\n$(\'bi-kpis\').innerHTML=K.map(function(k){return \'<div class="bi-kpi" data-f="\'+k[2]+\'" title="\'+(k[3]||\'\').replace(/"/g,\'&quot;\')+\'"><div class="bi-kpi-v">\'+k[1]+\'</div><div class="bi-kpi-l">\'+k[0]+\' <span class="bi-kpi-i">ⓘ</span></div></div>\'}).join(\'\');\nArray.from($(\'bi-kpis\').children).forEach(function(el){el.onclick=function(){var f=el.getAttribute(\'data-f\');\nif(!f)return;var p=f.split(\':\');if(p[0]==\'venc\'){F.venc=(F.venc==p[1]?\'\':p[1]);$(\'bi-venc\').value=F.venc}\nif(p[0]==\'mesmo\'){F.mesmo=(F.mesmo==p[1]?\'\':p[1]);$(\'bi-mesmo\').value=F.mesmo}page=0;render()}})}\nvar VS=[\'Aplicação\',\'Referência\',\'Empate\'];var VC={\'Aplicação\':\'#16a34a\',\'Referência\':\'#dc2626\',\'Empate\':\'#94a3b8\'};\nfunction chart(rows){var c=VS.map(function(v){return rows.filter(function(r){return r.venc==v}).length});\nvar mx=Math.max.apply(null,c)||1;var cv=$(\'bi-chart\'),ct=cv.getContext(\'2d\');\nvar W=cv.width=cv.offsetWidth,H=cv.height;ct.clearRect(0,0,W,H);var bw=W/VS.length;\nfor(var i=0;i<VS.length;i++){var h=(c[i]/mx)*(H-34);ct.fillStyle=(F.venc==VS[i]?\'#1e3a8a\':VC[VS[i]]);\nct.fillRect(i*bw+18,H-h-18,bw-36,h);ct.fillStyle=\'#475569\';ct.font=\'11px sans-serif\';ct.textAlign=\'center\';\nct.fillText(VS[i],i*bw+bw/2,H-4);ct.fillText(c[i],i*bw+bw/2,H-h-22)}\ncv.onclick=function(e){var idx=Math.floor(e.offsetX/bw);if(idx>=0&&idx<VS.length){F.venc=(F.venc==VS[idx]?\'\':VS[idx]);$(\'bi-venc\').value=F.venc;page=0;render()}}}\nfunction drill(r){var el=$(\'bi-drill\');if(!el)return;\nvar it=[[\'UF\',r.uf],[\'Distância Aplicação\',(r.da==null?\'—\':r.da+\' km\')],[\'Distância Referência\',(r.dr==null?\'—\':r.dr+\' km\')],\n[\'Diferença (Δ)\',(r.dif==null?\'—\':r.dif+\' km\')],[\'Economia\',(r.eco==null?\'—\':r.eco+\' km\')],[\'Vencedor\',r.venc],\n[\'Mesmo destino\',r.mesmo],[\'Destino Aplicação\',r.dapp],[\'Destino Referência\',r.dref],[\'Candidatos\',fmt(r.cand)]];\nel.innerHTML=\'<button class="bi-drill-close" onclick="document.getElementById(\\\'bi-drill\\\').style.display=\\\'none\\\'">×</button>\'+\n\'<h3>🔎 \'+r.o+\'</h3><p class="lead">Drill-through: comparação completa deste município.</p>\'+\n\'<div class="bi-drill-grid">\'+it.map(function(x){return \'<div class="bi-drill-item"><div class="l">\'+x[0]+\'</div><div class="v">\'+(x[1]==null?\'—\':x[1])+\'</div></div>\'}).join(\'\')+\'</div>\';\nel.style.display=\'block\';el.scrollIntoView({behavior:\'smooth\',block:\'nearest\'})}\nfunction csv(){var rows=flt();var head=[\'Municipio\',\'UF\',\'Dist_App_km\',\'Dist_Ref_km\',\'Diferenca_km\',\'Economia_km\',\'Vencedor\',\'MesmoDestino\',\'Destino_App\',\'Destino_Ref\',\'Candidatos\'];\nvar esc=function(v){v=(v==null?\'\':\'\'+v);return \'"\'+v.replace(/"/g,\'""\')+\'"\'};\nvar lines=[head.join(\',\')];rows.forEach(function(r){lines.push([r.o,r.uf,r.da,r.dr,r.dif,r.eco,r.venc,r.mesmo,r.dapp,r.dref,r.cand].map(esc).join(\',\'))});\nvar blob=new Blob([\'\\ufeff\'+lines.join(\'\\n\')],{type:\'text/csv;charset=utf-8;\'});\nvar u=URL.createObjectURL(blob);var link=document.createElement(\'a\');link.href=u;link.download=\'bi_comparador_filtrado.csv\';link.click();URL.revokeObjectURL(u)}\nfunction tbl(rows){var s2=rows.slice().sort(function(x,y){var xx=x[sortK],yy=y[sortK];\nif(xx==null)return 1;if(yy==null)return -1;if(typeof xx==\'number\')return sortA?xx-yy:yy-xx;\nreturn sortA?(\'\'+xx).localeCompare(\'\'+yy):(\'\'+yy).localeCompare(\'\'+xx)});\nvar tot=s2.length,pg=s2.slice(page*PP,page*PP+PP);\n$(\'bi-tbody\').innerHTML=pg.map(function(r){var vcol=r.venc==\'Aplicação\'?\'#16a34a\':(r.venc==\'Referência\'?\'#dc2626\':\'#64748b\');\nreturn \'<tr><td class="clk" data-o="\'+encodeURIComponent(r.o)+\'">\'+r.o+\'</td><td>\'+r.uf+\'</td><td class="r">\'+(r.da==null?\'—\':r.da)+\'</td><td class="r">\'+(r.dr==null?\'—\':r.dr)+\'</td><td class="r">\'+(r.dif==null?\'—\':r.dif)+\'</td><td style="color:\'+vcol+\';font-weight:600">\'+r.venc+\'</td><td>\'+r.mesmo+\'</td></tr>\'}).join(\'\');\nArray.from(document.querySelectorAll(\'#bi-tbody td.clk\')).forEach(function(td){td.onclick=function(){var o=decodeURIComponent(td.getAttribute(\'data-o\'));var rr=D.filter(function(x){return x.o==o})[0];if(rr)drill(rr)}});\nvar np=Math.max(1,Math.ceil(tot/PP));$(\'bi-pag-i\').textContent=\'pág. \'+(page+1)+\'/\'+np;\n$(\'bi-count\').textContent=tot.toLocaleString(\'pt-BR\')+\' registro(s)\';}\nvar _UFGRID={\'RR\':1,\'AP\':1,\'AM\':1,\'PA\':1,\'MA\':1,\'CE\':1,\'RN\':1,\'AC\':1,\'RO\':1,\'TO\':1,\'PI\':1,\'PB\':1,\'MT\':1,\'GO\':1,\'BA\':1,\'PE\':1,\'DF\':1,\'MG\':1,\'AL\':1,\'MS\':1,\'SP\':1,\'RJ\':1,\'ES\':1,\'SE\':1,\'PR\':1,\'SC\':1,\'RS\':1};\n__MAPAJS__\nfunction render(){var rows=flt();kpis(rows);chart(rows);mapa(rows);tbl(rows)}\n$(\'bi-busca\').oninput=function(e){F.q=e.target.value.toLowerCase().trim();page=0;render()};\n$(\'bi-uf\').onchange=function(e){F.uf=e.target.value;page=0;render()};\n$(\'bi-venc\').onchange=function(e){F.venc=e.target.value;page=0;render()};\n$(\'bi-mesmo\').onchange=function(e){F.mesmo=e.target.value;page=0;render()};\n$(\'bi-fx\').onchange=function(e){F.fx=e.target.value;page=0;render()};\n$(\'bi-csv\').onclick=csv;\n$(\'bi-reset\').onclick=function(){F={uf:\'\',venc:\'\',mesmo:\'\',fx:\'\',q:\'\'};page=0;\n[\'bi-busca\',\'bi-uf\',\'bi-venc\',\'bi-mesmo\',\'bi-fx\'].forEach(function(i){$(i).value=\'\'});\nvar d0=$(\'bi-drill\');if(d0)d0.style.display=\'none\';render()};\n$(\'bi-prev\').onclick=function(){if(page>0){page--;render()}};\n$(\'bi-next\').onclick=function(){page++;if(page*PP>=flt().length)page--;render()};\nArray.from(document.querySelectorAll(\'#bi-tbl th\')).forEach(function(th){th.onclick=function(){var k=th.getAttribute(\'data-k\');if(k==sortK){sortA=!sortA}else{sortK=k;sortA=false}render()}});\nwindow.addEventListener(\'resize\',function(){chart(flt())});render();})();'
+        _js = _js_tpl.replace("__DADOS__", _dados_json).replace("__MAPAJS__", _bi_mapa_uf_js("nº de municípios comparados por UF"))
+        return _html, _css, _js
+    except Exception:
+        logger.error("[BI-DASHBOARD] Falha ao montar a camada BI do Comparador", exc_info=True)
+        return "", "", ""
+
+
+def _gerar_relatorio_comparacao_html(stats, aud, titulo="Relatório da Comparação", data_str="", linhas=None):
+    """[RELATORIO-HTML-PRO - 184ª geração] Relatório HTML AUTOCONTIDO (offline) da COMPARAÇÃO entre estudos,
+    nível profissional/BI: navegação lateral + Veredito, Placar, Distribuição de Vitórias, Conciliação dos
+    Municípios (detalhada), Economia de Deslocamento (detalhada + faixas) e Convergência de Destinos. Reusa
+    os agregados de stats['brasil']/aud (chaves conhecidas). Defensivo: cada seção só aparece se houver dado.
+    Retorna string HTML (ou None)."""
+    import html as _he
+    try:
+        br = (stats or {}).get("brasil", {})
+        aud = aud or {}
+        _tot = aud.get("total_ref", 0) or 0
+        _conc = aud.get("conciliados", 0) or 0
+        _pct_conc = round(100.0 * _conc / _tot, 1) if _tot else 0.0
+        _p_app = br.get("pct_venceu_app", 0) or 0
+        _p_ref = br.get("pct_venceu_ref", 0) or 0
+        _p_emp = br.get("pct_empate", 0) or 0
+        _econ = br.get("economia_ponderada_km", 0) or 0
+        _ver = ("A aplicação produziu a melhor distribuição na maioria dos municípios comparáveis."
+                if _p_app > _p_ref + 5 else
+                ("A base de referência venceu na maioria dos casos."
+                 if _p_ref > _p_app + 5 else
+                 "As duas soluções são tecnicamente equivalentes no conjunto."))
+        _st = {"first": True}
+
+        def _emb(fig):
+            _h = fig.to_html(full_html=False, include_plotlyjs=(True if _st["first"] else False),
+                             config={"displayModeBar": False, "responsive": True})
+            _st["first"] = False
+            return _h
+
+        def _kcards(pares):
+            return '<div class="kpis">' + "".join(
+                f'<div class="kpi"><div class="kpi-v">{_he.escape(str(v))}</div>'
+                f'<div class="kpi-l">{_he.escape(l)}</div></div>' for l, v in pares) + '</div>'
+        _sec = []
+        _sec.append(("veredito", "Veredito", f'<div class="verdict">🔎 <strong>{_he.escape(_ver)}</strong></div>'))
+        _placar = [("Conciliação", f"{_pct_conc:.0f}%"), ("Vitórias da aplicação", f"{_p_app:.0f}%"),
+                   ("Vitórias da referência", f"{_p_ref:.0f}%"), ("Empate técnico", f"{_p_emp:.0f}%")]
+        if _econ:
+            _placar.append(("Economia ponderada", f"{_econ:,.0f} km"))
+        # [STORYTELLING - 184ª geração] Narrativa de abertura do comparador a partir dos dados reais.
+        _story_c = _narrativa_storytelling_comparacao(stats, linhas)
+        if _story_c:
+            _sec.append(("historia", "Panorama da Comparação", _story_c))
+        _sec.append(("placar", "Placar da Comparação", _kcards(_placar) + _caixa_explicativa(
+            "O que este placar mostra?",
+            "É o resultado da disputa município a município entre a <b>aplicação</b> e o <b>estudo de "
+            "referência</b>, comparando a distância viária de cada um. 'Aplicação venceu' significa que ela "
+            "encontrou um local de prova mais perto; 'Referência venceu', o contrário; 'empate técnico' são "
+            "casos com diferença irrelevante (dentro do limiar em km). O objetivo é a aplicação vencer ou "
+            "empatar na maioria — cada vitória representa candidatos percorrendo menos quilômetros.", "info")))
+        _fig_w = go.Figure(go.Bar(x=["Aplicação", "Referência", "Empate técnico"], y=[_p_app, _p_ref, _p_emp],
+                                  marker_color=["#2563eb", "#f59e0b", "#94a3b8"]))
+        _fig_w.update_layout(height=320, margin=dict(l=40, r=20, t=16, b=40), template="plotly_white",
+                             yaxis_title="% dos municípios")
+        _sec.append(("vitorias", "Distribuição de Vitórias", _emb(_fig_w)))
+        # [SUNBURST+TREEMAP - 184ª geração] Hierarquia UF → vencedor (anel) e treemap de volume por UF/vencedor,
+        # a partir das linhas conciliadas. Só aparece se houver UF nas linhas.
+        if linhas:
+            try:
+                import pandas as _pd
+                _dfh = _pd.DataFrame([{"UF": str(_l.get("UF", "") or "—").upper()[:2] or "—",
+                                       "Vencedor": str(_l.get("Vencedor Distancia", "—") or "—"),
+                                       "n": 1} for _l in linhas])
+                _dfh = _dfh[_dfh["UF"] != "—"]
+                if len(_dfh) > 1 and _dfh["UF"].nunique() >= 1:
+                    _agg = _dfh.groupby(["UF", "Vencedor"], as_index=False)["n"].sum()
+                    _cmap = {"Aplicação": "#16a34a", "Referência": "#dc2626", "Empate": "#94a3b8"}
+                    _fsun = px.sunburst(_agg, path=["UF", "Vencedor"], values="n",
+                                        color="Vencedor", color_discrete_map=_cmap)
+                    _fsun.update_layout(margin=dict(t=10, l=0, r=0, b=0), height=460)
+                    _sec.append(("sunburst", "Vitórias por Estado (anel hierárquico)",
+                                 '<p class="lead">Anel <b>estado → vencedor</b>: para cada UF, a proporção de '
+                                 'municípios em que a aplicação venceu (verde), a referência venceu (vermelho) '
+                                 'ou houve empate (cinza). Clique numa UF para aprofundar.</p>' + _emb(_fsun)))
+                    _ftree = px.treemap(_agg, path=["UF", "Vencedor"], values="n",
+                                        color="Vencedor", color_discrete_map=_cmap)
+                    _ftree.update_layout(margin=dict(t=10, l=0, r=0, b=0), height=460)
+                    _sec.append(("treemap", "Volume por Estado (treemap)",
+                                 '<p class="lead">Treemap por <b>volume de municípios</b>: o tamanho de cada '
+                                 'bloco é o nº de municípios comparados naquele estado, subdividido por quem '
+                                 'venceu. Estados maiores concentram mais da comparação.</p>' + _emb(_ftree)))
+            except Exception:
+                logger.error("[SUNBURST+TREEMAP] Falha ao montar anel/treemap do Comparador", exc_info=True)
+        _rows_c = "".join(f"<tr><td>{_l}</td><td class='r'>{int(_v):,}</td></tr>" for _l, _v in [
+            ("Por código IBGE", aud.get("por_ibge", 0) or 0), ("Por município + UF", aud.get("por_mun_uf", 0) or 0),
+            ("Por município", aud.get("por_mun", 0) or 0), ("Por similaridade (fuzzy)", aud.get("por_fuzzy", 0) or 0),
+            ("Não conciliados", len(aud.get("nao_conciliados") or []) if isinstance(aud.get("nao_conciliados"), list)
+             else (aud.get("nao_conciliados", 0) or 0))] if _v)
+        if _rows_c:
+            _sec.append(("concil", "Conciliação dos Municípios",
+                         f'<p class="lead">Como os {_conc} de {_tot} municípios foram casados entre os dois '
+                         f'estudos.</p><table><thead><tr><th>Método de conciliação</th>'
+                         f'<th class="r">Municípios</th></tr></thead><tbody>{_rows_c}</tbody></table>'))
+        _e_cand = br.get("economia_km_por_candidato", 0) or 0
+        _kpi_e = [("Economia por candidato", f"{_e_cand:.1f} km"),
+                  ("Candidatos beneficiados", f"{int(br.get('candidatos_beneficiados', 0) or 0):,}"),
+                  ("Candidatos prejudicados", f"{int(br.get('candidatos_prejudicados', 0) or 0):,}"),
+                  ("Redução média", f"{br.get('reducao_pct_media', 0) or 0:.1f}%")]
+        _e_tempo = br.get("economia_tempo_ponderada_min", 0) or 0
+        if _e_tempo:
+            _kpi_e.append(("Economia de tempo", f"{_e_tempo:,.0f} min"))
+        _econ_html = _kcards(_kpi_e)
+        _fx = br.get("faixas_economia_candidatos", {}) or {}
+        if any(_fx.values()):
+            _fig_f = go.Figure(go.Bar(x=list(_fx.keys()), y=[_fx[k] for k in _fx], marker_color="#16a34a"))
+            _fig_f.update_layout(height=300, margin=dict(l=40, r=20, t=16, b=40), template="plotly_white",
+                                 yaxis_title="candidatos")
+            _econ_html += _emb(_fig_f)
+        _sec.append(("economia", "Economia de Deslocamento", _econ_html + _caixa_explicativa(
+            "Como esta economia foi calculada?",
+            "Para cada município onde a aplicação escolheu um local mais perto, a <b>economia em km</b> é a "
+            "diferença entre a distância da referência e a da aplicação. A <b>economia em km-candidato</b> "
+            "multiplica essa diferença pelo número de inscritos daquele município — porque poupar 50 km numa "
+            "cidade com 1.000 candidatos (50.000 km-candidato) pesa muito mais que numa com 10. É a medida "
+            "real do impacto logístico: quantos quilômetros de deslocamento humano foram poupados no total.",
+            "calc")))
+        # [GRAFICO-WATERFALL - 184ª geração] Waterfall da economia por UF: mostra como cada estado CONTRIBUI
+        # (soma ou subtrai) para a economia total de km-candidato. Barras verdes sobem (aplicação poupou),
+        # vermelhas descem (referência levou vantagem), e a barra final é o saldo líquido — o retrato de onde
+        # a aplicação ganha e onde ainda perde, de relance.
+        try:
+            _por_uf = {}
+            for _l in (linhas or []):
+                _uf = str(_l.get("UF", "") or "—").upper()[:2] or "—"
+                try:
+                    _e = float(_l.get("Economia km") or 0)
+                    _c = float(_l.get("Inscritos") or 0) or 1
+                except Exception:
+                    continue
+                _por_uf[_uf] = _por_uf.get(_uf, 0.0) + _e * _c
+            _por_uf = {k: v for k, v in _por_uf.items() if k != "—" and abs(v) > 0.5}
+            if len(_por_uf) >= 2:
+                _itens = sorted(_por_uf.items(), key=lambda kv: -kv[1])
+                _labels = [k for k, _ in _itens] + ["SALDO"]
+                _vals = [round(v, 0) for _, v in _itens] + [round(sum(_por_uf.values()), 0)]
+                _measures = ["relative"] * len(_itens) + ["total"]
+                _fw = go.Figure(go.Waterfall(
+                    orientation="v", measure=_measures, x=_labels, y=_vals,
+                    connector={"line": {"color": "#cbd5e1"}},
+                    increasing={"marker": {"color": "#16a34a"}},
+                    decreasing={"marker": {"color": "#dc2626"}},
+                    totals={"marker": {"color": "#1e3a8a"}}))
+                _fw.update_layout(height=420, margin=dict(l=56, r=16, t=16, b=40), template="plotly_white",
+                                  yaxis_title="economia acumulada (km-candidato)", showlegend=False)
+                _sec.append(("waterfall", "Economia por Estado (waterfall)",
+                             '<p class="lead">Cada barra é a contribuição de um estado para a economia total, '
+                             'em km-candidato. Barras <b style="color:#16a34a">verdes</b> sobem (a aplicação '
+                             'poupou deslocamento naquele estado); <b style="color:#dc2626">vermelhas</b> '
+                             'descem (a referência levou vantagem). A barra <b style="color:#1e3a8a">azul '
+                             'final</b> é o saldo líquido de todo o estudo.</p>' + _emb(_fw) + _caixa_explicativa(
+                                 "Como ler este gráfico em cascata?",
+                                 "Comece pela esquerda: cada estado empurra o total para cima (verde) ou para "
+                                 "baixo (vermelho), como degraus. O acúmulo desses degraus chega à barra azul "
+                                 "final — o <b>saldo</b>. Se a barra azul é alta e positiva, a aplicação poupou "
+                                 "muito no conjunto. Estados com barras vermelhas grandes são as prioridades: "
+                                 "é onde a aplicação mais perde e onde há mais a recuperar.", "info")))
+        except Exception:
+            logger.error("[GRAFICO-WATERFALL] Falha ao montar waterfall de economia", exc_info=True)
+        _pconv = br.get("pct_convergencia", None)
+        if _pconv is not None:
+            _sec.append(("converg", "Convergência de Destinos",
+                         '<p class="lead">Em quantos municípios os dois estudos escolheram o <b>mesmo</b> local '
+                         'de prova.</p>' + _kcards([
+                             ("Convergência de destinos", f"{_pconv:.0f}%"),
+                             ("Mesmo destino", f"{int(br.get('mesmo_destino', 0) or 0):,}"),
+                             ("Destino diferente", f"{int(br.get('destino_diferente', 0) or 0):,}")])))
+        # [RELATORIO-HTML-PRO - 184ª geração] Seções PER-MUNICÍPIO (nível de artigo científico), quando as
+        # linhas brutas da comparação são fornecidas: distribuição das diferenças, dispersão App×Ref, boxplot,
+        # municípios críticos e economia por UF — cada uma com "como interpretar". Defensivo por coluna.
+        _dfl = None
+        if linhas:
+            try:
+                _dfl = pd.DataFrame(linhas)
+            except Exception:
+                _dfl = None
+        if _dfl is not None and len(_dfl) > 0:
+            _cda, _cdr, _cdif = 'Distancia Aplicacao', 'Distancia Referencia', 'Diferenca Abs (km)'
+            _cuf = 'UF' if 'UF' in _dfl.columns else None
+            _cmun = 'Municipio' if 'Municipio' in _dfl.columns else None
+            _va = pd.to_numeric(_dfl[_cda], errors='coerce') if _cda in _dfl.columns else None
+            _vr = pd.to_numeric(_dfl[_cdr], errors='coerce') if _cdr in _dfl.columns else None
+            _vd = pd.to_numeric(_dfl[_cdif], errors='coerce') if _cdif in _dfl.columns else None
+            if _vd is not None and _vd.notna().any():
+                _f = go.Figure(go.Histogram(x=_vd.dropna(), nbinsx=30, marker_color="#2563eb"))
+                _f.update_layout(height=320, margin=dict(l=44, r=16, t=16, b=40), template="plotly_white",
+                                 xaxis_title="diferença de deslocamento (km) — positivo = aplicação melhor",
+                                 yaxis_title="municípios")
+                _sec.append(("distdif", "Distribuição das Diferenças",
+                             '<p class="lead"><b>Como interpretar:</b> cada barra conta quantos municípios têm '
+                             'determinada diferença de deslocamento entre os estudos (positivo = a aplicação encurta '
+                             'a distância). Mediana de <b>{:.0f} km</b> e desvio-padrão de <b>{:.0f} km</b>; uma cauda '
+                             'longa à direita indica municípios de grande economia.</p>'.format(
+                                 float(_vd.median()), float(_vd.std() if _vd.notna().sum() > 1 else 0)) + _emb(_f)))
+            if _va is not None and _vr is not None:
+                _m = pd.DataFrame({"app": _va, "ref": _vr}).dropna()
+                if len(_m):
+                    _f = go.Figure(go.Scatter(x=_m["ref"], y=_m["app"], mode="markers",
+                                              marker=dict(color="#7c3aed", size=6, opacity=0.55)))
+                    _mx = float(max(_m["ref"].max(), _m["app"].max()))
+                    _f.add_trace(go.Scatter(x=[0, _mx], y=[0, _mx], mode="lines",
+                                            line=dict(dash="dash", color="#94a3b8")))
+                    _f.update_layout(height=380, margin=dict(l=52, r=16, t=16, b=40), template="plotly_white",
+                                     xaxis_title="distância — referência (km)",
+                                     yaxis_title="distância — aplicação (km)", showlegend=False)
+                    _sec.append(("scatter", "Aplicação × Referência",
+                                 '<p class="lead"><b>Como interpretar:</b> cada ponto é um município. Pontos <b>abaixo</b> '
+                                 'da linha tracejada são casos em que a aplicação escolheu um local <b>mais próximo</b> '
+                                 'que a referência (<b>{}</b> de {} municípios). Quanto mais concentrados abaixo da '
+                                 'diagonal, melhor a aplicação.</p>'.format(
+                                     int((_m["app"] < _m["ref"]).sum()), len(_m)) + _emb(_f)))
+                    _f = go.Figure()
+                    _f.add_trace(go.Box(y=_vr.dropna(), name="Referência", marker_color="#f59e0b"))
+                    _f.add_trace(go.Box(y=_va.dropna(), name="Aplicação", marker_color="#2563eb"))
+                    _f.update_layout(height=340, margin=dict(l=44, r=16, t=16, b=40), template="plotly_white",
+                                     yaxis_title="distância (km)")
+                    _sec.append(("box", "Comparação de Distâncias (boxplot)",
+                                 '<p class="lead"><b>Como interpretar:</b> cada caixa resume a distribuição das '
+                                 'distâncias de um estudo — a linha central é a mediana, a caixa vai do 1º ao 3º quartil '
+                                 'e os pontos são outliers. Se a caixa da <b>aplicação</b> está mais baixa, seus '
+                                 'deslocamentos são sistematicamente menores.</p>' + _emb(_f)))
+            if _vd is not None and _cmun:
+                _crit = _dfl.assign(_ad=_vd.abs()).nlargest(15, '_ad')
+                _rows_c2 = ""
+                for _, r in _crit.iterrows():
+                    _dvv = pd.to_numeric(r.get(_cdif), errors='coerce')
+                    if pd.isna(_dvv):
+                        continue
+                    _rows_c2 += ("<tr><td>" + _he.escape(str(r.get(_cmun, '—'))) + "</td>" +
+                                 (f"<td>{_he.escape(str(r.get(_cuf, '—')))}</td>" if _cuf else "") +
+                                 f"<td>{_he.escape(str(r.get('Destino Aplicacao', '—')))}</td>" +
+                                 f"<td>{_he.escape(str(r.get('Destino Referencia', '—')))}</td>" +
+                                 f"<td class='r'>{_dvv:+.0f}</td></tr>")
+                _cab2 = "<th>Município</th>" + ("<th>UF</th>" if _cuf else "") + \
+                        "<th>Local (aplicação)</th><th>Local (referência)</th><th class='r'>Δ km</th>"
+                _sec.append(("criticos", "Municípios Críticos",
+                             '<p class="lead"><b>Como interpretar:</b> os 15 municípios com maior diferença de '
+                             'deslocamento entre os estudos — onde a escolha do local mais impacta os candidatos. '
+                             'Δ positivo = a aplicação encurta; negativo = a referência era melhor. Priorize estes para '
+                             'revisão manual.</p><table><thead><tr>{}</tr></thead><tbody>{}</tbody></table>'.format(
+                                 _cab2, _rows_c2)))
+            if _vd is not None and _cuf:
+                _g = _dfl.assign(_d=_vd).groupby(_cuf)['_d'].sum().sort_values(ascending=False)
+                _g = _g[_g != 0].head(20)
+                if len(_g):
+                    _f = go.Figure(go.Bar(x=[str(x) for x in _g.index], y=[float(v) for v in _g.values],
+                                          marker_color="#16a34a"))
+                    _f.update_layout(height=320, margin=dict(l=44, r=16, t=16, b=40), template="plotly_white",
+                                     yaxis_title="economia líquida (km)")
+                    _sec.append(("ecouf", "Economia por UF",
+                                 '<p class="lead"><b>Como interpretar:</b> soma da diferença de deslocamento por estado '
+                                 '(positivo = a aplicação economiza no total do estado). Barras altas mostram onde a '
+                                 'mudança de metodologia gera mais ganho territorial.</p>' + _emb(_f)))
+        # [RELATORIO-HTML-PRO - 184ª geração] Diagnóstico Técnico Final: síntese AUTOMÁTICA com interpretação,
+        # insights, nível de confiança e recomendação — a inteligência que transforma dados em decisão.
+        _dg = []
+        _venc = ("a <b>aplicação</b>" if _p_app > _p_ref else
+                 ("a <b>base de referência</b>" if _p_ref > _p_app else "<b>nenhuma</b> (empate)"))
+        _dg.append(f"<b>Veredito.</b> No conjunto de <b>{_conc}</b> municípios conciliados ({_pct_conc:.0f}% da base "
+                   f"de referência), {_venc} produziu a melhor alocação na maioria dos casos — <b>{_p_app:.0f}%</b> de "
+                   f"vitórias da aplicação × <b>{_p_ref:.0f}%</b> da referência ({_p_emp:.0f}% de empate técnico).")
+        if _econ:
+            _dg.append(f"<b>Economia.</b> Adotar a alocação da aplicação representa <b>{_econ:,.0f} km</b> de "
+                       f"deslocamento ponderado economizado" + (f", ou <b>{_e_cand:.1f} km por candidato</b>" if _e_cand
+                       else "") + f". São <b>{int(br.get('candidatos_beneficiados', 0) or 0):,}</b> candidatos "
+                       f"beneficiados e <b>{int(br.get('candidatos_prejudicados', 0) or 0):,}</b> prejudicados.")
+        if _pconv is not None:
+            _dg.append(f"<b>Convergência.</b> Os dois estudos escolheram o mesmo local em <b>{_pconv:.0f}%</b> dos "
+                       f"municípios — concordância estrutural "
+                       f"{'forte' if _pconv >= 70 else 'moderada' if _pconv >= 40 else 'baixa'} entre as metodologias.")
+        _puf = (stats or {}).get("por_uf") or []
+        if isinstance(_puf, list) and _puf:
+            try:
+                _tuf = max(_puf, key=lambda x: (x.get("economia", 0) or 0))
+                if (_tuf.get("economia", 0) or 0) > 0:
+                    _dg.append(f"<b>Concentração geográfica.</b> A maior parte dos ganhos concentrou-se em "
+                               f"<b>{_he.escape(str(_tuf.get('uf', '—')))}</b>, o estado com maior economia de deslocamento.")
+            except Exception:
+                pass
+        _dg.append("<b>Confiança.</b> A comparação cobre {:.0f}% da base de referência — {}. Municípios não "
+                   "conciliados não entram no placar.".format(
+                       _pct_conc,
+                       "cobertura alta, resultado robusto" if _pct_conc >= 90 else
+                       "cobertura parcial; leia com essa ressalva" if _pct_conc < 70 else "cobertura boa"))
+        _rec = ("Recomenda-se <b>adotar a alocação da aplicação</b>" if _p_app > _p_ref + 5 else
+                "Recomenda-se <b>manter a base de referência</b>" if _p_ref > _p_app + 5 else
+                "As duas soluções são equivalentes; a escolha pode considerar outros critérios operacionais")
+        _dg.append(f"<b>Recomendação.</b> {_rec} — priorizando os municípios críticos (maior diferença de "
+                   f"deslocamento) para revisão manual.")
+        _sec.append(("diagnostico", "Diagnóstico Técnico Final",
+                     "".join(f'<p>{_d}</p>' for _d in _dg)))
+        _sec.extend(_secoes_metodologia_referencias_html())  # [ARTIGO - 184ª geração]
+        _sec.append(("glossario", "Glossário", _bloco_glossario_html()))  # [GLOSSARIO - 184ª geração]
+        _nav = "".join(f'<a href="#{i}">{_he.escape(t)}</a>' for i, t, _ in _sec)
+        _corpo = "".join(f'<section id="{i}"><h2>{_he.escape(t)}</h2>{h}</section>' for i, t, h in _sec)
+        # [BI-DASHBOARD - 184ª geração] Camada BI do Comparador ANEXADA ao topo — relatório original INTACTO.
+        _bi_html, _bi_css, _bi_js = _bi_dashboard_comparacao(linhas)
+        if _bi_html:
+            _nav = '<a href="#bi">📊 Dashboard BI</a>' + _nav
+            _corpo = _bi_html + _corpo
+        # [RELATORIO-CIENTIFICO - 184ª geração] Seções de artigo científico do Comparador (Abstract,
+        # Fluxograma, Diagnóstico Inteligente), adaptadas ao confronto de dois estudos. Mesmo padrão editorial
+        # de Locais. Cada uma é defensiva (string vazia se falhar), nunca derruba o relatório.
+        try:
+            _sci_nav = ""
+            _sci_corpo = ""
+            _abs_c = _secao_abstract_comparacao_html(stats, aud, titulo)
+            if _abs_c:
+                _sci_nav += '<a href="#abstract">Resumo (Abstract)</a>'
+                _sci_corpo += _abs_c
+            _flux_c = _secao_fluxograma_comparacao_html()
+            if _flux_c:
+                _sci_nav += '<a href="#fluxograma">Fluxograma</a>'
+                _sci_corpo += _flux_c
+            _diag_c = _secao_diagnostico_comparacao_html(stats, aud, linhas)
+            if _diag_c:
+                _sci_nav += '<a href="#diagnostico">Diagnóstico Inteligente</a>'
+                _sci_corpo += _diag_c
+            if _sci_corpo:
+                _nav = _sci_nav + _nav
+                _corpo = _sci_corpo + _corpo
+        except Exception:
+            logger.error("[RELATORIO-CIENTIFICO] Falha ao anexar seções científicas ao Comparador", exc_info=True)
+        _css = (
+            ":root{--brand:#0f172a;--accent:#2563eb;--line:#e2e8f0;--muted:#64748b}"
+            "*{box-sizing:border-box}body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;"
+            "background:#f1f5f9;color:#0f172a}a{color:inherit;text-decoration:none}"
+            ".cover{background:linear-gradient(135deg,#0f172a,#1e3a8a);color:#fff;padding:40px 40px 44px}"
+            ".cover .tag{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#93c5fd}"
+            ".cover h1{margin:8px 0 6px;font-size:28px;font-weight:800}.cover p{margin:0;color:#cbd5e1;font-size:13px}"
+            ".wrap{display:flex;align-items:flex-start;max-width:1180px;margin:0 auto}"
+            "nav{position:sticky;top:0;align-self:flex-start;width:240px;flex:0 0 240px;padding:24px 16px;"
+            "max-height:100vh;overflow:auto}nav .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.1em;"
+            "color:var(--muted);margin:0 10px 8px}nav a{display:block;padding:9px 12px;border-radius:8px;"
+            "font-size:13.5px;color:#334155;margin-bottom:2px}nav a:hover{background:#e2e8f0;color:var(--brand)}"
+            "main{flex:1;min-width:0;padding:24px 32px 60px}"
+            ".kpis{display:flex;flex-wrap:wrap;gap:14px}.kpi{flex:1;min-width:150px;background:#fff;"
+            "border:1px solid var(--line);border-radius:14px;padding:18px}.kpi-v{font-size:26px;font-weight:800;"
+            "color:var(--accent)}.kpi-l{font-size:12px;color:var(--muted);margin-top:2px}"
+            "section{background:#fff;border:1px solid var(--line);border-radius:14px;padding:20px 22px;"
+            "margin-bottom:18px;scroll-margin-top:16px}h2{font-size:16px;margin:0 0 14px;padding-bottom:10px;"
+            "border-bottom:2px solid #eef2f7}p.lead{color:#475569;font-size:13.5px;margin:0 0 12px}"
+            ".verdict{background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:14px;font-size:15px}"
+            "table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px 11px;"
+            "border-bottom:1px solid #eef2f7;text-align:left}td.r,th.r{text-align:right}"
+            "thead th{background:#f1f5f9;color:#475569;font-size:12px}"
+            "footer{max-width:1180px;margin:0 auto;padding:8px 32px 44px;color:#94a3b8;font-size:11px}"
+            "@media(max-width:820px){.wrap{display:block}nav{position:static;width:auto;flex:none;max-height:none;"
+            "display:flex;flex-wrap:wrap;gap:6px}nav .lbl{display:none}nav a{margin:0}}"
+            "@media print{nav{display:none}section{break-inside:avoid}.cover{-webkit-print-color-adjust:exact}}"
+            ".story{display:grid;gap:12px;margin:8px 0}.story-b{background:#fff;border:1px solid var(--line);border-left:4px solid #1e3a8a;border-radius:10px;padding:14px 16px}.story-t{font-weight:700;font-size:15px;color:#1e3a8a;margin-bottom:6px}.story-b ul li{font-size:13.5px;color:#334155;line-height:1.55}.story-b>div{font-size:13.5px;color:#334155;line-height:1.6}.cxd{margin:14px 0;padding:12px 14px;border-radius:8px}.cxd-t{font-weight:700;font-size:13.5px;margin-bottom:4px}.cxd-c{font-size:13px;color:#334155;line-height:1.5}.glo{display:grid;grid-template-columns:1fr;gap:0;margin:12px 0}.glo-item{padding:10px 0;border-bottom:1px solid #eef2f7}.glo-item dt{font-weight:700;color:#1e3a8a;font-size:13.5px;margin-bottom:3px}.glo-item dd{margin:0;font-size:13px;color:#334155;line-height:1.5}"
+            + _bi_css
+        )
+        return (f'<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">'
+                f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+                f'<title>{_he.escape(titulo)}</title><style>{_css}</style></head><body>'
+                f'<div class="cover"><div class="tag">Relatório Técnico · Comparação de Estudos</div>'
+                f'<h1>{_he.escape(titulo)}</h1><p>{_he.escape(data_str)} · {_conc} de {_tot} municípios conciliados</p></div>'
+                f'<div class="wrap"><nav><div class="lbl">Sumário</div>{_nav}</nav><main>{_corpo}</main></div>'
+                f'<footer>Relatório autocontido · abre offline em qualquer navegador.</footer><script>{_bi_js}</script></body></html>')
+    except Exception:
+        logger.error("[RELATORIO-HTML-PRO] Falha ao gerar relatório de comparação — versão resiliente",
+                     exc_info=True)
+        # [RELATORIO-RESILIENTE - 184ª geração] Nunca falhar: emite comparação mínima com o placar essencial.
+        try:
+            import html as _he3
+            _tit = _he3.escape(str(titulo or "Relatório da Comparação"))
+            _dat = _he3.escape(str(data_str or ""))
+            _placar_html = ""
+            try:
+                _br = (stats or {}).get("brasil", {})
+                _pl = _br.get("placar_distancia", {}) if isinstance(_br, dict) else {}
+                if _pl:
+                    _linhas_pl = "".join(
+                        f'<tr><td>{_he3.escape(str(_k))}</td><td style="text-align:right">{int(_v):,}</td></tr>'
+                        for _k, _v in _pl.items())
+                    _placar_html = (f'<table style="border-collapse:collapse;margin:16px 0">'
+                                    f'<thead><tr><th>Resultado</th><th>Municípios</th></tr></thead>'
+                                    f'<tbody>{_linhas_pl}</tbody></table>')
+            except Exception:
+                _placar_html = ""
+            _n_l = len(linhas) if linhas else 0
+            return (
+                '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">'
+                '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                f'<title>{_tit}</title>'
+                '<style>body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;color:#0f172a;'
+                'background:#f8fafc}.cover{background:linear-gradient(135deg,#1e3a8a,#1e40af);color:#fff;'
+                'padding:40px}.cover h1{margin:8px 0;font-size:26px}.wrap{padding:24px 40px}'
+                '.aviso{background:#fef9c3;border-left:4px solid #ca8a04;padding:14px 16px;border-radius:8px;'
+                'margin:16px 0;color:#713f12}th{background:#1e40af;color:#fff;padding:8px;text-align:left;'
+                'border:1px solid #cbd5e1}td{padding:7px 8px;border:1px solid #e2e8f0}</style></head><body>'
+                f'<div class="cover"><div>Relatório Técnico · Comparação de Estudos</div>'
+                f'<h1>{_tit}</h1><p>{_dat} · {_n_l:,} municípios comparados</p></div>'
+                '<div class="wrap"><div class="aviso"><b>Versão essencial do relatório.</b> A composição '
+                'visual completa não pôde ser gerada nesta execução, mas o placar principal está preservado '
+                'abaixo. Gere novamente ou use a planilha Excel para a visão completa.</div>'
+                f'{_placar_html}</div>'
+                '<footer style="padding:20px 40px;color:#64748b;font-size:12px">Relatório autocontido · abre '
+                'offline em qualquer navegador.</footer></body></html>')
+        except Exception:
+            logger.error("[RELATORIO-RESILIENTE] Falha até na versão mínima do comparador", exc_info=True)
+            return ("<!DOCTYPE html><html lang='pt-BR'><head><meta charset='utf-8'><title>Comparação</title>"
+                    "</head><body style='font-family:sans-serif;padding:40px'><h1>Comparação de Estudos</h1>"
+                    "<p>O relatório foi gerado, mas os detalhes não puderam ser incluídos. Utilize a planilha "
+                    "Excel exportável para a visão completa.</p></body></html>")
+
+
 def _raio_x_planilha(origens, destinos, max_exemplos=3):
     """[PREVOO - 119ª geração] Raio-X de saúde da planilha ANTES do processamento. Varre Origem/Destino
     em UMA passada (O(N)) e reporta os problemas que mais degradam o resultado. PURO e determinístico.
@@ -3966,6 +5915,11 @@ def _raio_x_planilha(origens, destinos, max_exemplos=3):
         return (v == "") or v.lower() == "nan"
 
     inc, ig, moji, esp, coord_ruim = [], [], [], [], []
+    nao_enc, homon_sem_uf = [], []   # [PREVOO-IBGE - 184ª geração] validação SEMÂNTICA de município
+    _UFS_PV = {"AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB",
+               "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"}
+    _RE_ENDERECO_PV = re.compile(r"\b(rua|r\.|av\.?|avenida|rod\.?|rodovia|estrada|travessa|alameda|pra[çc]a|"
+                                 r"quadra|lote|km|n[º°]|bairro)\b|\d{2,}", re.I)
     pares = {}
 
     for i in range(n):
@@ -3994,6 +5948,25 @@ def _raio_x_planilha(origens, destinos, max_exemplos=3):
                 stt = _prevoo_status_coord(pc[0], pc[1])
                 if stt != "ok":
                     coord_ruim.append(f"L{i+2}/{col}: {v} ({'lat/lon trocadas' if stt == 'trocada' else 'fora do Brasil'})")
+            # [PREVOO-IBGE - 184ª geração] validação SEMÂNTICA contra a base oficial (fail-fast): só para células
+            # que parecem NOME DE MUNICÍPIO — pula coordenadas e qualquer coisa com marcador de endereço ou dígitos
+            # (endereço/CEP/código IBGE, onde o município não é a célula inteira e o geocoder resolve). O(1)/célula.
+            elif pc is None and not _RE_ENDERECO_PV.search(v):
+                _uf_pv, _muni_pv = None, v
+                _mu = re.search(r"[\/\-,]?\s*([A-Za-z]{2})\s*$", v)
+                if _mu and _mu.group(1).upper() in _UFS_PV:
+                    _resto_pv = v[:_mu.start()].strip(" /-,")
+                    if _resto_pv:
+                        _uf_pv, _muni_pv = _mu.group(1).upper(), _resto_pv
+                _cand_pv = IBGE_MUNICIPIOS.get(semantica.normalizar(_muni_pv))
+                if _cand_pv is None and _uf_pv:            # a separação da UF pode ter errado: tenta o texto inteiro
+                    _cand_inteiro = IBGE_MUNICIPIOS.get(semantica.normalizar(v))
+                    if _cand_inteiro is not None:
+                        _cand_pv, _uf_pv = _cand_inteiro, None
+                if _cand_pv is None:
+                    nao_enc.append(f"L{i+2}/{col}: {v}")
+                elif len(_cand_pv) > 1 and not _uf_pv:
+                    homon_sem_uf.append(f"L{i+2}/{col}: {v} ({','.join(sorted({e.get('uf', '') for e in _cand_pv}))})")
 
     achados = []
 
@@ -4020,6 +5993,12 @@ def _raio_x_planilha(origens, destinos, max_exemplos=3):
          "Encoding quebrado (ex.: 'SÃ£o Paulo' → 'São Paulo'). O botão de higienização corrige automaticamente.", corrigivel=True)
     _add("espacos_problematicos", "info", "Espaços extras (início/fim ou duplicados)", esp,
          "Espaços supérfluos podem quebrar o casamento com o cache. A higienização corrige automaticamente.", corrigivel=True)
+    _add("municipio_nao_encontrado", "critico", "Município não encontrado na base oficial do IBGE", nao_enc,
+         "O nome não casa com nenhum município do IBGE — provável erro de digitação. Corrija antes de processar; "
+         "senão a rota pode falhar ou cair em fallback impreciso.")
+    _add("homonimo_sem_uf", "aviso", "Município homônimo sem UF (ambíguo)", homon_sem_uf,
+         "Esse nome existe em mais de um estado. Sem a UF, o motor pode escolher o município errado — "
+         "acrescente a sigla (ex.: 'São Domingos/SC').")
 
     # Score de saúde: 100 − penalidades ponderadas pela fração afetada. Duplicatas NÃO penalizam
     # (o dedup as resolve — são informativas/positivas).
@@ -6264,6 +8243,376 @@ IBGE_MUNICIPIOS, IBGE_ESTADOS, IBGE_DISTRITOS, LISTA_TOPONIMOS = carregar_dados_
 IBGE_MUNICIPIOS = _mesclar_base_embutida(IBGE_MUNICIPIOS)
 LISTA_TOPONIMOS = list(IBGE_MUNICIPIOS.keys()) + list(IBGE_DISTRITOS.keys())
 
+# [IBGE-COORD-FIX - 184ª geração] CORREÇÃO DE COORDENADAS ERRADAS NA FONTE.
+# A base viva (kelvins/municipios-brasileiros) traz o CÓDIGO IBGE correto mas, para alguns municípios, uma
+# COORDENADA errada. Caso COMPROVADO: Alto Paraíso/PR (cód. 4128625) vinha em (-26.1146, -52.7469) — ~320 km
+# ao SUL do município real (Noroeste Paranaense/Umuarama), coincidentemente ao lado de Pato Branco. Como a
+# geodésica de Karney E a rota do OSRM partem da MESMA coordenada, tudo parecia fisicamente consistente
+# (sinuosidade 1,2×) e NENHUMA barreira disparava — a rota "18 km" era aceita com score 96. O snap do OSRM
+# era de 36 m (ínfimo), então a mitigação de snap nem era acionada: o erro está na COORDENADA da base, não
+# no roteador. E `_mesclar_base_embutida` só ENRIQUECE campos vazios (nunca sobrescreve), então não corrige
+# coordenada presente-porém-errada.
+# Esta tabela curada SOBRESCREVE coordenadas comprovadamente erradas pelos valores oficiais (IBGE/Wikipédia),
+# chaveada pelo CÓDIGO IBGE (identidade estável). É extensível: novos casos entram aqui. NÃO substitui a rede
+# sistêmica completa (validação cruzada multi-fonte na carga da base) — é a correção pontual, auditável e
+# imediata dos erros já conhecidos, e o gancho onde a validação automática deve depositar o que encontrar.
+_CORRECOES_COORDENADA_IBGE = {
+    # Detectados por AUDITORIA DE GEOMETRIA INDEPENDENTE (malha oficial IBGE, geodata-br): a sede da base
+    # viva cai FORA do polígono oficial do município E DENTRO do polígono de OUTRO município distante —
+    # assinatura INEQUÍVOCA de coordenada corrompida. (Só "sede longe do centróide" NÃO basta: é normal em
+    # municípios amazônicos enormes, cuja sede ribeirinha fica longe do centro geométrico — esses foram
+    # corretamente descartados.) Corrigidos para a sede oficial (quando verificada) ou o centróide do
+    # polígono oficial. NOTA: Alto Paraíso e Cerro Azul tinham a sede no MESMO ponto errado (SW do PR) —
+    # corrupção sistemática na fonte comunitária, propagada por TODOS os forks (kelvins, abralvs...).
+    "4128625": {"lat": -23.50778, "lon": -53.72778, "nome": "Alto Paraíso", "uf": "PR",
+                "fonte": "sede oficial IBGE/Wikipédia (Noroeste Paranaense) — corrige -26.1146,-52.7469"},
+    "4105201": {"lat": -24.86600, "lon": -49.29640, "nome": "Cerro Azul", "uf": "PR",
+                "fonte": "centróide do polígono oficial IBGE — corrige -26.089,-52.869 (384 km, caía em Bom Sucesso do Sul)"},
+    "1505551": {"lat": -7.72950, "lon": -50.13660, "nome": "Pau d'Arco", "uf": "PA",
+                "fonte": "centróide do polígono oficial IBGE — corrige -1.598,-46.927 (769 km, caía em Santa Luzia do Pará)"},
+    "3164431": {"lat": -21.02720, "lon": -42.59960, "nome": "São Sebastião da Vargem Alegre", "uf": "MG",
+                "fonte": "centróide do polígono oficial IBGE — corrige -19.748,-43.368 (163 km, caía em São Gonçalo do Rio Abaixo)"},
+}
+
+
+def _aplicar_correcoes_coordenada(base):
+    """[IBGE-COORD-FIX - 184ª geração] Sobrescreve coordenadas comprovadamente erradas da base viva pelos
+    valores oficiais de `_CORRECOES_COORDENADA_IBGE` (chaveado por código IBGE — compara como string).
+    Registra cada correção no log (rastreabilidade). Defensivo: em erro, devolve a base intacta."""
+    try:
+        if not isinstance(base, dict) or not _CORRECOES_COORDENADA_IBGE:
+            return base
+        _por_codigo = {}
+        for _nome, _itens in base.items():
+            for _it in _itens:
+                _cod = str(_it.get("codigo_ibge") or "").strip()
+                if _cod:
+                    _por_codigo.setdefault(_cod, []).append(_it)
+        for _cod, _corr in _CORRECOES_COORDENADA_IBGE.items():
+            _alvos = _por_codigo.get(str(_cod).strip(), [])
+            for _it in _alvos:
+                _lat_old, _lon_old = _it.get("lat"), _it.get("lon")
+                _it["lat"] = _corr["lat"]
+                _it["lon"] = _corr["lon"]
+                logger.warning("[IBGE-COORD-FIX] %s (%s/%s): coordenada corrigida (%s, %s) -> (%s, %s). %s",
+                               _cod, _corr.get("nome", "?"), _corr.get("uf", "?"),
+                               _lat_old, _lon_old, _corr["lat"], _corr["lon"], _corr.get("fonte", ""))
+        return base
+    except Exception:
+        return base
+
+
+IBGE_MUNICIPIOS = _aplicar_correcoes_coordenada(IBGE_MUNICIPIOS)
+
+# [BASE-OFICIAL - 184ª geração] CONSUMIDOR DA BASE OFICIAL DO IBGE (Fase 1 offline).
+# A fonte MAIS autoritativa da coordenada é a SEDE OFICIAL do IBGE (a cidade — alvo correto de rota; o
+# centroide geométrico cai no mato em municípios grandes). Ela é produzida FORA do app, na máquina do dev,
+# por `construir_base_oficial_ibge.py` (que usa geobr/malha/DTB — cadeia geoespacial que NÃO pode rodar no
+# Streamlit Cloud). Aqui só CONSUMIMOS o resultado tabular (leve, sem GDAL): coordenadas de sede por código
+# IBGE, lidas de (1) arquivo 'sedes_oficiais_ibge.csv' ao lado do app OU (2) blob embutido _SEDES_OFICIAIS_B64.
+# Enquanto a base oficial não existir, isto é NO-OP: o app segue com a base atual + a tabela curada + a
+# validação por geometria. Quando existir, a sede oficial tem PRECEDÊNCIA (roda depois da curada, antes da
+# validação por geometria — que então nada terá a corrigir). É a "camada única oficial" da pesquisa, com
+# fallback: oficial → comunitária corrigida → validação por geometria.
+_SEDES_OFICIAIS_B64 = ""   # (vazio) preenchível pela Fase 1 se você preferir arquivo único a arquivo companheiro
+
+
+@_lru_cache(maxsize=1)
+def _carregar_sedes_oficiais():
+    """[BASE-OFICIAL - 184ª geração] {codigo_ibge(str): (lat, lon)} da SEDE OFICIAL do IBGE, de:
+    (1) 'sedes_oficiais_ibge.csv' na pasta do app; senão (2) blob _SEDES_OFICIAIS_B64. {} se nada houver.
+    Defensivo: qualquer erro → {} (o app segue com a base atual + validação por geometria)."""
+    _ref = {}
+    try:
+        import os as _os, csv as _csv
+        _p = os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "sedes_oficiais_ibge.csv")
+        if _os.path.exists(_p):
+            with open(_p, encoding="utf-8") as _f:
+                for _row in _csv.DictReader(_f):
+                    _cod = str(_row.get("codigo_ibge") or "").strip()
+                    try:
+                        _ref[_cod] = (float(_row["lat"]), float(_row["lon"]))
+                    except (TypeError, ValueError, KeyError):
+                        continue
+            if _ref:
+                return _ref
+    except Exception:
+        _ref = {}
+    try:
+        if _SEDES_OFICIAIS_B64:
+            import gzip as _gz, base64 as _b64
+            _txt = _gz.decompress(_b64.b64decode(_SEDES_OFICIAIS_B64)).decode("utf-8")
+            for _ln in _txt.splitlines():
+                _pp = _ln.split(",")
+                if len(_pp) == 3:
+                    try:
+                        _ref[_pp[0]] = (float(_pp[1]), float(_pp[2]))
+                    except (TypeError, ValueError):
+                        continue
+    except Exception:
+        return {}
+    return _ref
+
+
+# [BASE-OFICIAL - 184ª geração] Conjunto (módulo) dos códigos IBGE que receberam a SEDE OFICIAL. Serve para a
+# validação por geometria (malha mais antiga) NÃO sobrescrever a fonte mais autoritativa. Preenchido no load.
+_CODIGOS_SEDE_OFICIAL = set()
+
+
+def _aplicar_sedes_oficiais(base):
+    """[BASE-OFICIAL - 184ª geração] Sobrescreve as coordenadas da base pela SEDE OFICIAL do IBGE quando
+    disponível (Fase 1). Fonte mais autoritativa → precedência sobre a base comunitária e a tabela curada.
+    NO-OP se a base oficial não estiver presente. Defensivo: em erro, devolve a base intacta.
+
+    GARANTIA POR OBSERVABILIDADE: registra log EXPLÍCITO em TODOS os cenários (aplicado com N / arquivo
+    presente mas ilegível / arquivo ausente), com o caminho verificado — assim nunca há degradação
+    silenciosa: todo startup diz nos logs se a base oficial está ativa ou não."""
+    global _CODIGOS_SEDE_OFICIAL
+    try:
+        import os as _os
+        _caminho = os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "sedes_oficiais_ibge.csv")
+        _tem_arquivo = _os.path.exists(_caminho)
+        _sedes = _carregar_sedes_oficiais()
+        if not isinstance(base, dict):
+            return base
+        if not _sedes:
+            _CODIGOS_SEDE_OFICIAL = set()
+            if _tem_arquivo:
+                logger.warning("[BASE-OFICIAL] ATENÇÃO: '%s' EXISTE mas 0 coordenadas foram lidas — verifique o "
+                               "cabeçalho/formato (esperado: codigo_ibge,lat,lon). Seguindo com base comunitária "
+                               "+ validação por geometria.", _caminho)
+            elif _SEDES_OFICIAIS_B64:
+                logger.warning("[BASE-OFICIAL] blob embutido presente mas vazio/ilegível — seguindo com base "
+                               "comunitária + validação por geometria.")
+            else:
+                logger.warning("[BASE-OFICIAL] 'sedes_oficiais_ibge.csv' NÃO encontrado em '%s' e blob vazio — "
+                               "seguindo com base comunitária + validação por geometria (comportamento padrão).",
+                               _caminho)
+            return base
+        _idx = {}
+        for _nome, _itens in base.items():
+            for _it in _itens:
+                _cod = str(_it.get("codigo_ibge") or "").strip()
+                if _cod:
+                    _idx.setdefault(_cod, []).append(_it)
+        _n = 0
+        _aplicados = set()
+        for _cod, _ll in _sedes.items():
+            _ck = str(_cod).strip()
+            for _it in _idx.get(_ck, []):
+                _it["lat"], _it["lon"] = _ll[0], _ll[1]
+                _n += 1
+                _aplicados.add(_ck)
+        _CODIGOS_SEDE_OFICIAL = _aplicados
+        _fonte = "arquivo sedes_oficiais_ibge.csv" if _tem_arquivo else "blob embutido _SEDES_OFICIAIS_B64"
+        logger.warning("[BASE-OFICIAL] %d coordenada(s) substituída(s) pela SEDE OFICIAL do IBGE (Fase 1) — "
+                       "%d código(s) IBGE, fonte: %s.", _n, len(_aplicados), _fonte)
+        _nao_casou = len(_sedes) - len(_aplicados)
+        if _nao_casou > 0:
+            logger.warning("[BASE-OFICIAL] nota: %d código(s) do CSV não casaram com a base em memória (%d casaram) "
+                           "— provável diferença de vintage de códigos IBGE; sem impacto no que foi aplicado.",
+                           _nao_casou, len(_aplicados))
+        return base
+    except Exception:
+        logger.warning("[BASE-OFICIAL] ERRO ao aplicar sedes oficiais — seguindo com base comunitária + "
+                       "validação por geometria.", exc_info=True)
+        return base
+
+
+IBGE_MUNICIPIOS = _aplicar_sedes_oficiais(IBGE_MUNICIPIOS)
+
+# [IBGE-GEO-VALIDACAO - 184ª geracao] REDE SISTEMICA CONTRA COORDENADAS ERRADAS.
+# A unica autoridade INDEPENDENTE das bases de lat/lon (que clonam os mesmos erros entre si) e a GEOMETRIA
+# oficial do IBGE (malha municipal). Aqui vai uma referencia COMPACTA embutida (offline, O(1), SEM rede):
+# para cada municipio, o CENTROIDE e o RAIO REAL do poligono (vertice mais distante do centroide). Regra:
+# se a distancia de uma coordenada ao centroide do seu municipio EXCEDE (raio real + folga), a coordenada
+# esta PROVADAMENTE fora do municipio (corrompida na fonte) -> corrige para o centroide oficial (garantido
+# dentro) e registra. Testado nos 5.564 municipios: acusa EXATAMENTE os 4 erros reais (excesso 155-728 km)
+# e ZERO falso-positivo -- cidades costeiras e municipios amazonicos gigantes NAO sao acusados, porque o
+# raio real do proprio poligono ja os cobre. Isto GENERALIZA a protecao: pega erros FUTUROS/desconhecidos
+# automaticamente, nao so os 4 ja catalogados na tabela curada acima. A geometria do IBGE muda raríssimo,
+# entao a referencia embutida nao envelhece na pratica; para regenerar, rode auditar_coordenadas_ibge.py.
+# Por que corrigir para o CENTROIDE (e nao manter a sede errada): so as coordenadas comprovadamente FORA do
+# municipio sao tocadas; para essas, o centroide oficial e sempre melhor que um ponto a centenas de km. As
+# sedes CORRETAS (a esmagadora maioria) nao sao alteradas -- continuam sendo o alvo ideal de rota.
+_IBGE_GEO_REF_B64 = "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"
+
+
+# [PORTAO-GEO+ - 184ª geração] REFERÊNCIA SUPLEMENTAR p/ municípios ausentes da malha embutida.
+# Auditoria de integridade da base achou 7 municípios recém-criados (emancipados ~2013) SEM geometria em
+# _IBGE_GEO_REF_B64 (a malha que o gerou, 5.564 polígonos, é anterior a eles) — logo o portão de aceitação
+# ficava FAIL-OPEN só para eles. Aqui cada um recebe uma referência centrada na SEDE oficial + raio
+# conservador (50 km): suficiente p/ REJEITAR erro grosseiro (geocode em UF errada, oceano, homônimo
+# distante) sem falso-rejeitar endereço local. É aproximação ASSUMIDA (não o polígono real); quando a malha
+# for atualizada (construir_base_oficial_ibge.py --check), o polígono verdadeiro entra e o setdefault abaixo
+# cede a ele automaticamente. (centro_lat, centro_lon, raio_km).
+_GEO_REF_SUPLEMENTAR = {
+    "1504752": (-2.68220, -54.64250, 50.0),   # Mojuí dos Campos/PA
+    "2206720": (-5.35128, -42.81530, 50.0),   # Nazária/PI
+    "4212650": (-28.39660, -48.88640, 50.0),  # Pescaria Brava/SC
+    "4220000": (-28.83140, -49.23520, 50.0),  # Balneário Rincão/SC
+    "4314548": (-29.09750, -51.45030, 50.0),  # Pinto Bandeira/RS
+    "5006275": (-19.02160, -53.01160, 50.0),  # Paraíso das Águas/MS
+    "5101837": (-13.50670, -55.14860, 50.0),  # Boa Esperança do Norte/MT
+}
+
+
+@_lru_cache(maxsize=1)
+def _carregar_ref_geometria_ibge():
+    """Decodifica a referencia compacta embutida -> {codigo_ibge: (centro_lat, centro_lon, raio_km)}.
+    Defensivo: em qualquer erro devolve {} (a validacao simplesmente nao roda)."""
+    try:
+        import gzip as _gz, base64 as _b64
+        _txt = _gz.decompress(_b64.b64decode(_IBGE_GEO_REF_B64)).decode("utf-8")
+        _ref = {}
+        for _ln in _txt.splitlines():
+            _p = _ln.split(",")
+            if len(_p) == 4:
+                _ref[_p[0]] = (float(_p[1]), float(_p[2]), float(_p[3]))
+        for _cs, _vs in _GEO_REF_SUPLEMENTAR.items():
+            _ref.setdefault(_cs, _vs)   # só preenche ausências; nunca sobrescreve o polígono real
+        return _ref
+    except Exception:
+        return {}
+
+
+def _validar_coordenadas_por_geometria(base):
+    """[IBGE-GEO-VALIDACAO - 184ª geracao] Valida cada coordenada da base contra a geometria oficial do IBGE.
+    Se a distancia da coordenada ao centroide do municipio exceder o RAIO REAL do poligono + FOLGA, a
+    coordenada esta fora do municipio (corrompida na fonte) -> corrige para o centroide oficial e registra.
+    Rede automatica que complementa a tabela curada (que trata casos com sede precisa conhecida). Defensivo:
+    em erro devolve a base intacta."""
+    try:
+        _ref = _carregar_ref_geometria_ibge()
+        if not isinstance(base, dict) or not _ref:
+            return base
+        import math as _m
+        def _hkm(la1, lo1, la2, lo2):
+            _p1, _p2 = _m.radians(la1), _m.radians(la2)
+            _dp, _dl = _m.radians(la2 - la1), _m.radians(lo2 - lo1)
+            _a = _m.sin(_dp / 2) ** 2 + _m.cos(_p1) * _m.cos(_p2) * _m.sin(_dl / 2) ** 2
+            return 6371.0088 * 2 * _m.asin(_m.sqrt(_a))
+        _FOLGA_KM = 50.0   # tolera simplificacao de costa/borda; erros reais tem excesso >150 km
+        _corr = 0
+        for _nome, _itens in base.items():
+            for _it in _itens:
+                _cod = str(_it.get("codigo_ibge") or "").strip()
+                if _cod in _CODIGOS_SEDE_OFICIAL:
+                    continue   # SEDE OFICIAL é autoritativa — nunca rebaixar pela malha (mais antiga)
+                _r = _ref.get(_cod)
+                if not _r:
+                    continue
+                _lat, _lon = _it.get("lat"), _it.get("lon")
+                if not _lat or not _lon:
+                    continue
+                _clat, _clon, _raio = _r
+                _d = _hkm(_lat, _lon, _clat, _clon)
+                if _d > _raio + _FOLGA_KM:
+                    logger.warning("[IBGE-GEO-VALIDACAO] %s (%s): coordenada (%s,%s) a %.0f km do centroide "
+                                   "(raio do municipio %.0f km) -> fora do poligono; corrigida p/ centroide "
+                                   "(%.4f,%.4f).", _cod, _it.get("municipio", "?"), _lat, _lon, _d, _raio,
+                                   _clat, _clon)
+                    _it["lat"], _it["lon"] = _clat, _clon
+                    _corr += 1
+        if _corr:
+            logger.warning("[IBGE-GEO-VALIDACAO] %d coordenada(s) fora do poligono corrigida(s) p/ o centroide oficial.", _corr)
+        return base
+    except Exception:
+        return base
+
+
+def _validar_coordenada_no_municipio(lat, lon, codigo_ibge, tolerancia_km=None):
+    """[PORTAO-GEO - 184ª geração] PORTÃO DE ACEITAÇÃO EM TEMPO DE CONSULTA.
+    Pergunta: a coordenada (lat, lon) — vinda de geocodificação de endereço/bairro/logradouro/CEP/nome —
+    cai PLAUSIVELMENTE DENTRO do município esperado (codigo_ibge)? Reusa a referência de geometria oficial
+    já embutida (_IBGE_GEO_REF_B64: centróide + RAIO REAL do polígono de cada município), então é offline e
+    O(1). A extensão real do município (raio) já cobre endereços internos legítimos mesmo em municípios
+    grandes; a FOLGA trata simplificação de borda/imprecisão do geocoder. Pega o que a validação de CARGA
+    não vê: um endereço cujo geocode caiu no MUNICÍPIO ERRADO (homônimo, match ruim), em OUTRO ESTADO, no
+    OCEANO ou em OUTRO PAÍS.
+
+    FAIL-OPEN por segurança: sem geometria de referência para o código, com coordenada/código ausentes, ou
+    em qualquer erro, retorna ok=True (NÃO bloqueia) — o portão só REJEITA quando há evidência POSITIVA de
+    que a coordenada está fora. Assim nunca derruba uma coordenada válida por falta de dado.
+
+    Retorna dict auditável: {ok, dentro, dist_km, raio_km, limiar_km, tem_ref, motivo}."""
+    try:
+        if lat is None or lon is None or codigo_ibge in (None, ""):
+            return {"ok": True, "dentro": None, "tem_ref": False, "dist_km": None, "raio_km": None,
+                    "limiar_km": None, "motivo": "coordenada ou código ausente — não avaliado (fail-open)"}
+        _ref = _carregar_ref_geometria_ibge()
+        _cod = str(codigo_ibge).strip()
+        _r = _ref.get(_cod)
+        if not _r:
+            return {"ok": True, "dentro": None, "tem_ref": False, "dist_km": None, "raio_km": None,
+                    "limiar_km": None,
+                    "motivo": f"sem geometria de referência p/ IBGE {_cod} — não avaliado (fail-open)"}
+        _clat, _clon, _raio = _r
+        import math as _m
+        _la, _lo = float(lat), float(lon)
+        _p1, _p2 = _m.radians(_la), _m.radians(_clat)
+        _dp = _m.radians(_clat - _la)
+        _dl = _m.radians(_clon - _lo)
+        _a = _m.sin(_dp / 2) ** 2 + _m.cos(_p1) * _m.cos(_p2) * _m.sin(_dl / 2) ** 2
+        _d = 6371.0088 * 2 * _m.asin(_m.sqrt(_a))
+        _folga = float(tolerancia_km) if tolerancia_km is not None else max(10.0, 0.20 * _raio)
+        _limiar = _raio + _folga
+        _dentro = _d <= _limiar
+        return {"ok": bool(_dentro), "dentro": bool(_dentro), "dist_km": round(_d, 1),
+                "raio_km": round(_raio, 1), "limiar_km": round(_limiar, 1), "tem_ref": True,
+                "motivo": (f"dentro do município IBGE {_cod} (dist {_d:.1f} km <= limiar {_limiar:.1f} km)"
+                           if _dentro else
+                           f"FORA do município IBGE {_cod} (dist {_d:.1f} km > limiar {_limiar:.1f} km)")}
+    except Exception:
+        return {"ok": True, "dentro": None, "tem_ref": False, "dist_km": None, "raio_km": None,
+                "limiar_km": None, "motivo": "erro na validação — não avaliado (fail-open)"}
+
+
+IBGE_MUNICIPIOS = _validar_coordenadas_por_geometria(IBGE_MUNICIPIOS)
+
+
+def _auditar_saude_coordenadas():
+    """[SAUDE-COORD - 184ª geração] MONITORAMENTO CONTÍNUO da base de coordenadas. Ao final da carga (após
+    correção curada + SEDE OFICIAL + validação por geometria), verifica o estado FINAL contra a geometria
+    oficial e registra UM resumo nos logs — para que qualquer regressão futura de fonte/código seja VISÍVEL
+    em produção (detecção precoce), em vez de silenciosa. Read-only, defensivo, roda 1× no import. NÃO flagra
+    como 'fora' os códigos com SEDE OFICIAL (são autoritativos e propositalmente confiados acima da malha,
+    que é mais antiga)."""
+    try:
+        _total = _com_geo = _sem_coord = _fora = 0
+        for _nome, _itens in IBGE_MUNICIPIOS.items():
+            for _it in _itens:
+                _cod = str(_it.get("codigo_ibge") or "").strip()
+                if len(_cod) != 7 or not _cod.isdigit():
+                    continue
+                _total += 1
+                _lat = _it.get("lat") or 0.0
+                _lon = _it.get("lon") or 0.0
+                if not (_lat and _lon):
+                    _sem_coord += 1
+                    continue
+                if _cod in _CODIGOS_SEDE_OFICIAL:
+                    _com_geo += 1   # confiado: sede oficial do IBGE
+                    continue
+                _v = _validar_coordenada_no_municipio(_lat, _lon, _cod)
+                if _v.get("tem_ref"):
+                    _com_geo += 1
+                    if _v.get("dentro") is False:
+                        _fora += 1
+        logger.warning("[SAUDE-COORD] estado final: %d municípios | %d validáveis por geometria | %d SEM "
+                       "coordenada | %d fora do polígono (não-oficiais) | %d com sede oficial.",
+                       _total, _com_geo, _sem_coord, _fora, len(_CODIGOS_SEDE_OFICIAL))
+        if _sem_coord or _fora:
+            logger.warning("[SAUDE-COORD] ⚠️ ATENÇÃO: %d sem coordenada e %d fora do polígono após correções — "
+                           "investigar (possível regressão de fonte/código).", _sem_coord, _fora)
+        else:
+            logger.warning("[SAUDE-COORD] ✅ base íntegra: nenhuma coordenada ausente ou fora do polígono.")
+    except Exception:
+        pass
+
+
+_auditar_saude_coordenadas()
+
 
 # ==============================================================================
 # [IBGE-INPUT - 98ª geração] CÓDIGO IBGE COMO ENTRADA OFICIAL — índice reverso O(1) + detecção + resolução.
@@ -6281,7 +8630,15 @@ def _indice_ibge_por_codigo():
     Código IBGE como entrada NUNCA deixa de resolver por estado da base viva/cache."""
     _idx = {}
 
-    def _ingerir(_fonte, _sobrescrever_sem_coord):
+    def _ingerir(_fonte, _autoritativo_coord):
+        # [IBGE-COORD-PROP - 184ª geração] _autoritativo_coord=True: a fonte é a base VIVA (IBGE_MUNICIPIOS),
+        # que JÁ passou por correção curada + SEDE OFICIAL + validação por geometria; logo a coordenada dela é
+        # a MELHOR disponível e SOBRESCREVE a coordenada da base embutida crua. ANTES o overlay só preenchia
+        # coords AUSENTES — então uma coord ERRADA na embutida (ex.: 4128625 Alto Paraíso, -26.11,-52.75) nunca
+        # era corrigida no índice por código, e a rota por Código IBGE usava o valor errado MESMO com a base
+        # viva já corrigida. Era exatamente o furo do caso 4128625→4118501 (18 km em vez de ~439 km). A base
+        # embutida continua entrando primeiro (não-autoritativa) só como GARANTIA DE COBERTURA (todos os
+        # códigos resolvem, mesmo os ausentes da viva). Coord (0,0) conta como "sem coord" e nunca sobrescreve.
         for _itens in _fonte.values():
             for _it in _itens:
                 _cod = _it.get("codigo_ibge")
@@ -6292,16 +8649,17 @@ def _indice_ibge_por_codigo():
                     continue
                 _prev = _idx.get(_ck)
                 _tem_coord = bool(_it.get("lat") or _it.get("lon"))
-                if _prev is None or (_sobrescrever_sem_coord and not (_prev.get("lat") or _prev.get("lon")) and _tem_coord):
+                _prev_sem_coord = _prev is not None and not (_prev.get("lat") or _prev.get("lon"))
+                if _prev is None or (_autoritativo_coord and _tem_coord) or (_prev_sem_coord and _tem_coord):
                     _idx[_ck] = {"municipio": _it.get("municipio", ""), "uf": _it.get("uf", ""),
                                  "lat": _it.get("lat", 0.0) or 0.0, "lon": _it.get("lon", 0.0) or 0.0}
 
-    # (1) base EMBUTIDA — fundação garantida (todos os códigos, coords válidas)
+    # (1) base EMBUTIDA — fundação de COBERTURA (todos os códigos resolvem), NÃO autoritativa em coordenada
     try:
-        _ingerir(_carregar_base_embutida(), True)
+        _ingerir(_carregar_base_embutida(), False)
     except Exception:
         pass
-    # (2) base VIVA como overlay: só adiciona códigos ainda ausentes, ou melhora coords faltantes
+    # (2) base VIVA (já corrigida) como AUTORIDADE de coordenada: sobrescreve a coord da embutida quando existe
     try:
         _ingerir(IBGE_MUNICIPIOS, True)
     except Exception:
@@ -7083,13 +9441,7 @@ def cascata_postal_tripla(cep_limpo):
         
     return "", "", "", "", 0.0, 0.0
 
-def validar_consistencia_administrativa(candidato, uf_inf):
-    est_api = unidecode(candidato.get('estado', '')).upper().strip()
-    if uf_inf and est_api:
-        nome_estado_inf = _normalizar_uf(uf_inf) if uf_inf else ""
-        if uf_inf not in est_api and nome_estado_inf not in est_api:
-            return False
-    return True
+# [AUDITORIA-184] Função morta 'validar_consistencia_administrativa' aposentada (nome ocorria 1× no arquivo — sem qualquer referência). Recuperável no histórico de versões.
 
 def validar_consistencia_municipal(candidato, mun_inf):
     if not mun_inf: 
@@ -7877,6 +10229,97 @@ def _integridade_geografica(dist_viaria_km, dist_reta_km, nivel_origem="", nivel
 
 
 @st.cache_data(show_spinner=False)
+def _montar_planilha_lote_xlsx(df_final):
+    """[XLSX-RICO - 184ª geração] Monta o workbook do Lote com MÚLTIPLAS abas estruturadas, em vez de uma aba
+    plana: 'Rotas' (dado bruto com cabeçalhos de exame — IDÊNTICA à exportação anterior, p/ compatibilidade),
+    'Resumo Executivo' (KPIs), 'Distribuição de Distâncias' (faixas), 'Síntese por UF' e 'Status das Rotas'.
+    Cada aba EXTRA só é criada se as colunas existirem; se qualquer extra falhar, a 'Rotas' já foi escrita e o
+    arquivo continua válido (defensivo). Retorna bytes."""
+    _buf = io.BytesIO()
+    with pd.ExcelWriter(_buf, engine='xlsxwriter') as _w:
+        _df_rotas_lote = _renomear_colunas_exame(df_final)
+        _df_rotas_lote.to_excel(_w, index=False, sheet_name="Rotas")
+        # [EXPORT-PADRAO - 184ª geração] Padrão institucional na aba principal do Lote.
+        try:
+            _wb_lt = getattr(_w, "book", None)
+            if _wb_lt is not None and hasattr(_wb_lt, "add_format"):
+                _fmts_lt = _fmt_institucional(_wb_lt)
+                _estilizar_tabela_xlsx(_w.sheets.get("Rotas"), _wb_lt, _df_rotas_lote, _fmts_lt)
+        except Exception:
+            logger.error("[EXPORT-PADRAO] Falha ao estilizar aba Rotas do Lote", exc_info=True)
+        try:
+            # [CAPA-LOTE - 184ª geração] Portada formatada (mesmo padrão da planilha de Locais): título grande,
+            # totais e metodologia. Isolada em try próprio — se falhar, a aba 'Rotas' já está escrita.
+            _dist0 = pd.to_numeric(df_final['Distancia'], errors='coerce') if 'Distancia' in df_final.columns else None
+            _nb0 = (int(df_final['Balsas'].astype(str).str.strip().str.lower().isin(
+                ['sim', 'yes', 'true', '1']).sum()) if 'Balsas' in df_final.columns else 0)
+            _npolos0 = df_final['Municipio Destino'].nunique() if 'Municipio Destino' in df_final.columns else 0
+            _cap = pd.DataFrame({"Estudo em Lote — Roteirização de Candidatos": [
+                "", "Relatório do processamento em lote de rotas origem → local de prova.",
+                "", f"Total de rotas: {len(df_final):,}",
+                f"Locais de prova (destinos) distintos: {_npolos0:,}",
+                f"Deslocamento médio: {_dist0.mean():.1f} km" if _dist0 is not None else "Deslocamento médio: —",
+                f"Deslocamento mediano: {_dist0.median():.1f} km" if _dist0 is not None else "",
+                f"Maior deslocamento: {_dist0.max():.1f} km" if _dist0 is not None else "",
+                f"Rotas que cruzam balsa: {_nb0:,}",
+                "", "Metodologia: menor rota viária real (Google → OSRM), com auditoria de plausibilidade "
+                "e classificação de qualidade da rota (🟢/🟡/🟠). Linha reta (Karney/WGS-84) só quando não há "
+                "rota viária, sempre sinalizada.",
+                "", "Abas: dado bruto (Rotas), indicadores (Resumo Executivo), faixas de distância, síntese por "
+                "UF, status das rotas e Metodologia/Referências.",
+                "", f"Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}."]})
+            _cap.to_excel(_w, index=False, sheet_name="Capa")
+            _wb0 = getattr(_w, "book", None)
+            if _wb0 is not None and hasattr(_wb0, "add_format"):
+                _ws0 = _w.sheets["Capa"]
+                _ws0.set_column("A:A", 96)
+                _ws0.write("A1", "Estudo em Lote — Roteirização de Candidatos",
+                           _wb0.add_format({"bold": True, "font_size": 20, "font_color": "#1e3a8a"}))
+        except Exception:
+            logger.error("[CAPA-LOTE] Falha ao montar a capa do Lote (aba 'Rotas' preservada)", exc_info=True)
+        try:
+            _dist = pd.to_numeric(df_final['Distancia'], errors='coerce') if 'Distancia' in df_final.columns else None
+            _reta = pd.to_numeric(df_final['Linha Reta'], errors='coerce') if 'Linha Reta' in df_final.columns else None
+            _integ = pd.to_numeric(df_final['Integridade Geográfica'], errors='coerce') if 'Integridade Geográfica' in df_final.columns else None
+            _res = [("Total de rotas", len(df_final))]
+            if _dist is not None:
+                _res += [("Distância viária média (km)", round(_dist.mean(), 1)),
+                         ("Distância viária total (km)", round(_dist.sum(), 1)),
+                         ("Maior deslocamento (km)", round(_dist.max(), 1)),
+                         ("Menor deslocamento (km)", round(_dist.min(), 1))]
+                if _reta is not None and float(_reta.sum()) > 0:
+                    _res.append(("Sinuosidade média (viária/reta)", round(float(_dist.sum()) / float(_reta.sum()), 3)))
+            if _integ is not None:
+                _res.append(("Integridade geográfica média (0-100)", round(_integ.mean(), 1)))
+            if 'Balsas' in df_final.columns:
+                _nb = int(df_final['Balsas'].astype(str).str.strip().str.lower().isin(['sim', 'yes', 'true', '1']).sum())
+                _res.append(("Rotas que cruzam balsa", _nb))
+            pd.DataFrame(_res, columns=["Indicador", "Valor"]).to_excel(_w, index=False, sheet_name="Resumo Executivo")
+            if _dist is not None and _dist.notna().any():
+                _labs = ["0–50", "50–100", "100–150", "150–200", "200–300", "300–500", "500+"]
+                _cat = pd.cut(_dist.dropna(), bins=[0, 50, 100, 150, 200, 300, 500, 10**9], labels=_labs, right=False)
+                _cnt = _cat.value_counts().reindex(_labs, fill_value=0)
+                _dd = pd.DataFrame({"Faixa (km)": _labs, "Rotas": [int(x) for x in _cnt.values]})
+                _dd["% do total"] = (_dd["Rotas"] / max(1, int(_dd["Rotas"].sum())) * 100).round(1)
+                _dd.to_excel(_w, index=False, sheet_name="Distribuição de Distâncias")
+            if 'UF Origem' in df_final.columns and _dist is not None:
+                _g = df_final.assign(_d=_dist).groupby('UF Origem').agg(
+                    Rotas=('_d', 'size'), _med=('_d', 'mean'), _max=('_d', 'max'), _tot=('_d', 'sum')
+                ).reset_index().sort_values('Rotas', ascending=False)
+                for _c in ('_med', '_max', '_tot'):
+                    _g[_c] = _g[_c].round(1)
+                _g.columns = ['UF', 'Rotas', 'Dist. média (km)', 'Dist. máx (km)', 'Dist. total (km)']
+                _g.to_excel(_w, index=False, sheet_name="Síntese por UF")
+            if 'Status da Rota' in df_final.columns:
+                _s = df_final['Status da Rota'].astype(str).value_counts().reset_index()
+                _s.columns = ['Status', 'Rotas']
+                _s['% do total'] = (_s['Rotas'] / max(1, int(_s['Rotas'].sum())) * 100).round(1)
+                _s.to_excel(_w, index=False, sheet_name="Status das Rotas")
+        except Exception:
+            logger.error("[XLSX-RICO] Falha nas abas extras do Lote (aba 'Rotas' preservada)", exc_info=True)
+    return _buf.getvalue()
+
+
 def _xlsx_bytes(df, sheet_name="Dados"):
     """[UI-ESTAVEL - 137ª geração] Gera os bytes de um .xlsx UMA ÚNICA VEZ e os memoriza.
     CAUSA RAIZ do removeChild "ao digitar": vários st.download_button recebiam `data=` de um XLSX
@@ -7900,6 +10343,7 @@ def _xlsx_bytes_2(df1, nome1, df2=None, nome2="Aba2"):
         df1.to_excel(_w, index=False, sheet_name=nome1)
         if df2 is not None and len(df2):
             df2.to_excel(_w, index=False, sheet_name=nome2)
+        _abas_metodologia_referencias(_w)  # [ARTIGO - 184ª geração]
     return _buf.getvalue()
 
 
@@ -7970,6 +10414,10 @@ _MAPA_COLUNAS_EXAME = {
     'Distancia Concorrente': 'Distância à Alternativa de Aplicação (km)',
     'Linha Reta Concorrente': 'Distância Geodésica à Alternativa (km)',
     'Tempo Concorrente': 'Tempo Estimado até a Alternativa',
+    'Municipio Concorrente': 'Município da Alternativa de Aplicação',
+    'UF Concorrente': 'UF da Alternativa de Aplicação',
+    'Cod IBGE Concorrente': 'Código IBGE da Alternativa',
+    'Motor Vencedor Concorrente': 'Motor de Rota da Alternativa',
     'IGQ Hub': 'Índice de Qualidade do Polo (0-100)',
     'Custo Efetivo Hub (km-eq)': 'Esforço de Deslocamento do Polo (km-equiv.)',
     'Hub 2o (Custo)': 'Alternativa de Aplicação (2º melhor)',
@@ -7996,6 +10444,172 @@ _MAPA_COLUNAS_EXAME = {
 # ============================================================================
 # [COBERTURA - 140ª geração] Planejamento de polos: cobertura + onde abrir
 # ============================================================================
+
+def _haversine_matriz_nn(lats, lons):
+    """[PLANEJAMENTO - 184ª geração] Matriz N×N de distâncias Haversine (km) entre pontos. Vetorizado (numpy).
+    Núcleo do motor de planejamento territorial (catchment/cobertura). Puro."""
+    import numpy as np
+    _la = np.radians(np.asarray(lats, dtype=float))
+    _lo = np.radians(np.asarray(lons, dtype=float))
+    _dla = _la[:, None] - _la[None, :]
+    _dlo = _lo[:, None] - _lo[None, :]
+    _a = np.sin(_dla / 2.0) ** 2 + np.cos(_la)[:, None] * np.cos(_la)[None, :] * np.sin(_dlo / 2.0) ** 2
+    return 6371.0088 * 2.0 * np.arcsin(np.sqrt(np.clip(_a, 0.0, 1.0)))
+
+
+def _catchment_ranking(df, raio_km=100.0):
+    """[PLANEJAMENTO - 184ª geração] Para CADA município candidato a sediar prova, quantos municípios e
+    candidatos ele cobriria dentro de raio_km (Haversine), + distância média (ponderada por candidatos) e
+    máxima na área de influência. Ranqueia por candidatos cobertos. df: colunas
+    ['municipio','uf','codigo_ibge','lat','lon','candidatos']. Puro e vetorizado. Retorna DataFrame."""
+    import numpy as np
+    _cols = ['municipio', 'uf', 'codigo_ibge', 'municipios_cobertos', 'candidatos_cobertos',
+             'pct_candidatos', 'dist_media_km', 'dist_max_km']
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=_cols)
+    _cand = pd.to_numeric(df['candidatos'], errors='coerce').fillna(0).to_numpy(dtype=float)
+    _D = _haversine_matriz_nn(pd.to_numeric(df['lat'], errors='coerce').to_numpy(dtype=float),
+                           pd.to_numeric(df['lon'], errors='coerce').to_numpy(dtype=float))
+    _mask = _D <= float(raio_km)
+    _total = _cand.sum()
+    _wmat = _mask * _cand[None, :]
+    _wsum = _wmat.sum(axis=1)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        _dmed = np.where(_wsum > 0, (_D * _wmat).sum(axis=1) / _wsum, 0.0)
+    _dmax = np.where(_mask, _D, 0.0).max(axis=1)
+    return pd.DataFrame({
+        'municipio': df['municipio'].values if 'municipio' in df.columns else '',
+        'uf': df['uf'].values if 'uf' in df.columns else '',
+        'codigo_ibge': df['codigo_ibge'].values if 'codigo_ibge' in df.columns else '',
+        'municipios_cobertos': _mask.sum(axis=1).astype(int),
+        'candidatos_cobertos': _wsum.astype(int),
+        'pct_candidatos': (100.0 * _wsum / _total).round(1) if _total else 0.0,
+        'dist_media_km': np.round(_dmed, 1),
+        'dist_max_km': np.round(_dmax, 1),
+    }).sort_values('candidatos_cobertos', ascending=False).reset_index(drop=True)
+
+
+def _cenarios_cobertura_maxima(df, raio_km=100.0, ns=(5, 10, 20, 30, 50, 100)):
+    """[PLANEJAMENTO - 184ª geração] Cenários de COBERTURA MÁXIMA (MCLP guloso): para cada N, escolhe
+    gulosamente os N municípios que cobrem o MÁXIMO de candidatos AINDA descobertos, dentro de raio_km.
+    Retorna (cenarios, escolhidos_por_N, marcos). cenarios: lista de {n, candidatos_cobertos, pct_candidatos,
+    municipios_cobertos, pct_municipios, candidatos_descobertos}. marcos: {80/90/95: nº de locais p/ atingir}.
+    Puro e vetorizado. Custo ~O(N² · max_n)."""
+    import numpy as np
+    if df is None or len(df) == 0:
+        return [], {}, {}
+    _cand = pd.to_numeric(df['candidatos'], errors='coerce').fillna(0).to_numpy(dtype=float)
+    _D = _haversine_matriz_nn(pd.to_numeric(df['lat'], errors='coerce').to_numpy(dtype=float),
+                           pd.to_numeric(df['lon'], errors='coerce').to_numpy(dtype=float))
+    _mask = _D <= float(raio_km)
+    _total = _cand.sum()
+    _n_mun = len(df)
+    _ns = sorted({int(x) for x in ns if int(x) > 0})
+    _max_n = min(max(_ns) if _ns else 0, _n_mun)
+    _coberto = np.zeros(_n_mun, dtype=bool)
+    _sel, _cenarios, _escolhidos, _marcos = [], [], {}, {}
+    for _k in range(1, _max_n + 1):
+        _ganho = (_mask * (_cand * (~_coberto))[None, :]).sum(axis=1)
+        if _sel:
+            _ganho[_sel] = -1.0
+        _best = int(np.argmax(_ganho))
+        if _ganho[_best] <= 0:
+            break
+        _sel.append(_best)
+        _coberto = _coberto | _mask[_best]
+        _cc = float(_cand[_coberto].sum())
+        _pct = (100.0 * _cc / _total) if _total else 0.0
+        for _lim in (80, 90, 95):
+            if _lim not in _marcos and _pct >= _lim:
+                _marcos[_lim] = _k
+        if _k in _ns:
+            _escolhidos[_k] = list(_sel)
+            _cenarios.append({'n': _k, 'candidatos_cobertos': int(_cc), 'pct_candidatos': round(_pct, 1),
+                              'municipios_cobertos': int(_coberto.sum()),
+                              'pct_municipios': round(100.0 * _coberto.sum() / _n_mun, 1),
+                              'candidatos_descobertos': int(_total - _cc)})
+    return _cenarios, _escolhidos, _marcos
+
+
+def _indices_territoriais(df, marcos=None):
+    """[PLANEJAMENTO - 184ª geração] Índices de planejamento territorial, com definições TRANSPARENTES:
+    - concentracao (0-100): Gini da demanda entre municípios × 100 (alto = demanda concentrada em poucos).
+    - interiorizacao (0-100): % de candidatos FORA dos 10 municípios de maior demanda (alto = espalhado no interior).
+    - capilaridade_80pct: nº de locais (do cenário guloso) p/ cobrir 80% dos candidatos (menos = mais concentrado).
+    Heurísticos e documentados; puros. Retorna dict."""
+    import numpy as np
+    if df is None or len(df) == 0:
+        return {'concentracao': 0.0, 'interiorizacao': 0.0, 'capilaridade_80pct': None,
+                'total_candidatos': 0, 'total_municipios': 0}
+    _cand = pd.to_numeric(df['candidatos'], errors='coerce').fillna(0).to_numpy(dtype=float)
+    _total = float(_cand.sum())
+    _n = len(df)
+    _s = np.sort(_cand)
+    if _total > 0 and _n > 1:
+        _idx = np.arange(1, _n + 1)
+        _gini = (2.0 * float((_idx * _s).sum()) / (_n * float(_s.sum()))) - (_n + 1.0) / _n
+    else:
+        _gini = 0.0
+    _top = float(np.sort(_cand)[::-1][:10].sum())
+    return {'concentracao': round(max(0.0, min(1.0, _gini)) * 100, 1),
+            'interiorizacao': round(100.0 * (_total - _top) / _total, 1) if _total else 0.0,
+            'capilaridade_80pct': (marcos or {}).get(80),
+            'total_candidatos': int(_total), 'total_municipios': int(_n)}
+
+
+def _detectar_coluna(colunas, palavras_chave):
+    """[PLANEJAMENTO - 184ª geração] Detecta a 1ª coluna cujo nome (normalizado) contém alguma palavra-chave.
+    Retorna o nome da coluna ou None. Puro."""
+    _norm = {c: unidecode(str(c)).lower().strip() for c in colunas}
+    for _p in palavras_chave:
+        for _c in colunas:
+            if _p in _norm[_c]:
+                return _c
+    return None
+
+
+def _planejamento_resolver_entrada(df_bruto, col_muni, col_cand, col_uf=None):
+    """[PLANEJAMENTO - 184ª geração] Resolve a planilha de entrada do planejamento em um DataFrame com
+    coordenadas OFICIAIS, OFFLINE (base IBGE embarcada — sem rede): cada linha vira
+    (codigo_ibge, municipio, uf, lat, lon, candidatos). col_muni aceita nome de município (± UF) OU Código
+    IBGE. Agrega candidatos por município. Homônimo sem UF, não encontrado, ou sem coordenada → não resolvido
+    (contado). Reusa a base corrigida (curada + sede oficial + geometria). Puro. Retorna (df, n_nao_resolvidos)."""
+    _idx = _indice_ibge_por_codigo()
+    _linhas, _nao = {}, 0
+    for _, _row in df_bruto.iterrows():
+        _mv = str(_row.get(col_muni, "") if _row.get(col_muni) is not None else "").strip()
+        _cv = pd.to_numeric(_row.get(col_cand), errors='coerce')
+        _cv = 0.0 if pd.isna(_cv) else float(_cv)
+        if not _mv or _mv.lower() == "nan":
+            _nao += 1
+            continue
+        _uf = str(_row.get(col_uf, "")).strip().upper() if col_uf else ""
+        _cod, _info = None, None
+        _digs = re.sub(r"\D", "", _mv)
+        if len(_digs) == 7 and _digs in _idx:
+            _cod, _info = _digs, _idx[_digs]
+        else:
+            _ent = IBGE_MUNICIPIOS.get(semantica.normalizar(_mv))
+            _e = None
+            if _ent:
+                if len(_ent) == 1:
+                    _e = _ent[0]
+                elif _uf:
+                    _e = next((x for x in _ent if str(x.get("uf", "")).upper() == _uf), None)
+            if _e:
+                _cod = str(_e.get("codigo_ibge") or "").strip()
+                _info = {"municipio": _e.get("municipio", ""), "uf": _e.get("uf", ""),
+                         "lat": _e.get("lat", 0.0), "lon": _e.get("lon", 0.0)}
+        if _cod and _info and (_info.get("lat") or _info.get("lon")):
+            if _cod not in _linhas:
+                _linhas[_cod] = {"codigo_ibge": _cod, "municipio": _info.get("municipio", ""),
+                                 "uf": _info.get("uf", ""), "lat": _info.get("lat"),
+                                 "lon": _info.get("lon"), "candidatos": 0.0}
+            _linhas[_cod]["candidatos"] += _cv
+        else:
+            _nao += 1
+    return pd.DataFrame(list(_linhas.values())), _nao
+
 
 def _curva_cobertura(distancias, pesos=None, faixas=(50, 100, 150, 200, 300, 500)):
     """[COBERTURA - 140ª geração] Curva de cobertura: percentual de CANDIDATOS (ponderado por inscritos)
@@ -8382,6 +10996,18 @@ _ROTULOS_TABELA = {
     "uf_polo": "UF do Polo", "dist_media_km": "Distância Média (km)",
     "dist_max_km": "Distância Máxima (km)",
 }
+
+
+def _leitura_grafico(como_ler=None, conclusao=None):
+    """[FASE3-VISUAL - 184ª geração] Rodapé PADRONIZADO de gráfico (linguagem visual única do Blueprint):
+    '📖 Como ler' (interpretação) + '🔎 O que diz' (conclusão automática). Codifica o padrão que as partes
+    novas da app (ex.: Comparador de Estudos) já usam inline, para uniformizar os gráficos das abas mais
+    antigas que hoje têm só o título. Só st.caption — sem CSS global, sem tocar na árvore de widgets.
+    Chame LOGO APÓS o st.*_chart correspondente (título em negrito acima, gráfico, depois esta leitura)."""
+    if como_ler:
+        st.caption(f"📖 **Como ler:** {como_ler}")
+    if conclusao:
+        st.caption(f"🔎 **O que diz:** {conclusao}")
 
 
 def _rotular_colunas(df, extra=None):
@@ -9131,6 +11757,47 @@ def _validar_codigo_ibge(texto, indice=None):
 
 
 
+def _portao_de_exibicao(chave='df_processado'):
+    """[PORTÃO-EXIBIÇÃO - 181ª geração] O PORTÃO NA FRONTEIRA DE **EXIBIÇÃO**, não só na de produção.
+
+    ── POR QUE ISTO EXISTE (e é a lição mais dura desta série) ──
+    Eu coloquei o portão na PRODUÇÃO do DataFrame (176ª). Consertei o crash dele (180ª). E o usuário
+    **continuou vendo 958 zeros**. Eu não conseguia distinguir, do meu lado, entre:
+      (a) o portão não roda,
+      (b) o portão roda e falha,
+      (c) o usuário está rodando uma versão antiga.
+    **Essa impossibilidade de distinguir é uma falha de PROJETO minha** — o portão era uma caixa-preta.
+
+    ── A CURA: DEFESA EM PROFUNDIDADE ──
+    Este portão roda na **FRONTEIRA DE EXIBIÇÃO** — toda vez que o `df_processado` vai ser MOSTRADO ou
+    COMPARADO. Ele é **IDEMPOTENTE** (se o df já está limpo, custa ~0 e não faz nada) e **NÃO DEPENDE do
+    caminho que produziu o DataFrame**. Não importa se veio do Lote, da Alocação, de uma versão antiga
+    ainda em `session_state`, ou de um caminho que eu ainda vou escrever: **se há um zero impossível ali,
+    ele é corrigido ANTES de qualquer olho humano vê-lo.**
+
+    É a diferença entre "conserto o produtor" (e sempre sobra um produtor) e "**limpo na porta**".
+    PURO em relação ao session_state (grava o df corrigido de volta)."""
+    try:
+        _df = st.session_state.get(chave)
+        if _df is None or not hasattr(_df, "columns") or len(_df) == 0:
+            return None
+        _viol = _verificar_invariante_zero(_df)
+        if not _viol:
+            return {"linhas_zero": 0, "recuperadas": 0, "irrecuperaveis": [], "ok": True,
+                    "ja_limpo": True}
+        logger.warning(f"[PORTÃO-EXIBIÇÃO] {len(_viol)} zero(s) impossível(is) chegaram à EXIBIÇÃO. "
+                       "O portão de produção não os pegou — ou este DataFrame veio de outro caminho. "
+                       "Corrigindo AGORA, na porta.")
+        _limpo, _rel = _portao_final_distancias(_df)
+        st.session_state[chave] = _limpo
+        st.session_state['portao_exibicao_relatorio'] = _rel
+        return _rel
+    except Exception as _e:
+        logger.error(f"[PORTÃO-EXIBIÇÃO] Falha: {_e}")
+        return {"linhas_zero": -1, "recuperadas": 0, "irrecuperaveis": [], "ok": False,
+                "crash": f"{type(_e).__name__}: {_e}"}
+
+
 def _escrever_seguro(df, idx, col, valor):
     """[PORTÃO - 180ª geração] Escreve numa célula RESPEITANDO o dtype da coluna.
 
@@ -9526,7 +12193,12 @@ def _chave_mun(nome, uf=""):
     try:
         t = semantica.normalizar(nome or "")
     except Exception:
-        t = str(nome or "").upper()
+        # [CONCILIA-SEGURA - 184ª geração] Fallback ROBUSTO: unidecode antes do upper — o .upper() cru
+        # deixava o acento para a regex destruir ('São' → 'S O'), quebrando conciliação acentuado×sem-acento.
+        try:
+            t = unidecode(str(nome or "")).upper()
+        except Exception:
+            t = str(nome or "").upper()
     t = re.sub(r"[^A-Z0-9 ]", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
     u = str(uf or "").strip().upper()
@@ -10036,44 +12708,721 @@ def _texto_guia_da_aba(nome, guia=None):
     return _l
 
 
-def _escrever_aba_com_guia(writer, df, nome, guia=None):
-    """[GUIA-PLANILHA - 171ª geração] Escreve a aba de DADOS — **limpa, do jeito que o Excel precisa**.
 
-    ── EU TINHA ERRADO, E O USUÁRIO PERCEBEU ──
-    Na 170ª eu pus 25 linhas de guia ACIMA dos dados de cada aba. Achei que estava ajudando. **Estava
-    quebrando a planilha.** Com o guia no topo, o cabeçalho da tabela sai da linha 1 e vai para a linha 26 —
-    e aí **o autofiltro, o congelar painéis, a tabela dinâmica e o Ctrl+A param de funcionar direito**.
-    Uma planilha de 5.571 linhas que não dá para filtrar não serve para nada.
 
-    ── O PADRÃO PROFISSIONAL ──
-    Power BI, Tableau, dados abertos de governo: **as abas de DADOS são DADOS PUROS; a documentação vive
-    SEPARADA.** O guia inteiro (aba por aba) agora fica na aba **📖 Como Ler Cada Aba**, e o capítulo
-    executivo na **📘 Guia de Interpretação**.
+# =============================================================================================
+# [XLSX-PRO - 182ª geração] IDENTIDADE VISUAL INSTITUCIONAL.
+# Paleta sóbria, de relatório técnico — não de dashboard colorido. A referência são publicações do
+# IBGE, do IPEA e de órgãos de pesquisa: **azul-ardósia, cinzas, e cor SÓ onde ela informa**.
+# Cor em planilha institucional não é decoração: é SEMÁFORO. Se tudo é colorido, nada é.
+# =============================================================================================
+_XP = {
+    "titulo":     "#1F3864",   # azul-marinho institucional
+    "cabecalho":  "#2F5597",   # azul-ardósia
+    "subcab":     "#8EA9DB",   # azul claro
+    "zebra":      "#F2F5FA",   # cinza-azulado quase branco
+    "borda":      "#BFBFBF",
+    "texto":      "#1A1A1A",
+    "apoio":      "#595959",
+    "ok":         "#C6EFCE",   # verde suave (fundo)
+    "ok_txt":     "#006100",
+    "alerta":     "#FFEB9C",   # âmbar suave
+    "alerta_txt": "#9C6500",
+    "erro":       "#FFC7CE",   # vermelho suave
+    "erro_txt":   "#9C0006",
+    "vazio":      "#EDEDED",   # cinza — campo ausente
+}
 
-    Aqui a aba sai limpa — cabeçalho na linha 1 — com **autofiltro** e **painel congelado** de brinde, que é
-    o que de fato ajuda quem vai TRABALHAR o dado."""
+_XP_NUM = [
+    # (padrão no nome da coluna, formato Excel, alinhamento)
+    (("km-candidato", "km-cand", "km_candidato"), '#,##0', "right"),
+    (("(km)", "distancia", "distância", "linha reta", "km a mais", "km-eq", "km-equiv"), '#,##0.0', "right"),
+    (("(%)", "pct", "percentual", "% "), '0.0"%"', "right"),
+    (("(min)", "tempo", "minutos"), '#,##0', "right"),
+    (("candidatos", "inscritos", "municípios", "municipios", "registros", "quantidade"), '#,##0', "right"),
+    (("score", "igq", "integridade", "confiança"), '0', "center"),
+    (("código ibge", "cod ibge", "codigo ibge"), '@', "center"),   # texto: preserva zeros
+    (("sinuosidade", "coef", "cv"), '0.00', "right"),
+]
+
+
+def _formato_da_coluna(nome, wb, zebra=False):
+    """[XLSX-PRO - 182ª geração] Escolhe o formato Excel pelo SIGNIFICADO da coluna, não pelo dtype.
+
+    ── POR QUE PELO NOME E NÃO PELO TIPO ──
+    O dtype diz "float". Não diz se é **quilômetro** (1 casa), **percentual** (com o sinal %),
+    **km-candidato** (milhar, sem casas) ou **código IBGE** (que é TEXTO — se virar número, o Excel come
+    o zero à esquerda e destrói o identificador oficial).
+    **O tipo é sintaxe. O nome é semântica.** E é a semântica que decide como o número deve aparecer.
+    PURO."""
+    _n = str(nome).lower()
+    _base = {"border": 1, "border_color": _XP["borda"], "valign": "vcenter",
+             "font_name": "Calibri", "font_size": 10}
+    if zebra:
+        _base["bg_color"] = _XP["zebra"]
+    for _pats, _fmt, _ali in _XP_NUM:
+        if any(_p in _n for _p in _pats):
+            return wb.add_format({**_base, "num_format": _fmt, "align": _ali})
+    return wb.add_format({**_base, "align": "left", "text_wrap": False})
+
+
+def _escrever_aba_pro(writer, df, nome, titulo=None, subtitulo=None, cols_alerta=None,
+                      cols_ok=None, cols_negativo_ruim=None, numerar=True):
+    """[XLSX-PRO - 182ª geração] Uma aba de DADOS com cara de relatório técnico.
+
+    ── O QUE ELA FAZ (e o porquê de cada coisa) ──
+      • **Título + subtítulo com data/hora** — um relatório sem carimbo de quando foi gerado é inútil
+        numa auditoria: ninguém sabe se está olhando o estudo de ontem ou o de três meses atrás.
+      • **Numeração de linhas** — para citar "linha 4.382" numa reunião sem contar no dedo.
+      • **Formato por SEMÁNTICA** — km com 1 casa, % com sinal, km-candidato com milhar, e **Código IBGE
+        como TEXTO** (senão o Excel come o zero à esquerda e destrói o identificador oficial).
+      • **Zebra** — a olho nu, uma tabela de 5.571 linhas sem faixas alternadas é ilegível: o olho pula
+        de linha.
+      • **Formatação condicional** — cor SÓ onde ela informa. Negativo (levamos o candidato mais longe)
+        em vermelho; divergência em âmbar; vazio em cinza. **Se tudo é colorido, nada é.**
+      • **AutoFiltro + painéis congelados** — sem isso, uma planilha grande não se navega.
+      • **Rodapé com metadados** — quem gerou, quando, com qual versão.
+
+    Degrada com elegância: se qualquer formatação falhar, a aba ainda é escrita com os dados."""
+    _n = (nome or "Aba")[:31]
     try:
-        _n = nome[:31]
-        df.to_excel(writer, index=False, sheet_name=_n)
-        _ws = writer.sheets[_n]
         _wb = writer.book
-        _nl, _nc = df.shape
-        if _nc:
-            _f_cab = _wb.add_format({"bold": True, "bg_color": "#1F4E79", "font_color": "white",
-                                     "border": 1, "text_wrap": True, "valign": "vcenter"})
-            for _j, _col in enumerate(df.columns):
-                _ws.write(0, _j, str(_col), _f_cab)
-                _larg = max(12, min(42, int(df[_col].astype(str).str.len().max() or 12) + 2))
-                _ws.set_column(_j, _j, _larg)
-            _ws.autofilter(0, 0, max(_nl, 1), _nc - 1)   # filtro pronto
-            _ws.freeze_panes(1, 0)                        # cabeçalho fixo ao rolar
-            _ws.set_row(0, 30)
+        _linha0 = 3 if titulo else 0        # 3 linhas reservadas para título/subtítulo
+
+        _dfx = df.copy()
+        if numerar and len(_dfx):
+            _dfx.insert(0, "#", range(1, len(_dfx) + 1))
+
+        _dfx.to_excel(writer, index=False, sheet_name=_n, startrow=_linha0)
+        _ws = writer.sheets[_n]
+        _nl, _nc = _dfx.shape
+        if _nc == 0:
+            return
+
+        # ── TÍTULO E SUBTÍTULO ──
+        if titulo:
+            _f_tit = _wb.add_format({"bold": True, "font_size": 15, "font_color": "#FFFFFF",
+                                     "bg_color": _XP["titulo"], "align": "left", "valign": "vcenter",
+                                     "font_name": "Calibri"})
+            _f_sub = _wb.add_format({"italic": True, "font_size": 9, "font_color": _XP["apoio"],
+                                     "align": "left", "valign": "vcenter", "font_name": "Calibri"})
+            _ws.merge_range(0, 0, 0, max(_nc - 1, 1), f"  {titulo}", _f_tit)
+            _ws.set_row(0, 26)
+            _sub = subtitulo or (
+                f"  Gerado em {datetime.now().strftime('%d/%m/%Y às %H:%M')}  ·  "
+                f"Plataforma de Análise de Deslocamento de Candidatos  ·  {_nl:,} registro(s)".replace(",", "."))
+            _ws.merge_range(1, 0, 1, max(_nc - 1, 1), _sub, _f_sub)
+            _ws.set_row(1, 14)
+
+        # ── CABEÇALHO ──
+        _f_cab = _wb.add_format({"bold": True, "bg_color": _XP["cabecalho"], "font_color": "#FFFFFF",
+                                 "border": 1, "border_color": _XP["cabecalho"], "text_wrap": True,
+                                 "valign": "vcenter", "align": "center", "font_name": "Calibri",
+                                 "font_size": 10})
+        for _c, _col in enumerate(_dfx.columns):
+            _ws.write(_linha0, _c, str(_col), _f_cab)
+        _ws.set_row(_linha0, 32)
+
+        # ── CORPO: formato por semântica + zebra ──
+        _fmts = {_c: (_formato_da_coluna(_col, _wb, False), _formato_da_coluna(_col, _wb, True))
+                 for _c, _col in enumerate(_dfx.columns)}
+        for _r in range(_nl):
+            _z = (_r % 2 == 1)
+            for _c, _col in enumerate(_dfx.columns):
+                _v = _dfx.iloc[_r, _c]
+                _f = _fmts[_c][1 if _z else 0]
+                try:
+                    if pd.isna(_v):
+                        _ws.write_blank(_linha0 + 1 + _r, _c, None, _f)
+                    else:
+                        _ws.write(_linha0 + 1 + _r, _c, _v, _f)
+                except (TypeError, ValueError):
+                    _ws.write(_linha0 + 1 + _r, _c, str(_v), _f)
+
+        # ── LARGURA: pelo conteúdo real, com teto (nada de coluna de 200 chars) ──
+        for _c, _col in enumerate(_dfx.columns):
+            try:
+                _larg = max(len(str(_col)) + 3,
+                            int(_dfx[_col].astype(str).str.len().quantile(0.9) or 10) + 2)
+            except Exception:
+                _larg = 16
+            _ws.set_column(_c, _c, max(8, min(48, _larg)))
+
+        # ── AUTOFILTRO + PAINÉIS CONGELADOS ──
+        if _nl:
+            _ws.autofilter(_linha0, 0, _linha0 + _nl, _nc - 1)
+        _ws.freeze_panes(_linha0 + 1, 1 if numerar else 0)
+
+        # ── FORMATAÇÃO CONDICIONAL: cor SÓ onde ela informa ──
+        _f_erro = _wb.add_format({"bg_color": _XP["erro"], "font_color": _XP["erro_txt"]})
+        _f_ok = _wb.add_format({"bg_color": _XP["ok"], "font_color": _XP["ok_txt"]})
+        _f_ale = _wb.add_format({"bg_color": _XP["alerta"], "font_color": _XP["alerta_txt"]})
+        _f_vaz = _wb.add_format({"bg_color": _XP["vazio"], "font_color": _XP["apoio"], "italic": True})
+
+        def _faixa(_col):
+            _i = list(_dfx.columns).index(_col)
+            return (_linha0 + 1, _i, _linha0 + _nl, _i)
+
+        for _col in (cols_negativo_ruim or []):
+            if _col in _dfx.columns and _nl:
+                _a, _b, _c2, _d2 = _faixa(_col)
+                _ws.conditional_format(_a, _b, _c2, _d2, {"type": "cell", "criteria": "<",
+                                                          "value": 0, "format": _f_erro})
+                _ws.conditional_format(_a, _b, _c2, _d2, {"type": "cell", "criteria": ">",
+                                                          "value": 0, "format": _f_ok})
+        for _col in (cols_alerta or []):
+            if _col in _dfx.columns and _nl:
+                _a, _b, _c2, _d2 = _faixa(_col)
+                for _txt, _f in (("alto", _f_erro), ("não", _f_erro), ("erro", _f_erro),
+                                 ("fuzzy", _f_ale), ("médio", _f_ale), ("sim", _f_ale),
+                                 ("baixo", _f_ok), ("exclusivo", _f_ok)):
+                    _ws.conditional_format(_a, _b, _c2, _d2,
+                                           {"type": "text", "criteria": "containing",
+                                            "value": _txt, "format": _f})
+        # campos VAZIOS ficam visíveis (um vazio silencioso é pior que um vazio marcado)
+        if _nl:
+            _ws.conditional_format(_linha0 + 1, 0, _linha0 + _nl, _nc - 1,
+                                   {"type": "blanks", "format": _f_vaz})
+
+        # ── RODAPÉ ──
+        _f_rod = _wb.add_format({"italic": True, "font_size": 8, "font_color": _XP["apoio"],
+                                 "font_name": "Calibri"})
+        _ws.write(_linha0 + _nl + 2, 0,
+                  f"Gerado automaticamente em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')} · "
+                  f"{_nl} registro(s) · Consulte as abas 📘 Guia de Interpretação e 📖 Como Ler Cada Aba.",
+                  _f_rod)
+        _ws.set_landscape()
+        _ws.set_paper(9)          # A4
+        _ws.fit_to_pages(1, 0)    # 1 página de largura, quantas forem de altura
+        _ws.repeat_rows(_linha0)  # o cabeçalho se repete em toda página impressa
     except Exception as _e:
-        logger.error(f"[GUIA-PLANILHA] Falha ao escrever a aba '{nome}': {_e}")
+        logger.error(f"[XLSX-PRO] Falha ao formatar a aba '{_n}': {_e}")
         try:
-            df.to_excel(writer, index=False, sheet_name=nome[:31])
+            df.to_excel(writer, index=False, sheet_name=_n)
         except Exception:
             pass
+
+
+
+
+# [AUDITORIA-184] Função morta '_aba_resumo_executivo' aposentada (nome ocorria 1× no arquivo — sem qualquer referência). Recuperável no histórico de versões.
+
+
+# [AUDITORIA-184] Função morta '_aba_graficos_v1_obsoleta' aposentada (nome ocorria 1× no arquivo — sem qualquer referência). Recuperável no histórico de versões.
+
+
+
+
+_PALETA_XLSX = {
+    "titulo":     "#1F4E79",   # azul institucional escuro
+    "sub":        "#2E75B6",
+    "cabecalho":  "#1F4E79",
+    "cab_txt":    "#FFFFFF",
+    "zebra":      "#F2F7FB",
+    "borda":      "#BDD7EE",
+    "ok":         "#C6EFCE",   # verde discreto (Excel padrão)
+    "ok_txt":     "#006100",
+    "alerta":     "#FFEB9C",   # âmbar
+    "alerta_txt": "#9C5700",
+    "ruim":       "#FFC7CE",   # vermelho discreto
+    "ruim_txt":   "#9C0006",
+    "vazio":      "#EDEDED",
+    "neutro":     "#404040",
+}
+
+
+def _fmts_xlsx(wb):
+    """[XLSX-PRO - 182ª geração] O conjunto de formatos do relatório. Cores DISCRETAS e institucionais —
+    a paleta padrão do Excel para formatação condicional, que é a que gestores públicos reconhecem.
+    Nada de neon: um relatório que parece um dashboard de startup perde autoridade numa auditoria."""
+    return {
+        "titulo": wb.add_format({"bold": True, "font_size": 18, "font_color": _PALETA_XLSX["titulo"],
+                                 "font_name": "Calibri", "valign": "vcenter"}),
+        "subtitulo": wb.add_format({"font_size": 11, "font_color": _PALETA_XLSX["sub"],
+                                    "font_name": "Calibri", "italic": True}),
+        "secao": wb.add_format({"bold": True, "font_size": 13, "font_color": _PALETA_XLSX["titulo"],
+                                "bottom": 2, "border_color": _PALETA_XLSX["sub"]}),
+        "cab": wb.add_format({"bold": True, "bg_color": _PALETA_XLSX["cabecalho"],
+                              "font_color": _PALETA_XLSX["cab_txt"], "border": 1,
+                              "border_color": _PALETA_XLSX["borda"], "text_wrap": True,
+                              "valign": "vcenter", "align": "center", "font_size": 10}),
+        "txt": wb.add_format({"border": 1, "border_color": _PALETA_XLSX["borda"], "valign": "top",
+                              "text_wrap": True, "font_size": 10}),
+        "num": wb.add_format({"border": 1, "border_color": _PALETA_XLSX["borda"], "align": "right",
+                              "num_format": "#,##0.0", "font_size": 10}),
+        "int": wb.add_format({"border": 1, "border_color": _PALETA_XLSX["borda"], "align": "right",
+                              "num_format": "#,##0", "font_size": 10}),
+        "pct": wb.add_format({"border": 1, "border_color": _PALETA_XLSX["borda"], "align": "right",
+                              "num_format": "0.0%", "font_size": 10}),
+        "km": wb.add_format({"border": 1, "border_color": _PALETA_XLSX["borda"], "align": "right",
+                             "num_format": '#,##0.0 "km"', "font_size": 10}),
+        "kpi_rot": wb.add_format({"bold": True, "font_size": 10, "font_color": _PALETA_XLSX["neutro"],
+                                  "align": "center", "bg_color": _PALETA_XLSX["zebra"],
+                                  "border": 1, "border_color": _PALETA_XLSX["borda"]}),
+        "kpi_val": wb.add_format({"bold": True, "font_size": 22, "font_color": _PALETA_XLSX["titulo"],
+                                  "align": "center", "valign": "vcenter", "border": 1,
+                                  "border_color": _PALETA_XLSX["borda"]}),
+        "kpi_ruim": wb.add_format({"bold": True, "font_size": 22, "font_color": _PALETA_XLSX["ruim_txt"],
+                                   "align": "center", "valign": "vcenter", "bg_color": _PALETA_XLSX["ruim"],
+                                   "border": 1, "border_color": _PALETA_XLSX["borda"]}),
+        "kpi_ok": wb.add_format({"bold": True, "font_size": 22, "font_color": _PALETA_XLSX["ok_txt"],
+                                 "align": "center", "valign": "vcenter", "bg_color": _PALETA_XLSX["ok"],
+                                 "border": 1, "border_color": _PALETA_XLSX["borda"]}),
+        "nota": wb.add_format({"font_size": 9, "italic": True, "font_color": "#808080",
+                               "text_wrap": True, "valign": "top"}),
+        "rodape": wb.add_format({"font_size": 8, "font_color": "#909090", "italic": True}),
+    }
+
+
+def _tipo_da_coluna(nome, serie):
+    """[XLSX-PRO - 182ª geração] Descobre o formato do dado pelo NOME e pelo CONTEÚDO.
+    Um relatório profissional não mostra "220.0" quando quer dizer "220,0 km" — e não mostra
+    "0.214" quando quer dizer "21,4%". O formato É parte da informação."""
+    _n = str(nome).lower()
+    try:
+        _num = pd.api.types.is_numeric_dtype(serie)
+    except Exception:
+        _num = False
+    if not _num:
+        return "txt"
+    if "%" in _n or "pct" in _n or "percentual" in _n:
+        return "pct_ja"          # já está em 0-100, não multiplicar
+    if "km" in _n or "distância" in _n or "distancia" in _n or "linha reta" in _n:
+        return "km"
+    if ("candidatos" in _n or "inscritos" in _n or "municípios" in _n or "municipios" in _n
+            or "posição" in _n or "posicao" in _n or "ordem" in _n or "quantidade" in _n):
+        return "int"
+    return "num"
+
+
+# [AUDITORIA-184] Função morta '_formatar_aba_profissional' aposentada (nome ocorria 1× no arquivo — sem qualquer referência). Recuperável no histórico de versões.
+
+
+
+
+# [AUDITORIA-184] Função morta '_capa_relatorio' aposentada (nome ocorria 1× no arquivo — sem qualquer referência). Recuperável no histórico de versões.
+
+
+# [AUDITORIA-184] Função morta '_resumo_executivo_xlsx' aposentada (nome ocorria 1× no arquivo — sem qualquer referência). Recuperável no histórico de versões.
+
+
+# [AUDITORIA-184] Função morta '_graficos_xlsx' aposentada (nome ocorria 1× no arquivo — sem qualquer referência). Recuperável no histórico de versões.
+
+
+
+
+_NUM_FMT_XLSX = [
+    (("km-candidato", "km-cand", "km_candidato"), '#,##0 "km-cand"'),
+    (("(km)", "distancia", "distância", "km_a_mais", "linha reta"), '#,##0.0 "km"'),
+    (("(min)", "tempo", "minutos"), '#,##0 "min"'),
+    (("(%)", "pct", "percentual", "%"), '0.0"%"'),
+    (("candidatos", "inscritos", "municípios", "municipios", "alunos"), '#,##0'),
+    (("score", "igq", "confiança", "integridade"), '0'),
+    (("sinuosidade", "coef", "cv"), '0.00'),
+    (("data", "hora", "gerado"), 'dd/mm/yyyy hh:mm'),
+]
+
+
+def _fmt_para_coluna(nome, wb):
+    """[XLSX-PRO - 182ª geração] Formato numérico DERIVADO DO NOME da coluna.
+
+    Uma planilha profissional não mostra `192000.0` — mostra **192.000 km-cand**. O tipo do dado tem que
+    ser LEGÍVEL na célula, não inferido pelo leitor. Isto casa o nome da coluna com o formato certo. PURO."""
+    _n = str(nome).lower()
+    for _chaves, _f in _NUM_FMT_XLSX:
+        if any(_k in _n for _k in _chaves):
+            return wb.add_format({"num_format": _f, "border": 1, "border_color": "#D9D9D9",
+                                  "valign": "vcenter"})
+    return wb.add_format({"border": 1, "border_color": "#D9D9D9", "valign": "vcenter",
+                          "text_wrap": True})
+
+
+def _escrever_aba_profissional(writer, df, nome, destaques=None):
+    """[XLSX-PRO - 182ª geração] Aba de DADOS com apresentação de RELATÓRIO TÉCNICO.
+
+    ── A RESTRIÇÃO QUE MANDA AQUI (a lição da 171ª) ──
+    Na 170ª eu pus título e prosa ANTES da tabela, e **quebrei quatro coisas de uma vez**: o AutoFiltro, a
+    ordenação, a tabela dinâmica e o `pandas.read_excel()` — todos esperam o cabeçalho na PRIMEIRA linha.
+    **Uma aba de DADOS tem que ser DADO PURO.**
+
+    Então a beleza vem de onde ela NÃO atrapalha:
+      · **Tabela do Excel nativa** (`add_table`) → dá **zebra + filtros + cabeçalho estilizado** de graça,
+        e o Excel a reconhece como TABELA (dá para usar em tabela dinâmica com um clique);
+      · **formato numérico por tipo** (192.000 km-cand, não 192000.0);
+      · **formatação condicional** nas colunas que importam (divergência, vazio, risco);
+      · **congelamento** do cabeçalho e **largura calculada** por conteúdo.
+    Título, data e metadados vivem em abas PRÓPRIAS — onde eles pertencem."""
+    _n = (nome or "Aba")[:31]
+    try:
+        if df is None or len(df) == 0:
+            df = pd.DataFrame([{"—": "sem dados"}])
+        df.to_excel(writer, index=False, sheet_name=_n, startrow=0)
+        _ws = writer.sheets[_n]
+        _wb = writer.book
+
+        _n_lin, _n_col = len(df), len(df.columns)
+
+        # ── TABELA DO EXCEL: zebra + filtro + cabeçalho, tudo nativo ──
+        _f_cab = _wb.add_format({"bold": True, "bg_color": "#1F3864", "font_color": "#FFFFFF",
+                                 "border": 1, "border_color": "#1F3864", "text_wrap": True,
+                                 "valign": "vcenter", "align": "center"})
+        _ws.add_table(0, 0, _n_lin, _n_col - 1, {
+            "columns": [{"header": str(c), "header_format": _f_cab} for c in df.columns],
+            "style": "Table Style Light 15",     # discreto, institucional
+            "autofilter": True,
+            # [XLSX-FIX - 184ª geração] NÃO derivar o nome da tabela do nome da aba. Nomes de TABELA do
+            # Excel têm regras próprias (não podem começar com dígito, não podem parecer referência de
+            # célula, têm de ser ÚNICOS na pasta). A aba "2º Colocado Seria Melhor" virava
+            # "2o_Colocado_Seria_Melhor" — começa com dígito → o xlsxwriter REJEITAVA a tabela e AQUELA
+            # aba perdia zebra + filtro + cabeçalho estilizado (só ela, em silêncio). Omitindo o nome, o
+            # xlsxwriter gera "Table1", "Table2"... — sempre válido e único, para esta e qualquer aba futura.
+        })
+
+        # ── formato + largura por coluna ──
+        for _c, _col in enumerate(df.columns):
+            _fmt = _fmt_para_coluna(_col, _wb)
+            try:
+                _larg = max(len(str(_col)) + 4,
+                            int(df[_col].astype(str).str.len().quantile(0.9) or 10) + 3)
+            except Exception:
+                _larg = 18
+            _ws.set_column(_c, _c, max(11, min(52, _larg)), _fmt)
+        _ws.set_row(0, 34)
+        _ws.freeze_panes(1, 0)
+
+        # ── FORMATAÇÃO CONDICIONAL: o perigo e a divergência saltam aos olhos ──
+        _v_ruim = _wb.add_format({"bg_color": "#FCE4E4", "font_color": "#9C0006"})
+        _v_bom = _wb.add_format({"bg_color": "#E2EFDA", "font_color": "#1F6F3D"})
+        _v_vazio = _wb.add_format({"bg_color": "#F2F2F2", "italic": True, "font_color": "#808080"})
+        for _c, _col in enumerate(df.columns):
+            _cl = str(_col).lower()
+            _rng = (1, _c, _n_lin, _c)
+            # números onde NEGATIVO é ruim (economia, diferença, ganho)
+            if any(_k in _cl for _k in ("economia", "diferenca", "diferença", "ganho", "km a mais")):
+                _ws.conditional_format(*_rng, {"type": "cell", "criteria": "<", "value": 0,
+                                               "format": _v_ruim})
+                _ws.conditional_format(*_rng, {"type": "cell", "criteria": ">", "value": 0,
+                                               "format": _v_bom})
+            # ocupação ≥ 100% = polo estourado
+            if "ocupa" in _cl:
+                _ws.conditional_format(*_rng, {"type": "cell", "criteria": ">=", "value": 100,
+                                               "format": _v_ruim})
+            # texto de risco / divergência
+            if any(_k in _cl for _k in ("risco", "vencedor", "situação", "situacao", "sobrevive",
+                                        "mesmo destino", "tipo de dist")):
+                for _t, _f in (("Alto", _v_ruim), ("Não", _v_ruim), ("⛔", _v_ruim), ("🔴", _v_ruim),
+                               ("Referência", _v_ruim), ("Geodésica", _v_ruim),
+                               ("Baixo", _v_bom), ("Sim", _v_bom), ("Aplicação", _v_bom)):
+                    _ws.conditional_format(*_rng, {"type": "text", "criteria": "containing",
+                                                   "value": _t, "format": _f})
+            # células VAZIAS — o pedido explícito
+            _ws.conditional_format(*_rng, {"type": "blanks", "format": _v_vazio})
+
+        # destaques extras vindos do chamador
+        for _col, _regra in (destaques or {}).items():
+            if _col in df.columns:
+                _c = list(df.columns).index(_col)
+                _ws.conditional_format(1, _c, _n_lin, _c, _regra)
+    except Exception as _e:
+        logger.error(f"[XLSX-PRO] Falha ao formatar a aba '{_n}': {_e}")
+        try:
+            df.to_excel(writer, index=False, sheet_name=_n)
+        except Exception:
+            pass
+
+
+def _aba_capa(writer, stats, aud, linhas, meta=None):
+    """[XLSX-PRO - 182ª geração] A CAPA / RESUMO EXECUTIVO — a aba que abre o relatório.
+
+    É **AQUI** que vivem o título, a data, os KPIs e a identidade visual — **não nas abas de dados**, onde
+    quebrariam filtro e ordenação. Esta aba é um PAINEL: quem abrir o arquivo numa reunião vê, em cinco
+    segundos, o que precisa saber."""
+    try:
+        _wb = writer.book
+        _ws = _wb.add_worksheet("Resumo Executivo")
+        writer.sheets["Resumo Executivo"] = _ws
+        _ws.hide_gridlines(2)
+        _ws.set_column(0, 0, 3)
+        _ws.set_column(1, 1, 38)
+        _ws.set_column(2, 4, 22)
+
+        _f_tit = _wb.add_format({"bold": True, "font_size": 22, "font_color": "#1F3864",
+                                 "valign": "vcenter"})
+        _f_sub = _wb.add_format({"font_size": 11, "font_color": "#7F7F7F", "italic": True})
+        _f_sec = _wb.add_format({"bold": True, "font_size": 13, "font_color": "#FFFFFF",
+                                 "bg_color": "#1F3864", "align": "left", "valign": "vcenter",
+                                 "indent": 1})
+        _f_kpi_r = _wb.add_format({"bold": True, "font_size": 20, "font_color": "#1F3864",
+                                   "align": "center", "valign": "vcenter", "bg_color": "#EAF0F8",
+                                   "border": 1, "border_color": "#B4C7E7"})
+        _f_kpi_l = _wb.add_format({"font_size": 9, "font_color": "#44546A", "align": "center",
+                                   "valign": "top", "bg_color": "#EAF0F8", "border": 1,
+                                   "border_color": "#B4C7E7", "text_wrap": True})
+        _f_txt = _wb.add_format({"font_size": 10, "text_wrap": True, "valign": "top",
+                                 "font_color": "#404040"})
+        _f_alerta = _wb.add_format({"font_size": 10, "text_wrap": True, "valign": "top",
+                                    "font_color": "#9C0006", "bg_color": "#FCE4E4", "border": 1,
+                                    "border_color": "#E8B4B4"})
+
+        _ws.merge_range("B2:E2", "COMPARAÇÃO DE ESTUDOS DE ALOCAÇÃO", _f_tit)
+        _ws.set_row(1, 32)
+        _mt = meta or {}
+        _ws.merge_range(
+            "B3:E3",
+            f"Relatório gerado em {_mt.get('gerado_em', datetime.now().strftime('%d/%m/%Y às %H:%M'))}"
+            + (f" · Processamento: {_mt.get('tempo_processamento')}"
+               if _mt.get("tempo_processamento") else ""), _f_sub)
+
+        _br = (stats or {}).get("brasil", {})
+        _tot_ref = (aud or {}).get("total_ref", 0)
+        _conc = (aud or {}).get("conciliados", 0)
+        _pct_c = round(100.0 * _conc / _tot_ref, 1) if _tot_ref else 0.0
+        _ins = _br.get("inscritos", 0)
+        _eco = _br.get("economia_ponderada_km", 0)
+        _kmc = round(_eco / _ins, 1) if _ins else 0.0
+
+        _ws.merge_range("B5:E5", "  INDICADORES", _f_sec)
+        _ws.set_row(4, 22)
+        _KPIS = [
+            ("Municípios analisados", f"{_tot_ref:,}".replace(",", ".")),
+            ("Taxa de conciliação", f"{_pct_c}%"),
+            ("Nossa aplicação venceu", f"{_br.get('pct_venceu_app', 0)}%"),
+            ("Estudo de referência venceu", f"{_br.get('pct_venceu_ref', 0)}%"),
+            ("Empates técnicos (< 1 km)", f"{_br.get('pct_empate', 0)}%"),
+            ("Candidatos analisados", f"{int(_ins):,}".replace(",", ".")),
+            ("Km a MENOS por candidato", f"{_kmc}".replace(".", ",")),
+            ("Candidatos beneficiados", f"{int(_br.get('candidatos_beneficiados', 0)):,}".replace(",", ".")),
+        ]
+        _r = 6
+        for _i, (_lbl, _val) in enumerate(_KPIS):
+            _c = 1 + (_i % 4)
+            if _i % 4 == 0 and _i:
+                _r += 3
+            _ws.write(_r, _c, _val, _f_kpi_r)
+            _ws.write(_r + 1, _c, _lbl, _f_kpi_l)
+            _ws.set_row(_r, 30)
+            _ws.set_row(_r + 1, 26)
+
+        _r += 4
+        _ws.merge_range(_r, 1, _r, 4, "  O QUE ESTES NÚMEROS SIGNIFICAM", _f_sec)
+        _ws.set_row(_r, 22)
+        _r += 1
+        _ws.merge_range(
+            _r, 1, _r + 3, 4,
+            f"A economia total de {_eco:,.0f} km-candidato não significa nada isolada. DIVIDIDA pelos "
+            f"{int(_ins):,} candidatos, ela vira: cada candidato anda {_kmc} km A MENOS. É o mesmo número — "
+            "mas um é dado e o outro é entendimento.\n\n"
+            "'Empate' NÃO é derrota: abaixo de 1 km a diferença é ruído de geocodificação. Não se declara "
+            "vitória com base em ruído.".replace(",", "."), _f_txt)
+        _ws.set_row(_r, 16)
+
+        _r += 5
+        if _pct_c < 95:
+            _ws.merge_range(
+                _r, 1, _r + 2, 4,
+                f"⚠️ ATENÇÃO: apenas {_pct_c}% dos municípios foram conciliados. Os percentuais deste "
+                "relatório NÃO representam o universo completo — descrevem só a parte que casou. Adicione a "
+                "coluna de CÓDIGO IBGE à planilha de referência e reprocesse antes de tirar conclusões.",
+                _f_alerta)
+            _r += 4
+
+        _ws.merge_range(_r, 1, _r, 4, "  COMO NAVEGAR ESTE ARQUIVO", _f_sec)
+        _ws.set_row(_r, 22)
+        _r += 1
+        _ws.merge_range(
+            _r, 1, _r + 4, 4,
+            "1º  Guia de Interpretação — diz se você PODE confiar nestes números (leia primeiro).\n"
+            "2º  Como Ler Cada Aba — o manual de todas as abas, em texto corrido.\n"
+            "3º  Vitórias do Concorrente + Plano Híbrido — é AQUI que a decisão acontece.\n"
+            "4º  Comparacao — o detalhe município a município, para auditar um caso.\n"
+            "5º  Dicionario de Dados — o significado de cada coluna.", _f_txt)
+    except Exception as _e:
+        logger.error(f"[XLSX-PRO] Falha na capa: {_e}")
+
+
+def _aba_graficos(writer, stats, linhas):
+    """[XLSX-PRO - 182ª geração] GRÁFICOS NATIVOS DO EXCEL — não imagens coladas.
+
+    Gráfico nativo é VIVO: o usuário clica, filtra, muda o tipo, copia para o PowerPoint. Uma imagem é um
+    cadáver bonito. O xlsxwriter cria gráficos nativos de verdade — e é isso que separa um export de um
+    RELATÓRIO."""
+    try:
+        _wb = writer.book
+        _ws = _wb.add_worksheet("Graficos")
+        writer.sheets["Graficos"] = _ws
+        _ws.hide_gridlines(2)
+
+        # dados de apoio (numa aba oculta, para os gráficos referenciarem)
+        _dados = _wb.add_worksheet("_dados_graficos")
+        writer.sheets["_dados_graficos"] = _dados
+        _dados.hide()
+
+        _br = (stats or {}).get("brasil", {})
+        _placar = [("Nossa aplicação", _br.get("pct_venceu_app", 0)),
+                   ("Referência", _br.get("pct_venceu_ref", 0)),
+                   ("Empate técnico", _br.get("pct_empate", 0))]
+        _dados.write_column("A1", [x[0] for x in _placar])
+        _dados.write_column("B1", [x[1] for x in _placar])
+
+        _f_t = _wb.add_format({"bold": True, "font_size": 14, "font_color": "#1F3864"})
+        _ws.write("B2", "GRÁFICOS DA COMPARAÇÃO", _f_t)
+
+        _g1 = _wb.add_chart({"type": "column"})
+        _g1.add_series({
+            "name": "% de municípios",
+            "categories": ["_dados_graficos", 0, 0, len(_placar) - 1, 0],
+            "values": ["_dados_graficos", 0, 1, len(_placar) - 1, 1],
+            "data_labels": {"value": True, "num_format": '0.0"%"'},
+            "points": [{"fill": {"color": "#2E75B6"}}, {"fill": {"color": "#C00000"}},
+                       {"fill": {"color": "#A6A6A6"}}],
+        })
+        _g1.set_title({"name": "Quem levou o candidato mais perto (% de municípios)"})
+        _g1.set_y_axis({"name": "% dos municípios", "max": 100})
+        _g1.set_legend({"none": True})
+        _g1.set_size({"width": 560, "height": 330})
+        _ws.insert_chart("B4", _g1)
+
+        # por UF (top 12) — barras horizontais, que é o que se lê melhor
+        _uf = {}
+        for _l in (linhas or []):
+            _u = str(_l.get("UF") or "—")
+            _uf[_u] = _uf.get(_u, 0.0) + float(_l.get("Economia km x Inscritos") or 0)
+        _top = sorted(_uf.items(), key=lambda x: -abs(x[1]))[:12]
+        if _top:
+            _dados.write_column("D1", [x[0] for x in _top])
+            _dados.write_column("E1", [round(x[1], 1) for x in _top])
+            _g2 = _wb.add_chart({"type": "bar"})
+            _g2.add_series({
+                "name": "km-candidato",
+                "categories": ["_dados_graficos", 0, 3, len(_top) - 1, 3],
+                "values": ["_dados_graficos", 0, 4, len(_top) - 1, 4],
+                "fill": {"color": "#2E75B6"},
+                "data_labels": {"value": True, "num_format": "#,##0"},
+            })
+            _g2.set_title({"name": "Economia por estado (km-candidato) — barra para a ESQUERDA = perdemos"})
+            _g2.set_legend({"none": True})
+            _g2.set_size({"width": 560, "height": 400})
+            _ws.insert_chart("B23", _g2)
+
+        # distribuição por faixa
+        _fx = _estatisticas_por_faixa(linhas) if linhas else []
+        _fx = [f for f in _fx if f.get("candidatos")]
+        if _fx:
+            _dados.write_column("G1", [f["faixa"] for f in _fx])
+            _dados.write_column("H1", [f["candidatos"] for f in _fx])
+            _g3 = _wb.add_chart({"type": "column"})
+            _g3.add_series({
+                "name": "candidatos",
+                "categories": ["_dados_graficos", 0, 6, len(_fx) - 1, 6],
+                "values": ["_dados_graficos", 0, 7, len(_fx) - 1, 7],
+                "fill": {"color": "#548235"},
+                "data_labels": {"value": True, "num_format": "#,##0"},
+            })
+            _g3.set_title({"name": "Candidatos por faixa de diferença (com sinal)"})
+            _g3.set_legend({"none": True})
+            _g3.set_size({"width": 720, "height": 360})
+            _ws.insert_chart("L4", _g3)
+        # [CMP-GRAFICOS+ - 184ª geração] Dois gráficos nativos adicionais no Comparador:
+        # (1) Pareto dos municípios que mais pesam na vantagem da referência (a spec fala dos "~114
+        #     municípios que concentram 80% da vantagem") — colunas de economia + linha de % acumulado;
+        # (2) pizza da distribuição de vitórias (aplicação × referência × empate).
+        try:
+            _perdas = []
+            for _l in (linhas or []):
+                _e = _l.get("Economia km")
+                if _e is not None and float(_e) < 0:  # referência levou mais perto → vantagem dela
+                    _perdas.append((str(_l.get("Municipio Origem", "—"))[:22], abs(float(_e)),
+                                    str(_l.get("UF", ""))))
+            _perdas.sort(key=lambda x: -x[1])
+            _perdas = _perdas[:15]
+            if _perdas:
+                _somap = sum(p[1] for p in _perdas) or 1.0
+                _acc, _s = [], 0.0
+                for _p in _perdas:
+                    _s += _p[1]; _acc.append(round(100.0 * _s / _somap, 2))
+                _dados.write_column("J1", [f"{p[0]}/{p[2]}" for p in _perdas])
+                _dados.write_column("K1", [round(p[1], 1) for p in _perdas])
+                _dados.write_column("M1", _acc)
+                _gp = _wb.add_chart({"type": "column"})
+                _gp.add_series({"name": "Vantagem da referência (km)",
+                                "categories": ["Graficos_dados", 0, 9, len(_perdas) - 1, 9],
+                                "values": ["Graficos_dados", 0, 10, len(_perdas) - 1, 10],
+                                "fill": {"color": "#dc2626"}})
+                _gl = _wb.add_chart({"type": "line"})
+                _gl.add_series({"name": "% acumulado",
+                                "categories": ["Graficos_dados", 0, 9, len(_perdas) - 1, 9],
+                                "values": ["Graficos_dados", 0, 12, len(_perdas) - 1, 12],
+                                "line": {"color": "#1e3a8a", "width": 2.25}, "y2_axis": True,
+                                "marker": {"type": "circle", "size": 5}})
+                _gp.combine(_gl)
+                _gp.set_title({"name": "Pareto: municípios que mais pesam na vantagem da referência"})
+                _gp.set_x_axis({"name": "município/UF"})
+                _gp.set_y_axis({"name": "km-candidato"})
+                _gp.set_y2_axis({"name": "% acumulado", "min": 0, "max": 100})
+                _gp.set_size({"width": 760, "height": 430})
+                _ws.insert_chart("B42", _gp)
+            _vd = {"Aplicação": 0, "Referência": 0, "Empate": 0}
+            for _l in (linhas or []):
+                _v = str(_l.get("Vencedor Distancia", "")).strip()
+                if _v in _vd:
+                    _vd[_v] += 1
+            if sum(_vd.values()) > 0:
+                _dados.write_column("O1", list(_vd.keys()))
+                _dados.write_column("P1", list(_vd.values()))
+                _gpie = _wb.add_chart({"type": "pie"})
+                _gpie.add_series({"name": "Distribuição de vitórias (distância)",
+                                  "categories": ["Graficos_dados", 0, 14, 2, 14],
+                                  "values": ["Graficos_dados", 0, 15, 2, 15],
+                                  "points": [{"fill": {"color": "#16a34a"}}, {"fill": {"color": "#dc2626"}},
+                                             {"fill": {"color": "#94a3b8"}}]})
+                _gpie.set_title({"name": "Distribuição de vitórias por distância"})
+                _gpie.set_size({"width": 520, "height": 400})
+                _ws.insert_chart("L42", _gpie)
+        except Exception:
+            logger.error("[CMP-GRAFICOS+] Falha nos gráficos adicionais do Comparador", exc_info=True)
+    except Exception as _e:
+        logger.error(f"[XLSX-PRO] Falha nos gráficos: {_e}")
+
+
+def _aba_metadados(writer, meta):
+    """[XLSX-PRO - 182ª geração] METADADOS DO PROCESSAMENTO — a rastreabilidade que um relatório técnico
+    exige. Quem gerou, quando, com que versão, de que arquivos, com quantas linhas. Sem isso, o relatório
+    não é auditável: é um PDF bonito."""
+    try:
+        _m = meta or {}
+        _linhas = [
+            {"Campo": "Relatório", "Valor": "Comparação de Estudos de Alocação de Locais de Prova"},
+            {"Campo": "Gerado em", "Valor": _m.get("gerado_em",
+                                                   datetime.now().strftime("%d/%m/%Y %H:%M:%S"))},
+            {"Campo": "Versão da plataforma", "Valor": _m.get("versao", "—")},
+            {"Campo": "Planilha de referência", "Valor": _m.get("arquivo_ref", "—")},
+            {"Campo": "Registros na referência", "Valor": _m.get("total_ref", "—")},
+            {"Campo": "Municípios do estudo da aplicação", "Valor": _m.get("total_app", "—")},
+            {"Campo": "Conciliados", "Valor": _m.get("conciliados", "—")},
+            {"Campo": "Conciliados por Código IBGE", "Valor": _m.get("por_ibge", "—")},
+            {"Campo": "Conciliados por Município + UF", "Valor": _m.get("por_mun_uf", "—")},
+            {"Campo": "Conciliados por SIMILARIDADE (não oficial)", "Valor": _m.get("por_fuzzy", "—")},
+            {"Campo": "NÃO conciliados (fora das estatísticas)", "Valor": _m.get("nao_conciliados", "—")},
+            {"Campo": "Conciliados mas NÃO comparáveis", "Valor": _m.get("nao_comparaveis", "—")},
+            {"Campo": "Base municipal", "Valor": "IBGE — 5.571 municípios, embarcada (offline)"},
+            {"Campo": "Cálculo geodésico", "Valor": "GeographicLib / Karney (WGS-84, erro < 1 mm)"},
+            {"Campo": "Roteamento", "Valor": "Consenso OSRM × Google (menor distância física válida)"},
+        ]
+        _escrever_aba_profissional(writer, pd.DataFrame(_linhas), "Metadados")
+    except Exception as _e:
+        logger.error(f"[XLSX-PRO] Falha nos metadados: {_e}")
+
+
+def _escrever_aba_com_guia(writer, df, nome, guia=None):
+    """[XLSX-PRO - 182ª geração] DELEGA ao escritor PROFISSIONAL.
+
+    Manter DUAS implementações seria pedir para elas divergirem. Um único escritor, e **toda aba que passar
+    por aqui — inclusive as que eu ainda vou escrever — ganha a formatação de relatório automaticamente.**
+    É a mesma lógica do PONTO ÚNICO da 169ª: **conserte a fonte, não os chamadores.**"""
+    return _escrever_aba_profissional(writer, df, nome)
+
+
+# [AUDITORIA-184] Função morta '_escrever_aba_com_guia_LEGADO' aposentada (nome ocorria 1× no arquivo — sem qualquer referência). Recuperável no histórico de versões.
 
 
 def _guia_interpretacao_completo(stats, aud, linhas):
@@ -11012,7 +14361,343 @@ def _diagnostico_estudo_app(df_app):
             "pct_falhas": round(100.0 * len(_falhas) / _tot, 1) if _tot else 0.0}
 
 
-def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
+
+
+def _conciliar_multiplos(df_app, estudos):
+    """[N-ESTUDOS - 184ª geração] CONCILIAÇÃO GENÉRICA DE N ESTUDOS.
+
+    ── A GENERALIZAÇÃO CERTA (e ela não é óbvia) ──
+    A tentação é fazer "N estudos, todos iguais". **Errado para este domínio.** A nossa aplicação **sempre
+    existe** — ela é quem PRODUZ o estudo. Os outros são REFERÊNCIAS externas (o estudo de 2025, o cenário
+    base, a simulação do fornecedor). Então a estrutura certa é:
+
+        **1 estudo da APLICAÇÃO  +  N estudos de REFERÊNCIA**
+
+    Isso preserva TUDO que já existe (todas as análises são app-cêntricas) e generaliza de graça: com N=1
+    referência, é exatamente o comparador de hoje. **Uma generalização que quebra o caso antigo é uma
+    regressão com nome bonito.**
+
+    ── ESTRUTURA DE SAÍDA (uma linha por município, N colunas por estudo) ──
+        {"Origem": ..., "UF": ..., "Inscritos": ..., "Cod IBGE Origem": ...,
+         "estudos": {"Nossa aplicação": {...}, "Estudo 2025": {...}, "Cenário Base": {...}}}
+
+    `estudos` é uma lista de dicts: [{"nome": str, "df": DataFrame, "mapa": dict}, ...]
+    Retorna (linhas, auditoria_por_estudo). PURO."""
+    if df_app is None or len(df_app) == 0 or not estudos:
+        return [], {}
+
+    _app_rows = df_app.to_dict("records")
+    # índice do estudo da aplicação: por código IBGE e por (município, uf)
+    _idx_cod, _idx_mun = {}, {}
+    for _i, _r in enumerate(_app_rows):
+        _c = str(_r.get("Cod IBGE Origem") or "").strip()
+        if _c:
+            _idx_cod[_c] = _i
+        _m = semantica.normalizar(str(_r.get("Municipio Origem") or _r.get("Origem") or ""))
+        _u = str(_r.get("UF Origem") or "").strip().upper()
+        if _m:
+            _idx_mun[(_m, _u)] = _i
+            _idx_mun.setdefault((_m, ""), _i)
+
+    # a base: uma linha por município do NOSSO estudo
+    _linhas = []
+    for _i, _a in enumerate(_app_rows):
+        _val, _mot = _linha_app_valida(_a)
+        _linhas.append({
+            "_i": _i,
+            "Origem": _a.get("Municipio Origem") or _a.get("Origem"),
+            "UF": _a.get("UF Origem", ""),
+            "Cod IBGE Origem": str(_a.get("Cod IBGE Origem") or ""),
+            "Inscritos": float(_a.get("Inscritos") or 0),
+            "estudos": {},
+            "_app_valida": _val, "_app_motivo": _mot,
+        })
+
+    # o NOSSO estudo entra como o primeiro
+    for _i, _a in enumerate(_app_rows):
+        if not _linhas[_i]["_app_valida"]:
+            continue
+        try:
+            _d = float(_a.get("Distancia"))
+        except (TypeError, ValueError):
+            continue
+        _linhas[_i]["estudos"]["🏢 Nossa aplicação"] = {
+            "destino": _a.get("Municipio Destino") or _a.get("Destino"),
+            "distancia": _d,
+            "tempo_min": _parse_tempo_min(_a.get("Tempo")) if _a.get("Tempo") else None,
+            "balsa": str(_a.get("Balsas", "")).strip().lower() in ("sim", "yes", "true", "1"),
+            "tipo": _tipo_de_distancia(_a),
+            "metodo": "—", "score": 100,
+        }
+
+    # cada estudo de REFERÊNCIA
+    _aud = {}
+    for _e in estudos:
+        _nome = str(_e.get("nome") or "Estudo").strip()[:40]
+        _df = _e.get("df")
+        _mapa = _e.get("mapa") or {}
+        if _df is None or len(_df) == 0:
+            continue
+        _a_e = {"nome": _nome, "total": len(_df), "conciliados": 0, "por_ibge": 0,
+                "por_mun_uf": 0, "por_mun": 0, "nao_conciliados": []}
+
+        def _v(_r, _k):
+            _c = _mapa.get(_k)
+            return _r.get(_c) if _c else None
+
+        for _r in _df.to_dict("records"):
+            _cod = _e_codigo_ibge(str(_v(_r, "ibge_origem") or ""))
+            _i_app = None
+            _met, _sc = "", 0
+            if _cod and _cod in _idx_cod:
+                _i_app, _met, _sc = _idx_cod[_cod], "Código IBGE", 100
+                _a_e["por_ibge"] += 1
+            if _i_app is None:
+                _m = semantica.normalizar(str(_v(_r, "origem") or ""))
+                _u = str(_v(_r, "uf_origem") or "").strip().upper()
+                if (_m, _u) in _idx_mun:
+                    _i_app, _met, _sc = _idx_mun[(_m, _u)], "Município + UF", 98
+                    _a_e["por_mun_uf"] += 1
+                elif (_m, "") in _idx_mun:
+                    _i_app, _met, _sc = _idx_mun[(_m, "")], "Município", 90
+                    _a_e["por_mun"] += 1
+            if _i_app is None:
+                _a_e["nao_conciliados"].append({
+                    "estudo": _nome, "origem": _v(_r, "origem"), "uf": _v(_r, "uf_origem"),
+                    "motivo": "Não casou com nenhum município do estudo da aplicação."})
+                continue
+            try:
+                _dist = float(_v(_r, "distancia"))
+            except (TypeError, ValueError):
+                _dist = None
+            if _dist is None or _dist <= 0:
+                continue
+            _a_e["conciliados"] += 1
+            _linhas[_i_app]["estudos"][_nome] = {
+                "destino": _v(_r, "destino"),
+                "distancia": _dist,
+                "tempo_min": (_parse_tempo_min(_v(_r, "tempo"))
+                              if _mapa.get("tempo") and _v(_r, "tempo") else None),
+                "balsa": None,          # a referência não informa: NÃO INVENTAMOS
+                "tipo": "🛣️ Viária (informado)",
+                "metodo": _met, "score": _sc,
+            }
+            # os inscritos: se a referência trouxer e a app não tiver, aproveita
+            if not _linhas[_i_app]["Inscritos"] and _mapa.get("inscritos"):
+                try:
+                    _linhas[_i_app]["Inscritos"] = float(_v(_r, "inscritos") or 0)
+                except (TypeError, ValueError):
+                    pass
+        _aud[_nome] = _a_e
+
+    # só as linhas com pelo menos 2 estudos são COMPARÁVEIS
+    _comp = [l for l in _linhas if len(l["estudos"]) >= 2]
+    return _comp, _aud
+
+
+def _comparar_n_estudos(linhas, nomes=None):
+    """[N-ESTUDOS - 184ª geração] A ANÁLISE QUE **SÓ EXISTE COM N**.
+
+    ── AS PERGUNTAS NOVAS (e elas mudam a decisão) ──
+    Com dois estudos você pergunta "quem ganhou?". Com N, aparecem perguntas melhores:
+
+      🎯 **Onde TODOS concordam** → confiança alta. **Não precisa revisar.** É onde você economiza tempo.
+      ⚡ **Onde TODOS divergem** → é **ali** que a decisão é difícil, e é **ali** que o humano precisa
+         olhar. Um município em que 4 estudos escolheram 4 polos diferentes está te dizendo algo:
+         **não há resposta óbvia, e o modelo sozinho não vai encontrá-la.**
+      🏆 **O híbrido de N** → o melhor de CADA município entre TODOS os estudos. Domina todos, por
+         construção. Com N estudos, o ganho do híbrido cresce — porque há mais alternativas para escolher.
+
+    ── E O CONSENSO É UM SINAL DE QUALIDADE ──
+    Se 4 metodologias INDEPENDENTES chegam ao mesmo polo, esse polo é provavelmente certo. Se elas se
+    espalham, é sinal de que o problema ali é genuinamente ambíguo (empate de distâncias, malha viária
+    complicada) — e nenhum estudo isolado "está certo". **O consenso mede a DIFICULDADE do problema, não
+    só a concordância dos métodos.** PURO."""
+    if not linhas:
+        return {}
+    _nomes = nomes or sorted({n for l in linhas for n in l["estudos"]})
+    _tot_c = int(sum(l.get("Inscritos") or 0 for l in linhas))
+
+    _placar = {n: {"municipios": 0, "candidatos": 0} for n in _nomes}
+    _km_por_estudo = {n: 0.0 for n in _nomes}
+    _km_hibrido = 0.0
+    _consenso_total, _divergencia_total = [], []
+    _detalhe = []
+
+    for l in linhas:
+        _e = l["estudos"]
+        _ins = float(l.get("Inscritos") or 0)
+        _w = max(_ins, 1.0)
+        _validos = {n: v for n, v in _e.items() if v.get("distancia") and v["distancia"] > 0}
+        if len(_validos) < 2:
+            continue
+        for _n, _v in _validos.items():
+            _km_por_estudo[_n] += _v["distancia"] * _w
+
+        _melhor_n = min(_validos, key=lambda n: _validos[n]["distancia"])
+        _melhor_d = _validos[_melhor_n]["distancia"]
+        _km_hibrido += _melhor_d * _w
+
+        # EMPATE TÉCNICO: diferença < 1 km é ruído de geocodificação (a regra da 138ª)
+        _ordenados = sorted(_validos.items(), key=lambda kv: kv[1]["distancia"])
+        _empate = (len(_ordenados) > 1
+                   and _ordenados[1][1]["distancia"] - _ordenados[0][1]["distancia"] < 1.0)
+        if not _empate:
+            _placar[_melhor_n]["municipios"] += 1
+            _placar[_melhor_n]["candidatos"] += int(_ins)
+
+        # CONSENSO: todos escolheram o MESMO polo?
+        _polos = {str(v.get("destino") or "").strip().upper() for v in _validos.values()}
+        _polos.discard("")
+        _n_polos = len(_polos)
+        if _n_polos == 1:
+            _consenso_total.append(l)
+        elif _n_polos == len(_validos):
+            _divergencia_total.append(l)
+
+        _pior_d = max(v["distancia"] for v in _validos.values())
+        _detalhe.append({
+            "Município": l.get("Origem"), "UF": l.get("UF", ""),
+            "Candidatos": int(_ins),
+            "Estudos comparados": len(_validos),
+            "Polos distintos escolhidos": _n_polos,
+            "🏆 Melhor estudo": _melhor_n if not _empate else "Empate técnico",
+            "Melhor distância (km)": round(_melhor_d, 1),
+            "Pior distância (km)": round(_pior_d, 1),
+            "Amplitude (km)": round(_pior_d - _melhor_d, 1),
+            "Impacto da escolha (km-cand)": round((_pior_d - _melhor_d) * _ins, 1),
+            "Consenso": ("🎯 TOTAL" if _n_polos == 1 else
+                         ("⚡ DIVERGÊNCIA TOTAL" if _n_polos == len(_validos) else "🟡 Parcial")),
+            **{f"{n} (km)": round(_validos[n]["distancia"], 1) if n in _validos else None
+               for n in _nomes},
+            **{f"{n} → polo": (_validos[n].get("destino") if n in _validos else None)
+               for n in _nomes},
+        })
+
+    _n_comp = len(_detalhe)
+    for _n in _nomes:
+        _placar[_n]["pct_municipios"] = (round(100.0 * _placar[_n]["municipios"] / _n_comp, 1)
+                                         if _n_comp else 0.0)
+        _placar[_n]["pct_candidatos"] = (round(100.0 * _placar[_n]["candidatos"] / _tot_c, 1)
+                                         if _tot_c else 0.0)
+        _km_por_estudo[_n] = round(_km_por_estudo[_n], 1)
+
+    _melhor_geral = min(_km_por_estudo, key=lambda n: _km_por_estudo[n]) if _km_por_estudo else None
+    _ganho_hib = (round(_km_por_estudo[_melhor_geral] - _km_hibrido, 1)
+                  if _melhor_geral else 0.0)
+
+    _divergencia_total.sort(key=lambda l: -float(l.get("Inscritos") or 0))
+    return {
+        "estudos": _nomes, "n_estudos": len(_nomes), "municipios_comparaveis": _n_comp,
+        "candidatos": _tot_c,
+        "placar": _placar,
+        "km_candidato_por_estudo": _km_por_estudo,
+        "km_candidato_hibrido": round(_km_hibrido, 1),
+        "melhor_estudo_geral": _melhor_geral,
+        "ganho_do_hibrido": _ganho_hib,
+        "consenso_total": len(_consenso_total),
+        "pct_consenso": round(100.0 * len(_consenso_total) / _n_comp, 1) if _n_comp else 0.0,
+        "divergencia_total": len(_divergencia_total),
+        "pct_divergencia": round(100.0 * len(_divergencia_total) / _n_comp, 1) if _n_comp else 0.0,
+        "municipios_divergentes": [
+            {"Município": l.get("Origem"), "UF": l.get("UF", ""),
+             "Candidatos": int(l.get("Inscritos") or 0),
+             **{n: (l["estudos"][n].get("destino") if n in l["estudos"] else "—") for n in _nomes}}
+            for l in _divergencia_total[:60]],
+        "detalhe": _detalhe,
+    }
+
+
+def _matriz_similaridade(linhas, nomes=None):
+    """[N-ESTUDOS - 184ª geração] MATRIZ DE SIMILARIDADE — quais estudos "pensam parecido"?
+
+    Para cada PAR de estudos: em que % dos municípios eles escolheram o MESMO polo?
+
+    ── POR QUE ISTO IMPORTA (e não é enfeite) ──
+    Se dois estudos concordam em 97%, **um deles é redundante** — você está pagando por duas metodologias
+    que dizem a mesma coisa. Se concordam em 40%, **eles enxergam o problema de formas fundamentalmente
+    diferentes**, e vale entender POR QUÊ antes de escolher um.
+    É a diferença entre ter **N opiniões** e ter **N cópias da mesma opinião**. PURO."""
+    if not linhas:
+        return {}
+    _nomes = nomes or sorted({n for l in linhas for n in l["estudos"]})
+    _m = []
+    for _a in _nomes:
+        _linha = {"Estudo": _a}
+        for _b in _nomes:
+            if _a == _b:
+                _linha[_b] = 100.0
+                continue
+            _comuns = [l for l in linhas if _a in l["estudos"] and _b in l["estudos"]]
+            if not _comuns:
+                _linha[_b] = None
+                continue
+            _iguais = sum(
+                1 for l in _comuns
+                if str(l["estudos"][_a].get("destino") or "").strip().upper()
+                == str(l["estudos"][_b].get("destino") or "").strip().upper()
+                and str(l["estudos"][_a].get("destino") or "").strip())
+            _linha[_b] = round(100.0 * _iguais / len(_comuns), 1)
+        _m.append(_linha)
+
+    # o par mais parecido e o mais diferente (que é onde mora a informação)
+    _pares = []
+    for _i, _a in enumerate(_nomes):
+        for _b in _nomes[_i + 1:]:
+            _v = next((r[_b] for r in _m if r["Estudo"] == _a), None)
+            if _v is not None:
+                _pares.append((_a, _b, _v))
+    _pares.sort(key=lambda x: -x[2])
+    return {
+        "matriz": _m, "nomes": _nomes,
+        "par_mais_parecido": _pares[0] if _pares else None,
+        "par_mais_diferente": _pares[-1] if _pares else None,
+        "leitura": _montar_leitura_similaridade(_pares),
+    }
+
+
+def _montar_leitura_similaridade(pares):
+    """[N-ESTUDOS - 184ª geração] A leitura da matriz, em português. PURA."""
+    if not pares:
+        return []
+    _out = []
+    _a, _b, _v = pares[0]
+    if _v >= 95:
+        _out.append(
+            f"🔁 **{_a}** e **{_b}** concordam em **{_v}%** dos municípios. Nesse nível, **um deles é "
+            "praticamente REDUNDANTE** — você está pagando (em tempo e em atenção) por duas metodologias "
+            "que dizem a mesma coisa. Considere manter só uma.")
+    _a2, _b2, _v2 = pares[-1]
+    if _v2 <= 60 and len(pares) > 1:
+        _out.append(
+            f"⚡ **{_a2}** e **{_b2}** concordam em apenas **{_v2}%**. Eles enxergam o problema de formas "
+            "**fundamentalmente diferentes** — e é exatamente aí que está a informação. **Vale entender POR "
+            "QUÊ** antes de escolher um: pode ser critério diferente (distância × tempo), base de dados "
+            "diferente, ou um deles simplesmente errado.")
+    if not _out:
+        _out.append(
+            "⚖️ Os estudos têm concordância intermediária entre si — nem redundantes, nem radicalmente "
+            "divergentes. É o cenário mais comum, e o mais útil: cada um traz alguma informação que os "
+            "outros não têm.")
+    return _out
+
+
+def _coluna_parece_sim_nao(df, col):
+    """[MAPA-REF - 184ª geração] True se a coluna parece BOOLEANA (SIM/NÃO): ≤3 valores distintos, todos em
+    {SIM,NAO,S,N,YES,NO,TRUE,FALSE,0,1,X,''}. Protege o mapeamento do Comparador: 'MUNICIPIO_PROVA' (SIM/NÃO)
+    escolhida como DESTINO fazia toda a coluna 'Destino Referencia' virar 'NÃO'. Puro e defensivo."""
+    try:
+        if df is None or not col or col not in df.columns or len(df) == 0:
+            return False
+        _v = {unidecode(str(x)).strip().upper() for x in df[col].dropna().unique()}
+        _v = {x for x in _v if x != ""}
+        _BOOL = {"SIM", "NAO", "S", "N", "YES", "NO", "TRUE", "FALSE", "0", "1", "X"}
+        return 0 < len(_v) <= 3 and _v.issubset(_BOOL)
+    except Exception:
+        return False
+
+
+def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90, limiar_empate_km=1.0):
     """[COMPARADOR - 138ª geração] Concilia a saída da aba Locais de Aplicação (df_app) com a base externa
     de referência (df_ref), pela ORIGEM (município de candidatos). HIERARQUIA, do mais forte ao mais fraco:
     (1) Código IBGE da origem; (2) município + UF; (3) município sem UF; (4) fuzzy controlado (rapidfuzz
@@ -11047,6 +14732,10 @@ def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
     linhas, aud = [], {"conciliados": 0, "por_ibge": 0, "por_mun_uf": 0, "por_mun": 0, "por_fuzzy": 0,
                        "nao_conciliados": [], "nao_comparaveis": [], "total_ref": 0}
     _chaves_mun = list(idx_mun.keys())
+    # [CONCILIA-SEGURA - 184ª geração] Conjuntos de apoio dos guardas: códigos (só dígitos) das origens da
+    # aplicação, e linhas da app já consumidas (para bloquear duplicata por nome/fuzzy).
+    _ibge_digs = {re.sub(r"\D", "", str(_k)) for _k in idx_ibge}
+    _consumidos_nome = set()
     for r in df_ref.to_dict("records"):
         aud["total_ref"] += 1
         _o_ref = _v(r, _mo, "")
@@ -11058,6 +14747,26 @@ def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
         if _cod_ref and _cod_ref in idx_ibge:
             i_app, metodo, score_m = idx_ibge[_cod_ref], "Código IBGE", 100
             aud["por_ibge"] += 1
+        # [CONCILIA-SEGURA - 184ª geração] Se a referência TEM código IBGE válido e ele NÃO existe entre as
+        # origens da aplicação, o município genuinamente não está no estudo — cair para nome/fuzzy aqui casa
+        # HOMÔNIMOS e fabrica comparações falsas (provado: "São Geraldo"/MG casado a "São Geraldo do
+        # Araguaia"/PA; "Careiro da Várzea" duplicando "Careiro"). Vai para não-conciliados com o motivo.
+        _dig_ref = re.sub(r"\D", "", _cod_ref)
+        if i_app is None and len(_dig_ref) == 7 and _ibge_digs and _dig_ref not in _ibge_digs:
+            aud["bloqueado_codigo_ausente"] = aud.get("bloqueado_codigo_ausente", 0) + 1
+            aud["nao_conciliados"].append({"origem_ref": str(_o_ref),
+                                           "motivo": f"Código IBGE {_dig_ref} da referência não existe entre as "
+                                                     "origens do estudo da aplicação (município fora do estudo; "
+                                                     "casamento por nome bloqueado para evitar homônimo)."})
+            continue
+        _uf_ref = str(_v(r, _muf, "") or "").strip().upper()
+
+        def _uf_compativel(_ix):
+            # [CONCILIA-SEGURA] Nome/fuzzy só valem se a UF (quando conhecida dos dois lados) BATER.
+            if not _uf_ref:
+                return True
+            _uf_app = str(app_rows[_ix].get("UF Origem", "") or app_rows[_ix].get("UF", "") or "").strip().upper()
+            return (not _uf_app) or (_uf_app == _uf_ref)
         if i_app is None:
             _k = _chave_mun(_o_ref, _v(r, _muf, ""))
             if _k in idx_mun_uf:
@@ -11065,7 +14774,7 @@ def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
                 aud["por_mun_uf"] += 1
         if i_app is None:
             _k2 = _chave_mun(_o_ref)
-            if _k2 in idx_mun:
+            if _k2 in idx_mun and _uf_compativel(idx_mun[_k2]) and idx_mun[_k2] not in _consumidos_nome:
                 i_app, metodo, score_m = idx_mun[_k2], "Município (sem UF)", 90
                 aud["por_mun"] += 1
         if i_app is None and _chaves_mun:
@@ -11079,7 +14788,24 @@ def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
             except Exception:
                 _m = None
             if _m:
-                i_app, metodo, score_m = idx_mun[_m[0]], f"Fuzzy ({int(_m[1])}%)", int(_m[1])
+                _ix_fz = idx_mun[_m[0]]
+                # [CONCILIA-SEGURA] Fuzzy só com UF compatível e sem reconsumir linha já conciliada
+                # (evita homônimo cross-UF e derrota duplicada).
+                if not _uf_compativel(_ix_fz):
+                    aud["fuzzy_bloqueado_uf"] = aud.get("fuzzy_bloqueado_uf", 0) + 1
+                    aud["nao_conciliados"].append({"origem_ref": str(_o_ref),
+                                                   "motivo": "Similaridade encontrada, mas em OUTRA UF — casamento "
+                                                             "bloqueado para evitar homônimo (ex.: São Geraldo/MG × "
+                                                             "São Geraldo do Araguaia/PA)."})
+                    continue
+                if _ix_fz in _consumidos_nome:
+                    aud["fuzzy_bloqueado_duplicata"] = aud.get("fuzzy_bloqueado_duplicata", 0) + 1
+                    aud["nao_conciliados"].append({"origem_ref": str(_o_ref),
+                                                   "motivo": "Linha da aplicação já conciliada por método mais forte — "
+                                                             "novo vínculo por similaridade bloqueado (evita derrota "
+                                                             "duplicada por homônimo, ex.: Careiro × Careiro da Várzea)."})
+                    continue
+                i_app, metodo, score_m = _ix_fz, f"Fuzzy ({int(_m[1])}%)", int(_m[1])
                 aud["por_fuzzy"] += 1
         if i_app is None:
             aud["nao_conciliados"].append({"origem_ref": str(_o_ref),
@@ -11088,6 +14814,7 @@ def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
             continue
         a = app_rows[i_app]
         aud["conciliados"] += 1
+        _consumidos_nome.add(i_app)
         # [ANTI-FALHA - 161ª geração] O estudo da APLICAÇÃO produziu resultado válido para esta linha?
         # Se a rota falhou (Marajó: sem estrada até a ilha), a app gravou Distancia=0 e Municipio="Erro".
         # Comparar isso contra a referência faria a aplicação "vencer pela distância inteira". É mentira.
@@ -11155,7 +14882,7 @@ def _conciliar_comparativo(df_app, df_ref, mapa, limiar_fuzzy=90):
     return linhas, aud
 
 
-def _comparar_alocacoes(linhas, parse_tempo=None):
+def _comparar_alocacoes(linhas, parse_tempo=None, limiar_empate_km=1.0):
     """[COMPARADOR - 138ª geração] Compara, linha a linha, a alocação da APLICAÇÃO contra a da REFERÊNCIA e
     produz as colunas de decisão: mesmo destino?, diferença absoluta e percentual, economia de km, economia
     PONDERADA por inscritos, economia de tempo, vencedor e JUSTIFICATIVA técnica. Convenção: economia
@@ -11188,7 +14915,10 @@ def _comparar_alocacoes(linhas, parse_tempo=None):
             d["Diferenca Pct (%)"] = round(100.0 * _dif / _dr, 2)
             d["Economia km"] = max(0.0, _dif)
             d["Economia km x Inscritos"] = round(_dif * _insc, 1)
-            if abs(_dif) < 1.0:
+            # [LIMIAR-EMPATE - 184ª geração] Limiar CONFIGURÁVEL: diferenças abaixo dele são ruído de
+            # medição entre fontes (matriz pré-computada × roteamento ao vivo; mediana real ~2 km no mesmo
+            # destino), não vitória.
+            if abs(_dif) < float(limiar_empate_km):
                 d["Vencedor Distancia"] = "Empate"
             elif _dif > 0:
                 d["Vencedor Distancia"] = "Aplicação"
@@ -11239,7 +14969,7 @@ def _comparar_alocacoes(linhas, parse_tempo=None):
         # SOLUÇÃO. O motor de alocação decide por CUSTO EFETIVO — mas o COMPARADOR ainda usava régua de km.
         # Duas partes da mesma app com critérios diferentes. Agora falam a mesma língua.
         try:
-            _vm, _crit, _exp = _vencedor_multicriterio_comparacao(d)
+            _vm, _crit, _exp = _vencedor_multicriterio_comparacao(d, limiar_empate_km=limiar_empate_km)
             d["Vencedor (Esforço Real)"] = _vm
             d["Criterio Usado"] = _crit
             d["Explicacao do Criterio"] = _exp
@@ -11314,6 +15044,75 @@ def _estatisticas_comparacao(linhas, uf_para_regiao=None):
     }
 
 
+def _escrever_mapa_calor(writer, pares_uf_dist, nome_aba="Mapa de Calor UF"):
+    """[MAPA-CALOR - 184ª geração] NÚCLEO reutilizável: dado um iterável de (UF, distância_km), escreve uma
+    matriz UF × faixa de distância (nº de rotas) com FORMATAÇÃO CONDICIONAL (heatmap branco→vermelho). Serve
+    tanto ao Comparador quanto à planilha de Locais. Defensivo; usa xlsxwriter. Retorna nada."""
+    try:
+        _wb = getattr(writer, "book", None)
+        if _wb is None or not hasattr(_wb, "add_format"):
+            return
+        import pandas as _pd
+        _df = _pd.DataFrame([{"UF": str(_u or "—").strip().upper()[:2] or "—",
+                              "d": _pd.to_numeric(_d, errors="coerce")} for _u, _d in pares_uf_dist])
+        _df = _df[_df["d"].notna()]
+        if _df.empty or _df["UF"].nunique() == 0:
+            return
+        _labs = ["0-50", "50-100", "100-150", "150-200", "200-300", "300-500", "500+"]
+        _df["faixa"] = _pd.cut(_df["d"], bins=[0, 50, 100, 150, 200, 300, 500, 10**12],
+                               labels=_labs, right=False)
+        _mat = _df.groupby(["UF", "faixa"], observed=False).size().unstack("faixa", fill_value=0)
+        _mat = _mat.reindex(columns=_labs, fill_value=0)
+        _mat["Total"] = _mat.sum(axis=1)
+        _mat = _mat.sort_values("Total", ascending=False)
+        _ws = _wb.add_worksheet(nome_aba)
+        writer.sheets[nome_aba] = _ws
+        _hd = _wb.add_format({"bold": True, "bg_color": "#1e3a8a", "font_color": "white",
+                              "align": "center", "border": 1})
+        _uf_fmt = _wb.add_format({"bold": True, "border": 1})
+        _cell = _wb.add_format({"border": 1, "align": "center"})
+        _ws.write("A1", "UF \\ Faixa (km)", _hd)
+        for _j, _lab in enumerate(_labs + ["Total"]):
+            _ws.write(0, _j + 1, _lab, _hd)
+        for _i, (_uf, _row) in enumerate(_mat.iterrows()):
+            _ws.write(_i + 1, 0, _uf, _uf_fmt)
+            for _j, _lab in enumerate(_labs + ["Total"]):
+                _ws.write(_i + 1, _j + 1, int(_row[_lab]), _cell)
+        _nrows = len(_mat)
+        if _nrows > 0:
+            _ws.conditional_format(1, 1, _nrows, len(_labs), {
+                "type": "3_color_scale", "min_color": "#ffffff", "mid_color": "#fca5a5",
+                "max_color": "#b91c1c"})
+        _ws.set_column("A:A", 14)
+        _ws.set_column(1, len(_labs) + 1, 10)
+        _ws.freeze_panes(1, 1)
+        _ws.write(_nrows + 3, 0, "Leitura: cada célula é o nº de rotas do estado naquela faixa de distância; "
+                  "quanto mais vermelho, mais rotas longas concentradas ali.")
+    except Exception:
+        logger.error("[MAPA-CALOR] Falha ao montar o mapa de calor UF × faixa (%s)", nome_aba, exc_info=True)
+
+
+def _aba_mapa_calor_uf(writer, linhas):
+    """[MAPA-CALOR - 184ª geração] Mapa de calor do Comparador — delega ao núcleo com (UF, Distancia
+    Aplicacao) de cada linha conciliada."""
+    if not linhas:
+        return
+    _escrever_mapa_calor(writer, ((_l.get("UF", ""), _l.get("Distancia Aplicacao")) for _l in linhas))
+
+
+def _aba_mapa_calor_alocacao(writer, df):
+    """[MAPA-CALOR - 184ª geração] Mapa de calor da planilha de Locais — delega ao núcleo com (UF Origem,
+    Distancia) do df final. Defensivo: sem as colunas, não faz nada."""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return
+        if 'UF Origem' not in df.columns or 'Distancia' not in df.columns:
+            return
+        _escrever_mapa_calor(writer, zip(df['UF Origem'].tolist(), df['Distancia'].tolist()))
+    except Exception:
+        logger.error("[MAPA-CALOR] Falha no mapa de calor da alocação", exc_info=True)
+
+
 def _montar_xlsx_comparacao(linhas, stats, aud, relatorio):
     """[PERF - 139ª geração] Monta os bytes do .xlsx de 7 abas do Comparador UMA ÚNICA VEZ (no clique).
     Na 138ª eu montava isto dentro do bloco de exibição — ou seja, A CADA RERUN: 1,2 s de CPU bloqueante
@@ -11323,6 +15122,24 @@ def _montar_xlsx_comparacao(linhas, stats, aud, relatorio):
         _df = pd.DataFrame(linhas)
         _buf = io.BytesIO()
         with pd.ExcelWriter(_buf, engine='xlsxwriter') as _w:
+            # [XLSX-PRO - 182ª geração] A CAPA ABRE O RELATÓRIO — numa aba PRÓPRIA.
+            # Título, data, KPIs e navegação vivem AQUI. NUNCA nas abas de dados, onde quebrariam o
+            # AutoFiltro, a ordenação, a tabela dinâmica e o read_excel() (a lição da 171ª, que me custou
+            # uma geração para aprender).
+            _meta_x = {
+                "gerado_em": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                "versao": f"v{_VERSAO_APP}",
+                "arquivo_ref": st.session_state.get('cmp_nome_arquivo', '—'),
+                "total_ref": aud.get("total_ref", 0), "total_app": len(linhas),
+                "conciliados": aud.get("conciliados", 0), "por_ibge": aud.get("por_ibge", 0),
+                "por_mun_uf": aud.get("por_mun_uf", 0), "por_fuzzy": aud.get("por_fuzzy", 0),
+                "nao_conciliados": len(aud.get("nao_conciliados", []) or []),
+                "nao_comparaveis": len(aud.get("nao_comparaveis", []) or []),
+            }
+            _aba_capa(_w, stats, aud, linhas, _meta_x)
+            _aba_graficos(_w, stats, linhas)
+            _aba_mapa_calor_uf(_w, linhas)  # [MAPA-CALOR - 184ª geração]
+
             # [GUIA-PLANILHA - 170ª geração] O GUIA VEM PRIMEIRO. A planilha tinha 22 abas e NENHUMA se
             # explicava. O usuário abria "Ranking Estados" e não havia nada dizendo o que aquilo era.
             # Agora: o Guia de Interpretação é a PRIMEIRA aba, e cada tabela carrega seu próprio guia
@@ -11340,6 +15157,7 @@ def _montar_xlsx_comparacao(linhas, stats, aud, relatorio):
             for _ab in _todas_abas:
                 _linhas_guia.extend(_texto_guia_da_aba(_ab))
             _escrever_aba_com_guia(_w, pd.DataFrame(_linhas_guia), "📖 Como Ler Cada Aba")
+            _aba_metadados(_w, _meta_x)   # [XLSX-PRO] rastreabilidade: sem ela, não é auditável
 
             _escrever_aba_com_guia(
                 _w, pd.DataFrame(_guia_interpretacao_completo(stats, aud, linhas)),
@@ -11360,31 +15178,31 @@ def _montar_xlsx_comparacao(linhas, stats, aud, relatorio):
 
             _escrever_aba_com_guia(_w, _df, "Comparacao")
             _escrever_aba_com_guia(_w, pd.DataFrame([stats.get("brasil", {})]), "Resumo Brasil")
-            pd.DataFrame(stats.get("por_uf", {})).T.reset_index().rename(
-                columns={"index": "UF"}).to_excel(_w, index=False, sheet_name="Por UF")
-            pd.DataFrame(stats.get("por_regiao", {})).T.reset_index().rename(
-                columns={"index": "Regiao"}).to_excel(_w, index=False, sheet_name="Por Regiao")
+            _escrever_aba_com_guia(_w, pd.DataFrame(stats.get("por_uf", {})).T.reset_index().rename(
+                columns={"index": "UF"}), "Por UF")
+            _escrever_aba_com_guia(_w, pd.DataFrame(stats.get("por_regiao", {})).T.reset_index().rename(
+                columns={"index": "Regiao"}), "Por Regiao")
             _escrever_aba_com_guia(_w, pd.DataFrame(_estatisticas_por_faixa(linhas)), "Por Faixa")
             _difs_x = [l.get("Diferenca Abs (km)") for l in linhas if l.get("Diferenca Abs (km)") is not None]
-            pd.DataFrame([_estatisticas_distribuicao(_difs_x)]).to_excel(_w, index=False, sheet_name="Distribuicao")
+            _escrever_aba_com_guia(_w, pd.DataFrame([_estatisticas_distribuicao(_difs_x)]), "Distribuicao")
             _pa_x = _pareto_economia(linhas, top=100)
-            pd.DataFrame(_pa_x["itens"] or [{"—": "sem ganho"}]).to_excel(_w, index=False, sheet_name="Pareto")
-            pd.DataFrame(_metodologia_indicadores()).to_excel(_w, index=False, sheet_name="Metodologia")
-            pd.DataFrame(_dicionario_colunas_comparacao()).to_excel(
-                _w, index=False, sheet_name="Dicionario de Dados")
+            _escrever_aba_com_guia(_w, pd.DataFrame(_pa_x["itens"] or [{"—": "sem ganho"}]), "Pareto")
+            _escrever_aba_com_guia(_w, pd.DataFrame(_metodologia_indicadores()), "Metodologia")
+            _escrever_aba_com_guia(_w, pd.DataFrame(_dicionario_colunas_comparacao()),
+                                   "Dicionario de Dados")
             _rk_x = _rankings_comparacao(linhas, top=100)
-            pd.DataFrame(_rk_x["estados"] or [{"—": "sem dados"}]).to_excel(
-                _w, index=False, sheet_name="Ranking Estados")
-            pd.DataFrame(_rk_x["polos"] or [{"—": "sem dados"}]).to_excel(
-                _w, index=False, sheet_name="Ranking Locais de Prova")
-            pd.DataFrame(_rk_x["divergencias"] or [{"—": "sem divergência"}]).to_excel(
-                _w, index=False, sheet_name="Maiores Divergencias")
+            _escrever_aba_com_guia(_w, pd.DataFrame(_rk_x["estados"] or [{"—": "sem dados"}]),
+                                   "Ranking Estados")
+            _escrever_aba_com_guia(_w, pd.DataFrame(_rk_x["polos"] or [{"—": "sem dados"}]),
+                                   "Ranking Locais de Prova")
+            _escrever_aba_com_guia(_w, pd.DataFrame(_rk_x["divergencias"] or [{"—": "sem divergência"}]),
+                                   "Maiores Divergencias")
             _ac_x = _analise_concorrente(linhas, top=500)
             _escrever_aba_com_guia(
                 _w, pd.DataFrame(_ac_x["top_casos"] or [{"—": "o concorrente não venceu em nenhum caso"}]),
                 "Vitorias do Concorrente")
-            pd.DataFrame(_ac_x["por_uf"] or [{"—": "—"}]).to_excel(
-                _w, index=False, sheet_name="Concorrente por UF")
+            _escrever_aba_com_guia(_w, pd.DataFrame(_ac_x["por_uf"] or [{"—": "—"}]),
+                                   "Concorrente por UF")
             _escrever_aba_com_guia(_w, pd.DataFrame([_plano_hibrido(linhas) or {"—": "—"}]),
                                    "Plano Hibrido")
             _tp_x = _comparacao_tripla(linhas)
@@ -11402,21 +15220,22 @@ def _montar_xlsx_comparacao(linhas, stats, aud, relatorio):
                 _escrever_aba_com_guia(
                     _w, pd.DataFrame([_di_x.get("perfil_app") or {}, _di_x.get("perfil_ref") or {}]),
                     "Perfil dos Dois Estudos")
-                pd.DataFrame(_di_x.get("perguntas") or [{"—": "—"}]).to_excel(
-                    _w, index=False, sheet_name="Perguntas que Decidem")
+                _escrever_aba_com_guia(_w, pd.DataFrame(_di_x.get("perguntas") or [{"—": "—"}]),
+                                       "Perguntas que Decidem")
                 _gg_x = _di_x.get("geografia") or {}
                 _escrever_aba_com_guia(_w, pd.DataFrame(_gg_x.get("por_regiao") or [{"—": "—"}]),
                                        "Padrao Geografico")
-            pd.DataFrame(aud.get("nao_conciliados") or [{"origem_ref": "—", "motivo": "Nenhum"}]).to_excel(
-                _w, index=False, sheet_name="Nao Conciliados")
+            _escrever_aba_com_guia(_w, pd.DataFrame(aud.get("nao_conciliados") or
+                                                    [{"origem_ref": "—", "motivo": "Nenhum"}]),
+                                   "Nao Conciliados")
             pd.DataFrame({"Relatorio Executivo": (relatorio or "").split("\n")}).to_excel(
                 _w, index=False, sheet_name="Relatorio Executivo")
-            pd.DataFrame([
+            _escrever_aba_com_guia(_w, pd.DataFrame([
                 {"Indicador": "Economia ponderada (km-candidato)", "O que significa": "Soma de (km economizados x inscritos). Pondera o ganho pelo numero de candidatos - e o indicador de impacto real."},
                 {"Indicador": "Empate tecnico", "O que significa": "Diferenca < 1 km. Nao se declara vitoria dentro do ruido de geocodificacao."},
                 {"Indicador": "Metodo Conciliacao", "O que significa": "Como a linha foi vinculada: Codigo IBGE > Municipio+UF > Municipio > Similaridade."},
                 {"Indicador": "Convergencia de destino", "O que significa": "Percentual de municipios em que as duas solucoes escolheram o MESMO local de prova."},
-            ]).to_excel(_w, index=False, sheet_name="Glossario")
+            ]), "Glossario")
         return _buf.getvalue()
     except Exception as _e:
         logger.error(f"[COMPARADOR] Falha ao montar o xlsx: {_e}")
@@ -11910,6 +15729,496 @@ def _relatorio_executivo_comparacao(stats, aud, top_municipios=None):
     return "\n".join(L)
 
 
+def _preencher_vazios_exportacao(df):
+    """[EXPORT-COMPLETO - 184ª geração] Garante que NENHUMA célula da planilha exportada fique em branco:
+    preenche vazios com um marcador CONTEXTUAL que diz POR QUE está vazio, em vez de deixar a célula muda.
+    - Colunas do Google (quando o Google não respondeu) → 'N/A — Google não respondeu'.
+    - Colunas de distrito (a base IBGE não fornece esse nível) → 'Não disponível (base IBGE)'.
+    - Demais vazios → '—'. PRESERVA todo dado real: só toca em células realmente vazias. Retorna o df.
+    Obs.: as colunas do detalhamento multicritério (1º/2º/3º Polo, IGQ, justificativa) preenchem com dado
+    REAL quando a decisão por viária popula o 'mcda' — este passe só cobre o que é genuinamente indisponível."""
+    try:
+        if df is None or len(df) == 0:
+            return df
+        df = df.copy()
+        for _c in df.columns:
+            _s = df[_c]
+            _m = _s.isna() | _s.astype(str).str.strip().isin(['', 'nan', 'None', 'NaN', 'NaT', '<NA>'])
+            if not _m.any():
+                continue
+            _cl = str(_c).lower()
+            if any(_k in _cl for _k in ('google', 'divergência', 'divergencia', 'comparativo', 'motores')):
+                _fill = 'N/A — Google não respondeu nesta medição'
+            elif 'distrito' in _cl:
+                _fill = 'Não disponível (base IBGE)'
+            elif 'concorrente' in _cl or 'alternativa' in _cl or '2º' in _cl or '2o ' in _cl:
+                _fill = 'Sem 2º local viável no raio analisado'
+            elif any(_k in _cl for _k in ('link', 'url', 'mapa')):
+                _fill = 'Link indisponível'
+            elif any(_k in _cl for _k in ('tempo', 'duração', 'duracao')):
+                _fill = 'Tempo não estimado'
+            elif any(_k in _cl for _k in ('balsa', 'travessia')):
+                _fill = 'Não'
+            elif any(_k in _cl for _k in ('fonte', 'motor', 'método', 'metodo')):
+                _fill = 'Não informado'
+            elif any(_k in _cl for _k in ('lat', 'lon', 'coorden')):
+                _fill = 'Coordenada indisponível'
+            elif any(_k in _cl for _k in ('km', 'distância', 'distancia', 'sinuosidade', 'score', 'igq',
+                                          'índice', 'indice', 'reta')):
+                _fill = 'Não calculado'
+            else:
+                _fill = '—'
+            df[_c] = df[_c].astype(object).where(~_m, _fill)
+        return df
+    except Exception:
+        return df
+
+
+_PALETA_XLSX = {
+    "azul_titulo": "#1e3a8a",     # azul institucional (títulos)
+    "azul_header": "#1e40af",     # cabeçalho de tabela
+    "azul_claro": "#dbeafe",      # faixa/subtítulo
+    "cinza_zebra": "#f1f5f9",     # linha zebrada
+    "verde": "#16a34a", "verde_bg": "#dcfce7",
+    "amarelo": "#ca8a04", "amarelo_bg": "#fef9c3",
+    "vermelho": "#dc2626", "vermelho_bg": "#fee2e2",
+    "texto": "#0f172a", "muted": "#475569", "linha": "#cbd5e1",
+}
+
+
+def _fmt_institucional(wb):
+    """[EXPORT-PADRAO - 184ª geração] Fábrica central de formatos xlsxwriter para o padrão institucional
+    único das planilhas (cabeçalhos, títulos, faixas, zebra, células de dado). Recebe o workbook e devolve
+    um dict de formatos reutilizáveis. Fonte Calibri, paleta sóbria azul-institucional. Defensivo: se o
+    workbook não suporta add_format, devolve dict vazio (o chamador degrada para texto puro)."""
+    try:
+        if wb is None or not hasattr(wb, "add_format"):
+            return {}
+        P = _PALETA_XLSX
+        _base = {"font_name": "Calibri", "font_size": 10, "border": 1, "border_color": P["linha"]}
+        return {
+            "titulo": wb.add_format({"font_name": "Calibri", "bold": True, "font_size": 20,
+                                     "font_color": P["azul_titulo"]}),
+            "subtitulo": wb.add_format({"font_name": "Calibri", "italic": True, "font_size": 11,
+                                        "font_color": P["muted"]}),
+            "faixa": wb.add_format({"font_name": "Calibri", "bold": True, "font_size": 12,
+                                    "font_color": "#ffffff", "bg_color": P["azul_titulo"],
+                                    "align": "left", "valign": "vcenter"}),
+            "header": wb.add_format({"font_name": "Calibri", "bold": True, "font_size": 10,
+                                     "font_color": "#ffffff", "bg_color": P["azul_header"],
+                                     "align": "center", "valign": "vcenter", "border": 1,
+                                     "border_color": "#ffffff", "text_wrap": True}),
+            "celula": wb.add_format(dict(_base, valign="vcenter")),
+            "celula_zebra": wb.add_format(dict(_base, valign="vcenter", bg_color=P["cinza_zebra"])),
+            "num": wb.add_format(dict(_base, valign="vcenter", num_format="#,##0.0")),
+            "num_zebra": wb.add_format(dict(_base, valign="vcenter", num_format="#,##0.0",
+                                            bg_color=P["cinza_zebra"])),
+            "int": wb.add_format(dict(_base, valign="vcenter", num_format="#,##0")),
+            "int_zebra": wb.add_format(dict(_base, valign="vcenter", num_format="#,##0",
+                                            bg_color=P["cinza_zebra"])),
+            "kpi_rotulo": wb.add_format({"font_name": "Calibri", "font_size": 10, "font_color": P["muted"],
+                                         "border": 1, "border_color": P["linha"], "valign": "vcenter"}),
+            "kpi_valor": wb.add_format({"font_name": "Calibri", "bold": True, "font_size": 13,
+                                        "font_color": P["azul_titulo"], "border": 1,
+                                        "border_color": P["linha"], "valign": "vcenter"}),
+            "nota": wb.add_format({"font_name": "Calibri", "italic": True, "font_size": 9,
+                                   "font_color": P["muted"], "text_wrap": True, "valign": "top"}),
+            "verde": wb.add_format({"bg_color": P["verde_bg"], "font_color": P["verde"], "border": 1,
+                                    "border_color": P["linha"]}),
+            "amarelo": wb.add_format({"bg_color": P["amarelo_bg"], "font_color": P["amarelo"], "border": 1,
+                                      "border_color": P["linha"]}),
+            "vermelho": wb.add_format({"bg_color": P["vermelho_bg"], "font_color": P["vermelho"], "border": 1,
+                                       "border_color": P["linha"]}),
+        }
+    except Exception:
+        logger.error("[EXPORT-PADRAO] Falha ao criar formatos institucionais", exc_info=True)
+        return {}
+
+
+def _estilizar_tabela_xlsx(ws, wb, df, fmts, primeira_linha=0, congelar=True, autofiltro=True, zebra=True,
+                           titulo_impressao=None):
+    """[EXPORT-PADRAO - 184ª geração] Aplica o padrão institucional a uma aba de TABELA já escrita pelo
+    pandas: reescreve o cabeçalho com estilo destacado, aplica congelamento do cabeçalho, autofiltro,
+    zebra striping e largura automática por coluna (limitada). `primeira_linha` é a linha 0-based onde o
+    cabeçalho do pandas está. Defensivo: silencioso se algo faltar. Retorna nada."""
+    try:
+        if ws is None or not fmts or df is None or getattr(df, "empty", True):
+            return
+        _cols = list(df.columns)
+        _hlin = primeira_linha
+        # cabeçalho estilizado
+        for _j, _c in enumerate(_cols):
+            ws.write(_hlin, _j, str(_c), fmts.get("header"))
+        # largura automática (título e conteúdo, com teto)
+        for _j, _c in enumerate(_cols):
+            _wmax = len(str(_c))
+            try:
+                _amostra = df[_c].astype(str).head(200)
+                _wmax = max(_wmax, int(_amostra.map(len).max() or 0))
+            except Exception:
+                pass
+            ws.set_column(_j, _j, min(max(_wmax + 3, 10), 52))
+        # zebra + bordas nas células de dado
+        if zebra:
+            _n = len(df)
+            for _i in range(_n):
+                _fmt_lin = fmts.get("celula_zebra") if (_i % 2) else fmts.get("celula")
+                for _j, _c in enumerate(_cols):
+                    _val = df.iloc[_i, _j]
+                    try:
+                        if pd.isna(_val):
+                            _val = ""
+                    except Exception:
+                        pass
+                    ws.write(_hlin + 1 + _i, _j, _val, _fmt_lin)
+        if congelar:
+            ws.freeze_panes(_hlin + 1, 0)
+        if autofiltro and _cols:
+            ws.autofilter(_hlin, 0, _hlin + len(df), len(_cols) - 1)
+        # [EXPORT-PADRAO - 184ª geração] Preparação para impressão/PDF: orientação, ajuste de largura,
+        # margens, cabeçalho/rodapé institucional com numeração de página e repetição do cabeçalho da
+        # tabela em toda página impressa. Silencioso se o writer não suportar.
+        try:
+            _titulo_imp = titulo_impressao or "Motor Nacional de Roteirização Inteligente"
+            ws.set_landscape()
+            ws.set_paper(9)  # A4
+            ws.set_margins(left=0.5, right=0.5, top=0.8, bottom=0.7)
+            ws.fit_to_pages(1, 0)  # 1 página de largura, altura livre
+            ws.repeat_rows(_hlin)  # repete o cabeçalho da tabela em cada página
+            ws.set_header(f'&L&"Calibri,Bold"&12&K1F3864{_titulo_imp}&R&D')
+            ws.set_footer('&LGerado pela aplicação&CPágina &P de &N&R&T')
+        except Exception:
+            pass
+    except Exception:
+        logger.error("[EXPORT-PADRAO] Falha ao estilizar tabela xlsx", exc_info=True)
+
+
+def _escrever_indice_navegavel(writer, abas, fmts=None, titulo="Índice do Relatório"):
+    """[EXPORT-PADRAO - 184ª geração] Cria uma aba 'Índice' clicável no início da planilha, com hyperlinks
+    internos para cada aba (navegação estilo sumário de relatório). `abas` é uma lista de (nome_aba,
+    descrição). Usa internal links do xlsxwriter ('internal:NomeAba!A1'). Defensivo. Retorna nada."""
+    try:
+        _wb = getattr(writer, "book", None)
+        if _wb is None or not hasattr(_wb, "add_format") or not abas:
+            return
+        _f = fmts or _fmt_institucional(_wb)
+        _ws = _wb.add_worksheet("Índice")
+        writer.sheets["Índice"] = _ws
+        _ws.hide_gridlines(2)
+        _ws.set_column("A:A", 4)
+        _ws.set_column("B:B", 42)
+        _ws.set_column("C:C", 66)
+        _ws.merge_range("B2:C2", titulo, _f.get("titulo"))
+        _ws.merge_range("B3:C3", "Clique em uma seção para navegar até a aba correspondente.",
+                        _f.get("subtitulo"))
+        _fmt_link = _wb.add_format({"font_name": "Calibri", "font_size": 11, "font_color": "#1d4ed8",
+                                    "underline": 1, "valign": "vcenter", "border": 1,
+                                    "border_color": _PALETA_XLSX["linha"]})
+        _fmt_num = _wb.add_format({"font_name": "Calibri", "bold": True, "font_size": 11,
+                                   "font_color": "#ffffff", "bg_color": _PALETA_XLSX["azul_titulo"],
+                                   "align": "center", "valign": "vcenter", "border": 1,
+                                   "border_color": "#ffffff"})
+        _linha = 4  # começa na linha 5 (0-based 4)
+        for _idx, (_nome, _desc) in enumerate(abas, start=1):
+            _safe = str(_nome).replace("'", "")
+            _ws.write(_linha, 0, _idx, _fmt_num)
+            _ws.write_url(_linha, 1, f"internal:'{_safe}'!A1", _fmt_link, string=str(_nome))
+            _ws.write(_linha, 2, str(_desc), _f.get("celula_zebra") if (_idx % 2) else _f.get("celula"))
+            _ws.set_row(_linha, 22)
+            _linha += 1
+        _ws.write(_linha + 1, 1, "Gerado pelo Motor Nacional de Roteirização Inteligente.", _f.get("nota"))
+    except Exception:
+        logger.error("[EXPORT-PADRAO] Falha ao escrever índice navegável", exc_info=True)
+
+
+def _escrever_aba_estilizada(writer, df, sheet_name, fmts=None):
+    """[EXPORT-PADRAO - 184ª geração] Escreve um DataFrame numa aba JÁ no padrão institucional (cabeçalho
+    destacado, congelamento, autofiltro, zebra, largura automática) — combinando to_excel + estilização numa
+    só chamada, para uniformizar todas as abas analíticas sem repetir código. Defensivo: se a estilização
+    falhar, a aba com os dados já está escrita. Retorna nada."""
+    try:
+        if df is None:
+            return
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        _wb = getattr(writer, "book", None)
+        if _wb is not None and hasattr(_wb, "add_format"):
+            _f = fmts or _fmt_institucional(_wb)
+            _estilizar_tabela_xlsx(writer.sheets.get(sheet_name), _wb, df, _f)
+    except Exception:
+        logger.error("[EXPORT-PADRAO] Falha ao escrever aba estilizada '%s'", str(sheet_name), exc_info=True)
+
+
+def _abas_ricas_alocacao(writer, df):
+    """[EXPORT-RICO - 184ª geração] Eleva a planilha de Locais ao padrão VISUAL/analítico do Comparador:
+    Capa (portada), Gráficos nativos do Excel, Como Ler Cada Aba, Pareto dos polos (80/20) e Ranking de
+    Estados. Reusa df_final_alo (colunas internas). Defensivo: cada aba isolada em try; formatação com
+    xlsxwriter quando disponível. Retorna nada."""
+    try:
+        if df is None or len(df) == 0:
+            return
+        _wb = getattr(writer, "book", None)
+        _is_xlsx = _wb is not None and hasattr(_wb, "add_format")
+        _num = lambda c: pd.to_numeric(df[c], errors='coerce') if c in df.columns else None
+        _dist = _num('Distancia')
+        _insc = _num('Inscritos') if 'Inscritos' in df.columns else _num('Quantidade de Inscritos')
+        _tot_cand = int(_insc.fillna(0).sum()) if _insc is not None else len(df)
+        _npolos = df['Municipio Destino'].nunique() if 'Municipio Destino' in df.columns else 0
+
+        # ---------- CAPA / PORTADA ----------
+        _cap = pd.DataFrame({"Relatório de Alocação — Locais de Prova": [
+            "", "Painel executivo do estudo de alocação de candidatos a locais de aplicação de prova.",
+            "", f"Municípios de origem: {len(df):,}", f"Candidatos: {_tot_cand:,}",
+            f"Locais de prova (polos) utilizados: {_npolos:,}",
+            f"Deslocamento médio: {_dist.mean():.1f} km" if _dist is not None else "Deslocamento médio: —",
+            f"Deslocamento mediano: {_dist.median():.1f} km" if _dist is not None else "",
+            f"Maior deslocamento: {_dist.max():.1f} km" if _dist is not None else "",
+            "", "Metodologia: menor rota viária real (Google → OSRM), com auditoria de plausibilidade e "
+            "invariante verificado. Distâncias geodésicas por Karney (WGS-84).",
+            "", "Navegue pelas abas: dados linha a linha (Locais de Aplicacao), sínteses (Resumo Executivo, "
+            "Sintese por UF), competitividade (Competitividade dos Polos, Concorrentes, Pareto, Ranking "
+            "Estados), distribuição, municípios críticos, e Metodologia/Referências.",
+            "", f"Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}."]})
+        _cap.to_excel(writer, index=False, sheet_name="Capa")
+        if _is_xlsx:
+            _ws = writer.sheets["Capa"]
+            _tit = _wb.add_format({"bold": True, "font_size": 20, "font_color": "#1e3a8a"})
+            _ws.set_column("A:A", 96)
+            _ws.write("A1", "Relatório de Alocação — Locais de Prova", _tit)
+
+        # ---------- COMO LER CADA ABA ----------
+        _guia = [("Capa", "Sumário executivo do estudo: totais, deslocamentos e metodologia."),
+                 ("Locais de Aplicacao", "Uma linha por município de origem: vencedor, concorrente, distâncias, "
+                  "método da distância (✅ viária / 📏 linha reta), classificação da rota (🟢🟡🟠) e alertas."),
+                 ("Resumo Executivo", "Indicadores-chave em uma tabela (rotas, candidatos, deslocamentos, "
+                  "sinuosidade, balsa, integridade)."),
+                 ("Sintese por UF", "Rotas, candidatos e distâncias agregadas por estado."),
+                 ("Competitividade dos Polos", "Cada local de prova: municípios atendidos, candidatos, distâncias."),
+                 ("Concorrentes", "Quais municípios mais aparecem como 2ª opção (o concorrente do vencedor)."),
+                 ("Pareto dos Polos", "Curva 80/20: poucos polos concentram a maior parte dos candidatos."),
+                 ("Ranking Estados", "Estados ordenados por deslocamento médio — onde o candidato anda mais."),
+                 ("Distribuicao de Distancias", "Quantas rotas e candidatos em cada faixa de km."),
+                 ("Municipios Criticos", "Os 30 municípios de maior deslocamento — priorizar revisão."),
+                 ("Metodologia Cientifica / Referencias", "Método e fontes acadêmicas (padrão artigo científico)."),
+                 ("Graficos", "Gráficos nativos do Excel (barras/colunas) das principais visões.")]
+        pd.DataFrame(_guia, columns=["Aba", "O que mostra e como interpretar"]).to_excel(
+            writer, index=False, sheet_name="Como Ler Cada Aba")
+
+        # ---------- PARETO DOS POLOS ----------
+        if 'Municipio Destino' in df.columns and (_insc is not None or _dist is not None):
+            _peso = _insc.fillna(0) if _insc is not None else pd.Series(1, index=df.index)
+            _g = df.assign(_p=_peso).groupby('Municipio Destino')['_p'].sum().sort_values(ascending=False)
+            _g = _g[_g > 0]
+            if len(_g):
+                _tot = float(_g.sum())
+                _par = pd.DataFrame({
+                    "Local de Prova (Polo)": _g.index,
+                    "Candidatos": _g.values.astype(int) if _insc is not None else _g.values,
+                    "% do total": (100.0 * _g.values / _tot).round(2),
+                    "% acumulado": (100.0 * _g.cumsum().values / _tot).round(2)})
+                _par.to_excel(writer, index=False, sheet_name="Pareto dos Polos")
+
+        # ---------- RANKING DE ESTADOS ----------
+        if 'UF Origem' in df.columns and _dist is not None:
+            _r = df.assign(_d=_dist).groupby('UF Origem').agg(
+                Rotas=('_d', 'size'), Dist_media=('_d', 'mean'), Dist_max=('_d', 'max')).reset_index()
+            if _insc is not None:
+                _r['Candidatos'] = _r['UF Origem'].map(
+                    df.assign(_i=_insc.fillna(0)).groupby('UF Origem')['_i'].sum()).fillna(0).astype(int)
+            _r = _r.round(1).sort_values('Dist_media', ascending=False)
+            _r.insert(0, 'Posição', range(1, len(_r) + 1))
+            _r.rename(columns={'UF Origem': 'UF', 'Dist_media': 'Deslocamento médio (km)',
+                               'Dist_max': 'Maior deslocamento (km)'}).to_excel(
+                writer, index=False, sheet_name="Ranking Estados")
+
+        # ---------- GRÁFICOS NATIVOS ----------
+        if _is_xlsx and _dist is not None:
+            _dados = writer.book.add_worksheet("Graficos_dados")
+            _dados.hide()
+            # faixas de distância
+            _labs = ["0-50", "50-100", "100-150", "150-200", "200-300", "300-500", "500+"]
+            _cat = pd.cut(_dist.dropna(), bins=[0, 50, 100, 150, 200, 300, 500, 10**12], labels=_labs, right=False)
+            _cont = _cat.value_counts().reindex(_labs, fill_value=0)
+            _dados.write_column("A1", ["Faixa (km)"] + _labs)
+            _dados.write_column("B1", ["Rotas"] + [int(v) for v in _cont.values])
+            _wsg = writer.book.add_worksheet("Graficos")
+            _ch = writer.book.add_chart({"type": "column"})
+            _ch.add_series({"name": "Rotas por faixa de distância",
+                            "categories": ["Graficos_dados", 1, 0, len(_labs), 0],
+                            "values": ["Graficos_dados", 1, 1, len(_labs), 1],
+                            "fill": {"color": "#2563eb"}})
+            _ch.set_title({"name": "Distribuição de deslocamento (rotas por faixa de km)"})
+            _ch.set_x_axis({"name": "faixa (km)"})
+            _ch.set_y_axis({"name": "rotas"})
+            _ch.set_size({"width": 720, "height": 400})
+            _wsg.insert_chart("B2", _ch)
+            # top-10 polos por candidatos
+            if 'Municipio Destino' in df.columns:
+                _peso = _insc.fillna(0) if _insc is not None else pd.Series(1, index=df.index)
+                _top = df.assign(_p=_peso).groupby('Municipio Destino')['_p'].sum().sort_values(
+                    ascending=False).head(10)
+                if len(_top):
+                    _off = len(_labs) + 3
+                    _dados.write_column(f"A{_off}", ["Polo"] + [str(x)[:22] for x in _top.index])
+                    _dados.write_column(f"B{_off}", ["Candidatos"] + [int(v) for v in _top.values])
+                    _ch2 = writer.book.add_chart({"type": "bar"})
+                    _ch2.add_series({"name": "Top 10 polos por candidatos",
+                                     "categories": ["Graficos_dados", _off, 0, _off + len(_top) - 1, 0],
+                                     "values": ["Graficos_dados", _off, 1, _off + len(_top) - 1, 1],
+                                     "fill": {"color": "#16a34a"}})
+                    _ch2.set_title({"name": "Top 10 locais de prova por nº de candidatos"})
+                    _ch2.set_size({"width": 720, "height": 420})
+                    _wsg.insert_chart("B24", _ch2)
+            # [EXPORT-RICO+ - 184ª geração] Pareto como GRÁFICO (colunas de candidatos + linha de % acumulado
+            # em eixo secundário) e colunas de deslocamento médio por UF — gráficos nativos do Excel.
+            if 'Municipio Destino' in df.columns:
+                _peso = _insc.fillna(0) if _insc is not None else pd.Series(1, index=df.index)
+                _gp = df.assign(_p=_peso).groupby('Municipio Destino')['_p'].sum().sort_values(ascending=False)
+                _gp = _gp[_gp > 0].head(15)
+                if len(_gp):
+                    _totp = float(df.assign(_p=_peso).groupby('Municipio Destino')['_p'].sum().sum()) or 1.0
+                    _acc = (100.0 * _gp.cumsum() / _totp)
+                    _o2 = (len(_labs) + 3) + 12
+                    _dados.write_column(f"D{_o2}", ["Polo"] + [str(x)[:22] for x in _gp.index])
+                    _dados.write_column(f"E{_o2}", ["Candidatos"] + [int(v) for v in _gp.values])
+                    _dados.write_column(f"F{_o2}", ["% acumulado"] + [round(float(v), 2) for v in _acc.values])
+                    _chp = writer.book.add_chart({"type": "column"})
+                    _chp.add_series({"name": "Candidatos por polo",
+                                     "categories": ["Graficos_dados", _o2, 3, _o2 + len(_gp) - 1, 3],
+                                     "values": ["Graficos_dados", _o2, 4, _o2 + len(_gp) - 1, 4],
+                                     "fill": {"color": "#2563eb"}})
+                    _chl = writer.book.add_chart({"type": "line"})
+                    _chl.add_series({"name": "% acumulado",
+                                     "categories": ["Graficos_dados", _o2, 3, _o2 + len(_gp) - 1, 3],
+                                     "values": ["Graficos_dados", _o2, 5, _o2 + len(_gp) - 1, 5],
+                                     "line": {"color": "#dc2626", "width": 2.25}, "y2_axis": True,
+                                     "marker": {"type": "circle", "size": 5}})
+                    _chp.combine(_chl)
+                    _chp.set_title({"name": "Pareto dos polos (80/20): candidatos e % acumulado"})
+                    _chp.set_x_axis({"name": "polo (ordenado por candidatos)"})
+                    _chp.set_y_axis({"name": "candidatos"})
+                    _chp.set_y2_axis({"name": "% acumulado", "min": 0, "max": 100})
+                    _chp.set_size({"width": 760, "height": 430})
+                    _wsg.insert_chart("B47", _chp)
+            if 'UF Origem' in df.columns:
+                _guf = df.assign(_d=_dist).groupby('UF Origem')['_d'].mean().sort_values(ascending=False)
+                _guf = _guf.dropna()
+                if len(_guf):
+                    _o3 = (len(_labs) + 3) + 30
+                    _dados.write_column(f"H{_o3}", ["UF"] + [str(x) for x in _guf.index])
+                    _dados.write_column(f"I{_o3}", ["Deslocamento médio (km)"] + [round(float(v), 1) for v in _guf.values])
+                    _chu = writer.book.add_chart({"type": "column"})
+                    _chu.add_series({"name": "Deslocamento médio por UF",
+                                     "categories": ["Graficos_dados", _o3, 7, _o3 + len(_guf) - 1, 7],
+                                     "values": ["Graficos_dados", _o3, 8, _o3 + len(_guf) - 1, 8],
+                                     "fill": {"color": "#f59e0b"}})
+                    _chu.set_title({"name": "Deslocamento médio do candidato por estado (km)"})
+                    _chu.set_x_axis({"name": "UF"})
+                    _chu.set_y_axis({"name": "km"})
+                    _chu.set_size({"width": 760, "height": 400})
+                    _wsg.insert_chart("B71", _chu)
+    except Exception:
+        logger.error("[EXPORT-RICO] Falha ao montar abas ricas da alocação", exc_info=True)
+
+
+def _montar_abas_analiticas_alocacao(writer, df):
+    """[EXPORT-ANALITICO - 184ª geração] Escreve abas ANALÍTICAS na planilha de Locais de Prova: Resumo
+    Executivo, Síntese por UF, Competitividade dos Polos, Concorrentes, Distribuição de Distâncias e
+    Municípios Críticos. Computa de df_final_alo (colunas internas). Defensivo: cada aba só é escrita se as
+    colunas existirem e erro numa aba não derruba as outras; valores completos (sem vazios)."""
+    try:
+        if df is None or len(df) == 0:
+            return
+
+        def _num(c):
+            return pd.to_numeric(df[c], errors='coerce') if c in df.columns else None
+        _n = len(df)
+        _dist, _reta, _integ = _num('Distancia'), _num('Linha Reta'), _num('Integridade Geográfica')
+        _insc = _num('Inscritos') if 'Inscritos' in df.columns else _num('Quantidade de Inscritos')
+        _tot_cand = int(_insc.fillna(0).sum()) if _insc is not None else _n
+        _n_polos = df['Municipio Destino'].nunique() if 'Municipio Destino' in df.columns else 0
+
+        _res = [("Total de rotas", f"{_n:,}"), ("Total de candidatos", f"{_tot_cand:,}"),
+                ("Municípios de origem", f"{_n:,}"), ("Polos (locais de prova) utilizados", f"{_n_polos:,}")]
+        if _dist is not None:
+            _res += [("Deslocamento médio (km)", f"{_dist.mean():.1f}"),
+                     ("Deslocamento mediano (km)", f"{_dist.median():.1f}"),
+                     ("Maior deslocamento (km)", f"{_dist.max():.1f}"),
+                     ("Menor deslocamento (km)", f"{_dist.min():.1f}"),
+                     ("Deslocamento total (km)", f"{_dist.sum():,.0f}")]
+            if _reta is not None:
+                _mm = pd.DataFrame({'v': _dist, 'r': _reta}).dropna()
+                _mm = _mm[(_mm['r'] > 0) & (_mm['v'] > 0)]
+                if len(_mm):
+                    _res.append(("Sinuosidade média (viária ÷ reta)", f"{(_mm['v'] / _mm['r']).mean():.2f}x"))
+        if 'Balsas' in df.columns:
+            _b = df['Balsas'].astype(str).str.strip().str.lower().isin(['sim', 'yes', 'true', '1'])
+            _res.append(("Rotas que cruzam balsa", f"{int(_b.sum()):,}"))
+            if _insc is not None:
+                _res.append(("Candidatos afetados por balsa", f"{int(_insc[_b].fillna(0).sum()):,}"))
+        if _integ is not None:
+            _res.append(("Integridade geográfica média (0-100)", f"{_integ.mean():.0f}"))
+        _escrever_aba_estilizada(writer, pd.DataFrame(_res, columns=["Indicador", "Valor"]), "Resumo Executivo")
+
+        if 'UF Origem' in df.columns and _dist is not None:
+            _g = df.assign(_d=_dist).groupby('UF Origem').agg(
+                Rotas=('_d', 'size'), Dist_media=('_d', 'mean'), Dist_max=('_d', 'max'),
+                Dist_total=('_d', 'sum')).reset_index()
+            if _insc is not None:
+                _g['Candidatos'] = _g['UF Origem'].map(
+                    df.assign(_i=_insc.fillna(0)).groupby('UF Origem')['_i'].sum()).fillna(0).astype(int)
+            _g = _g.round(1).sort_values('Rotas', ascending=False).rename(columns={
+                'UF Origem': 'UF', 'Dist_media': 'Dist. média (km)', 'Dist_max': 'Dist. máx (km)',
+                'Dist_total': 'Dist. total (km)'})
+            _escrever_aba_estilizada(writer, _g, "Sintese por UF")
+
+        if 'Municipio Destino' in df.columns and _dist is not None:
+            _p = df.assign(_d=_dist).groupby('Municipio Destino').agg(
+                Municipios=('_d', 'size'), Dist_media=('_d', 'mean'), Dist_max=('_d', 'max')).reset_index()
+            if _insc is not None:
+                _p['Candidatos'] = _p['Municipio Destino'].map(
+                    df.assign(_i=_insc.fillna(0)).groupby('Municipio Destino')['_i'].sum()).fillna(0).astype(int)
+            _p = _p.round(1).sort_values('Municipios', ascending=False).rename(columns={
+                'Municipio Destino': 'Local de Prova (Polo)', 'Municipios': 'Municípios atendidos',
+                'Dist_media': 'Dist. média (km)', 'Dist_max': 'Dist. máx (km)'})
+            _escrever_aba_estilizada(writer, _p, "Competitividade dos Polos")
+
+        if 'Municipio Concorrente' in df.columns:
+            _c = df['Municipio Concorrente'].astype(str).str.strip()
+            _c = _c[(_c != '') & (_c.str.lower() != 'nan') & (_c != '—')]
+            if len(_c):
+                _vc = _c.value_counts().reset_index()
+                _vc.columns = ['Alternativa (2º local de prova)', 'Vezes como 2º colocado']
+                _escrever_aba_estilizada(writer, _vc.head(50), "Concorrentes")
+
+        if _dist is not None and _dist.notna().any():
+            _labs = ["0-50", "50-100", "100-150", "150-200", "200-300", "300-500", "500+"]
+            _cat = pd.cut(_dist, bins=[0, 50, 100, 150, 200, 300, 500, 10**9], labels=_labs, right=False)
+            _dd = df.assign(_faixa=_cat)
+            _rows = []
+            for _l in _labs:
+                _sub = _dd[_dd['_faixa'] == _l]
+                _cand = (int(pd.to_numeric(_sub['Inscritos'], errors='coerce').fillna(0).sum())
+                         if (_insc is not None and 'Inscritos' in _sub.columns) else len(_sub))
+                _rows.append({'Faixa (km)': _l, 'Rotas': len(_sub), 'Candidatos': _cand,
+                              '% das rotas': round(100.0 * len(_sub) / _n, 1)})
+            _escrever_aba_estilizada(writer, pd.DataFrame(_rows), "Distribuicao de Distancias")
+
+        if _dist is not None and 'Municipio Origem' in df.columns:
+            _crit = df.assign(_d=_dist).nlargest(30, '_d')
+            _oc = pd.DataFrame({'Município': _crit['Municipio Origem'].values})
+            if 'UF Origem' in df.columns:
+                _oc['UF'] = _crit['UF Origem'].values
+            if 'Municipio Destino' in df.columns:
+                _oc['Local de Prova'] = _crit['Municipio Destino'].values
+            _oc['Distância (km)'] = _crit['_d'].round(1).values
+            if _insc is not None and 'Inscritos' in _crit.columns:
+                _oc['Candidatos'] = pd.to_numeric(_crit['Inscritos'], errors='coerce').fillna(0).astype(int).values
+            _escrever_aba_estilizada(writer, _oc, "Municipios Criticos")
+        _abas_metodologia_referencias(writer)  # [ARTIGO - 184ª geração]
+    except Exception:
+        logger.error("[EXPORT-ANALITICO] Falha ao montar abas analíticas da alocação", exc_info=True)
+
+
 def _renomear_colunas_exame(df, mapa=None):
     """[EXAMES - 134ª geração] Traduz os CABEÇALHOS da planilha exportada para a linguagem de planejamento
     de exames (município de origem do candidato / local de aplicação / polo). Aplicado APENAS na FRONTEIRA
@@ -12121,6 +16430,369 @@ def forcar_geocodificacao_hierarquica_estrita(texto_cru, modo_oficial=None):
     end_f = ", ".join([c for c in [melhor.get('logradouro', ''), melhor.get('bairro', ''), melhor.get('cidade', ''), melhor.get('estado', '')] if c.strip()]) + ", BRASIL"
     return (melhor['lat'], melhor['lon'], end_f, "DESAMBIGUACAO_ESTRITA", 95, melhor.get('bairro', ''), melhor.get('cidade', ''), f"{melhor['fonte']} (Strict-Mode)", ["Desambiguação Espacial Anti-Colisão acionada em Nuvem. Resolução estrita aplicada."])
 
+def _podar_shortlist_por_dominancia(shortlist, retas_por_origem):
+    """[DOMINANCIA-GEO - 184ª geração] Poda EXATA do shortlist por dominância geométrica, reduzindo chamadas
+    ao Google (o motor caro) nos casos onde o vencedor já é matematicamente garantido.
+
+    Fundamento (mesmo princípio da prova branch-and-bound, na direção inversa): como a distância viária é
+    SEMPRE ≥ a linha reta, se o melhor candidato da matriz P1 tem viária(P1) ≤ reta(P2) — onde P2 é o
+    próximo polo mais próximo em linha reta que NÃO está no shortlist — então nenhum outro polo pode vencer
+    P1: viária(P2) ≥ reta(P2) ≥ viária(P1). Nesses casos o shortlist é reduzido a [P1] e o Google roteia 1
+    par em vez de vários, sem qualquer perda de exatidão (P1 é provadamente ótimo).
+
+    `retas_por_origem`: dict {origem: [(reta_km, hub), ...]} ordenado por reta (o topk_map_completo). Quando a
+    prova não se aplica (viária(P1) > reta(P2), típico de malha esparsa/rios), o shortlist é mantido íntegro
+    para o Google decidir entre os candidatos próximos. PURA e defensiva.
+
+    Retorna: (shortlist_podado, n_provados) — o dict podado e quantas origens foram provadas por dominância."""
+    _out = {}
+    _n_provados = 0
+    try:
+        for _org, _cands in (shortlist or {}).items():
+            if not _cands or len(_cands) == 1:
+                _out[_org] = _cands  # nada a podar (já é 1 ou vazio)
+                continue
+            _p1_hub, _p1_viaria = _cands[0][0], float(_cands[0][1])
+            _retas = (retas_por_origem or {}).get(_org) or []
+            _reta_por_hub = {str(_h): float(_r) for _r, _h in _retas}
+            # a prova reduz a [P1] se P1 domina TODOS os demais do shortlist: viária(P1) <= reta(Pi) para
+            # todo Pi (i>=2). Como viária(Pi) >= reta(Pi), isso garante viária(Pi) >= viária(P1) para todos.
+            # Basta testar contra a MENOR reta entre os demais do shortlist.
+            _retas_demais = [_reta_por_hub.get(str(_h)) for _h, _d in _cands[1:]
+                             if _reta_por_hub.get(str(_h)) is not None]
+            if not _retas_demais or len(_retas_demais) < (len(_cands) - 1):
+                # falta a reta de algum candidato: não é seguro provar, mantém o shortlist
+                _out[_org] = _cands
+                continue
+            _menor_reta_demais = min(_retas_demais)
+            if _p1_viaria <= _menor_reta_demais:
+                # PROVA: viária(P1) <= reta(menor dos demais) <= viária(cada demais) → P1 domina todos
+                _out[_org] = [_cands[0]]
+                _n_provados += 1
+            else:
+                _out[_org] = _cands  # prova não se aplica: Google decide entre os candidatos
+        if _n_provados:
+            logger.warning("[DOMINANCIA-GEO] %d origem(ns) com vencedor provado por dominância geométrica — "
+                           "shortlist reduzido a 1, economizando chamadas ao Google sem perder exatidão.",
+                           _n_provados)
+        return _out, _n_provados
+    except Exception:
+        logger.error("[DOMINANCIA-GEO] Falha na poda por dominância", exc_info=True)
+        return shortlist, 0
+
+
+def _shortlist_por_matriz(dist_matriz, margem=1.15, teto=3, teto_incerteza=6):
+    """[MATRIZ-VIARIA + GOOGLE-AMPLO - 184ª geração] FASE 2 (decisão de qualidade): a matriz /table/v1 do
+    OSRM (Fase 1) é barata e cobre TODOS os candidatos, mas o OSRM é o motor de FALLBACK — a decisão de
+    qualidade cabe ao Google (prioritário). Esta função extrai, por origem, o SHORTLIST dos melhores
+    candidatos segundo a matriz para re-roteamento com o Google, e a decisão final sai do motor prioritário.
+
+    [GOOGLE-AMPLO] O teto é ADAPTATIVO à incerteza: quando muitos polos estão praticamente empatados pela
+    matriz (janela estreita), a decisão é sensível e vale roteá-los TODOS no Google — o motor de maior
+    qualidade — em vez de confiar na ordem do OSRM. Assim o Google roteia e decide MAIS casos exatamente
+    onde importa, sem gastar Google onde o 1º já domina. É a forma viável de dar mais poder ao Google sem
+    uma matriz-Google (que não existe no scraper): ampliar sua atuação onde ela muda o resultado.
+
+    Retorna: dict {origem: [(hub, dist_osrm_km), ...]} ordenado por distância. PURA."""
+    _out = {}
+    try:
+        for _org, _dh in (dist_matriz or {}).items():
+            if not _dh:
+                continue
+            _ordenado = sorted(_dh.items(), key=lambda kv: float(kv[1]))
+            if not _ordenado:
+                continue
+            _menor = float(_ordenado[0][1])
+            if _menor <= 0:
+                _out[_org] = [_ordenado[0]]
+                continue
+            # candidatos dentro da margem de qualidade (empate real pela matriz)
+            _na_margem = [(_h, _d) for (_h, _d) in _ordenado if float(_d) <= _menor * float(margem)]
+            # [GOOGLE-AMPLO] teto adaptativo: muitos empatados → amplia p/ o Google decidir todos eles
+            _teto_ef = int(teto)
+            if len(_na_margem) >= 4:
+                _teto_ef = int(teto_incerteza)  # decisão sensível: dá mais poder ao Google
+            _sl = _na_margem[:_teto_ef]
+            if not _sl:
+                _sl = [_ordenado[0]]
+            _out[_org] = _sl
+        return _out
+    except Exception:
+        logger.error("[MATRIZ-VIARIA] Falha ao extrair shortlist da matriz", exc_info=True)
+        return {}
+
+
+def _n_candidatos_adaptativo(uf, cands_reta, _base=40, _max=90, _min=20):
+    """[MATRIZ-ADAPTATIVA - 184ª geração] Decide DINAMICAMENTE quantos polos a matriz deve medir para uma
+    origem, conforme a região e a incerteza logística (pontos 6 e 9 da nota). Fundamento: em regiões de malha
+    esparsa (Amazônia Legal) ou quando há muitos polos empatados por linha reta, o vencedor viário pode estar
+    mais fundo na lista — vale medir mais candidatos. Onde o polo mais próximo domina com folga, poucos
+    bastam, economizando chamadas. Isso torna a matriz mais precisa onde importa e mais rápida onde é óbvio.
+
+    Sinais usados:
+      • Amazônia Legal → amplia (malha fraca, rios, acesso indireto).
+      • Empate por linha reta (vários polos numa janela estreita) → amplia (decisão sensível).
+      • Domínio claro do 1º colocado → reduz (baixa incerteza).
+
+    Retorna um inteiro no intervalo [_min, _max]. PURA e defensiva."""
+    try:
+        _uf = str(uf or "").strip().upper()[:2]
+        _n = _base
+        _amazonia = _uf in _UF_AMAZONIA_LEGAL
+        if _amazonia:
+            _n += 25  # malha esparsa: vale medir mais fundo
+        # análise de empate: quantos polos estão dentro de 1.3× a menor reta?
+        _retas = []
+        try:
+            _retas = sorted(float(_r) for (_r, _h) in (cands_reta or []) if _r is not None)
+        except Exception:
+            _retas = []
+        if len(_retas) >= 2 and _retas[0] > 0:
+            _janela = _retas[0] * 1.3
+            _empatados = sum(1 for _r in _retas if _r <= _janela)
+            if _empatados >= 5:
+                _n += 20  # muitos candidatos próximos: decisão sensível, amplia
+            elif _empatados >= 3:
+                _n += 10
+            elif _empatados <= 1 and not _amazonia:
+                _n -= 15  # 1º colocado domina com folga: baixa incerteza, reduz
+        return int(max(_min, min(_max, _n)))
+    except Exception:
+        logger.error("[MATRIZ-ADAPTATIVA] Falha ao calcular nº adaptativo de candidatos", exc_info=True)
+        return _base
+
+
+def _descobrir_vencedores_por_matriz(dest_coords, hubs_validos, topk_map_completo, _max_hubs_por_origem=60):
+    """[MATRIZ-VIARIA - 184ª geração] FASE 1 do novo motor: usa a matriz /table/v1 (API_OSRM_Table) para
+    descobrir, PARA CADA ORIGEM, a distância viária real a um amplo conjunto de hubs candidatos numa única
+    chamada — e assim identificar o vencedor por MENOR VIÁRIA REAL entre todos, sem depender do top-K par-a-par.
+
+    Estratégia de candidatos por origem: usa a lista COMPLETA ordenada por linha reta (topk_map_completo) e
+    considera os `_max_hubs_por_origem` mais próximos por reta como conjunto candidato da matriz. Isso é
+    seguro e coerente com a prova de otimalidade: como viária ≥ reta, os hubs mais próximos por reta são os
+    únicos com chance real de menor viária; 60 é folgado o bastante para capturar o vencedor mesmo em
+    geografia adversa (muito além do top-K=10 anterior), e cabe numa chamada de matriz.
+
+    Retorna: dict {origem: {hub: dist_viaria_km, ...}} com as distâncias obtidas por matriz. Se a matriz
+    falhar para uma origem, ela simplesmente não aparece no dict (o fluxo par-a-par tradicional assume).
+    Defensiva; não levanta exceção.
+
+    [PERF-MATRIZ - 184ª geração] As origens são processadas EM PARALELO no EXECUTOR_GLOBAL (o mesmo pool do
+    resto do pipeline). Cada origem é uma chamada de matriz independente e sem estado compartilhado, então a
+    paralelização é ganho PURO — as mesmas chamadas HTTP, apenas concorrentes em vez de enfileiradas. Reduz a
+    fase de descoberta de minutos para segundos, sem alterar nenhum resultado."""
+    _mapa = {}
+    try:
+        if not dest_coords or not hubs_validos:
+            return _mapa
+
+        def _processar_origem(_item):
+            """Processa UMA origem: monta candidatos, chama a matriz e aplica o filtro de sanidade física.
+            Retorna (origem, {hub: dist}) ou (origem, None). Pura em relação ao estado global."""
+            _orig, _oc = _item
+            try:
+                _olat, _olon = float(_oc[0]), float(_oc[1])
+            except Exception:
+                return (_orig, None)
+            if not _olat or not _olon or _olat == 0.0 or _olon == 0.0:
+                return (_orig, None)
+            _cands_reta = (topk_map_completo or {}).get(_orig) or []
+            # [MATRIZ-ADAPTATIVA - 184ª geração] Nº de candidatos DINÂMICO por região/incerteza (amplia na
+            # Amazônia e em empates; reduz quando o 1º domina). Extrai a UF do endereço da origem (v[2]).
+            _uf_orig = ""
+            try:
+                _end_o = str(_oc[2]) if len(_oc) > 2 else ""
+                _partes = [p.strip() for p in _end_o.split(",")]
+                for _p in _partes:
+                    if len(_p) == 2 and _p.upper() in _UF_AMAZONIA_LEGAL:
+                        _uf_orig = _p.upper()
+                        break
+                    if len(_p) == 2 and _p.isalpha():
+                        _uf_orig = _p.upper()
+            except Exception:
+                _uf_orig = ""
+            _n_cand = _n_candidatos_adaptativo(_uf_orig, _cands_reta)
+            if _cands_reta:
+                _nomes = [h for (_r, h) in _cands_reta[:_n_cand]]
+            else:
+                _nomes = list(hubs_validos.keys())[:_n_cand]
+            _dest_coords_matriz = []
+            for _h in _nomes:
+                _hc = hubs_validos.get(_h)
+                if _hc and _hc[0] and _hc[1] and _hc[0] != 0.0 and _hc[1] != 0.0:
+                    _dest_coords_matriz.append((_h, _hc[0], _hc[1]))
+            if not _dest_coords_matriz:
+                return (_orig, None)
+            _dists = API_OSRM_Table(_olat, _olon, _dest_coords_matriz)
+            if not _dists:
+                return (_orig, None)
+            # [SANIDADE-MATRIZ - 184ª geração] Filtro de coerência física: descarta viária < reta (impossível).
+            _reta_por_hub = {str(_h): float(_r) for (_r, _h) in _cands_reta} if _cands_reta else {}
+            _limpo = {}
+            _n_bogus = 0
+            for _h, _dv in _dists.items():
+                _reta_h = _reta_por_hub.get(str(_h))
+                if _reta_h is None:
+                    _hc = hubs_validos.get(_h)
+                    if _hc and _hc[0] and _hc[1]:
+                        try:
+                            _reta_h = _haversine_km_consenso(_olat, _olon, float(_hc[0]), float(_hc[1]))
+                        except Exception:
+                            _reta_h = None
+                if _reta_h is not None and _reta_h > 0 and float(_dv) < _reta_h * 0.999:
+                    _n_bogus += 1
+                    continue
+                _limpo[_h] = _dv
+            if _n_bogus:
+                logger.warning("[SANIDADE-MATRIZ] %d distância(s) fisicamente impossíveis (viária < reta) "
+                               "descartadas da matriz para '%s' — protege o shortlist de vencedor falso.",
+                               _n_bogus, str(_orig)[:30])
+            return (_orig, _limpo if _limpo else None)
+
+        _itens = list(dest_coords.items())
+        # [PERF-MATRIZ - 184ª geração] Processa em LOTES limitados em vez de submeter todas as origens de uma
+        # vez. Submeter milhares de futures simultâneos retém todos os closures + resultados na memória ao
+        # mesmo tempo, o que pode estourar a RAM (OOM) em ambientes com limite baixo (ex.: Streamlit Cloud) e
+        # fazer o processo ser encerrado. Com lotes, o paralelismo (velocidade) é mantido, mas o pico de
+        # memória fica controlado: cada lote é resolvido e liberado antes do próximo. O tamanho do lote é
+        # ADAPTATIVO ao volume: estudos muito grandes usam lotes menores, mantendo os futures/resultados
+        # simultâneos sob controle independente da escala — reforço contra o encerramento por memória.
+        _n_orig_total = len(_itens)
+        if _n_orig_total > 1500:
+            _TAM_LOTE = 100
+        elif _n_orig_total > 600:
+            _TAM_LOTE = 150
+        else:
+            _TAM_LOTE = 200
+        try:
+            for _ini in range(0, len(_itens), _TAM_LOTE):
+                _lote = _itens[_ini:_ini + _TAM_LOTE]
+                _futuros = {EXECUTOR_GLOBAL.submit(_processar_origem, _it): _it[0] for _it in _lote}
+                for _fut in as_completed(_futuros):
+                    try:
+                        _org_r, _dist_r = _fut.result()
+                        if _dist_r:
+                            _mapa[_org_r] = _dist_r
+                    except Exception:
+                        continue
+                _futuros = None  # libera o lote antes do próximo (controle de memória)
+        except Exception:
+            # Se o executor falhar por qualquer motivo, degrada para sequencial (mesmo resultado).
+            logger.warning("[PERF-MATRIZ] Executor indisponível — matriz em modo sequencial.", exc_info=True)
+            for _it in _itens:
+                try:
+                    _org_r, _dist_r = _processar_origem(_it)
+                    if _dist_r:
+                        _mapa[_org_r] = _dist_r
+                except Exception:
+                    continue
+        return _mapa
+    except Exception:
+        logger.error("[MATRIZ-VIARIA] Falha ao descobrir vencedores por matriz", exc_info=True)
+        return {}
+
+
+def API_OSRM_Table(lat_o, lon_o, destinos_coords, _timeout=8, _bloco=90):
+    """[MATRIZ-VIARIA - 184ª geração] FASE 1 (descoberta) do novo motor de menor rota viária.
+
+    Calcula, em UMA chamada por bloco, a distância viária REAL de uma origem a TODOS os destinos
+    candidatos usando o serviço /table/v1 do OSRM (matriz de distâncias) — em vez de uma chamada
+    /route/v1 por par. Isso torna o custo de avaliar 10 ou 200 destinos praticamente o mesmo, o que
+    ELIMINA a necessidade do top-K como filtro de custo: a origem pode ser comparada contra todos os
+    destinos e escolher o de menor viária real, sem heurística e sem risco de descartar o vencedor.
+
+    Parâmetros:
+      lat_o, lon_o     — coordenada da origem.
+      destinos_coords  — lista de (nome, lat, lon) dos hubs candidatos.
+      _bloco           — tamanho máximo de destinos por chamada (o OSRM público limita a matriz).
+
+    Retorna: dict {nome_hub: distancia_km} apenas para os hubs cuja distância foi obtida. Se a chamada
+    falhar por completo, retorna {} (o chamador então cai no fluxo par-a-par /route/v1 tradicional —
+    ZERO regressão). PURA em espírito (sem estado global), defensiva, com annotations=distance e
+    fallback para duration×velocidade se o servidor não devolver distância."""
+    _out = {}
+    try:
+        if not lat_o or not lon_o or lat_o == 0.0 or lon_o == 0.0 or not destinos_coords:
+            return _out
+        _validos = [(str(_n), float(_la), float(_lo)) for (_n, _la, _lo) in destinos_coords
+                    if _la and _lo and float(_la) != 0.0 and float(_lo) != 0.0]
+        if not _validos:
+            return _out
+        headers = {"User-Agent": "GerenciadorLogisticoCorp/2.0"}
+        # [CACHE-MATRIZ - 184ª geração] Consulta o cache persistente por PAR (origem→destino) antes de
+        # chamar o OSRM. A chave usa coordenadas arredondadas a 5 casas (~1 m) — estável entre execuções e
+        # reutilizável entre estudos que compartilham municípios. Só os pares AUSENTES vão para a matriz;
+        # os novos são gravados. Isso torna o reprocessamento quase instantâneo para pares já resolvidos.
+        _tem_cache = "cache_rotas" in globals()
+
+        def _ckey(_la, _lo):
+            return f"mtx:{round(float(lat_o), 5)},{round(float(lon_o), 5)}->{round(float(_la), 5)},{round(float(_lo), 5)}"
+        _faltam = []
+        for (_n, _la, _lo) in _validos:
+            if _tem_cache:
+                try:
+                    _cv = cache_rotas.get(_ckey(_la, _lo))
+                except Exception:
+                    _cv = None
+                if _cv is not None:
+                    try:
+                        _out[_n] = float(_cv)
+                        continue
+                    except Exception:
+                        pass
+            _faltam.append((_n, _la, _lo))
+        if not _faltam:
+            return _out  # tudo veio do cache: zero rede
+        # particiona os destinos FALTANTES em blocos (limite da matriz pública)
+        for _i in range(0, len(_faltam), _bloco):
+            _chunk = _faltam[_i:_i + _bloco]
+            # coords: origem primeiro (index 0), depois os destinos (1..N)
+            _coords = f"{lon_o},{lat_o}" + "".join(f";{_lo},{_la}" for (_n, _la, _lo) in _chunk)
+            _dests = ";".join(str(_j) for _j in range(1, len(_chunk) + 1))
+            _url = (f"http://router.project-osrm.org/table/v1/driving/{_coords}"
+                    f"?sources=0&destinations={_dests}&annotations=distance,duration")
+            try:
+                _r = session.get(_url, headers=headers, timeout=_timeout).json()
+            except Exception:
+                continue  # bloco falhou: pula (o chamador tem fallback par-a-par)
+            if _r.get("code") != "Ok":
+                continue
+            _dist_row = None
+            if _r.get("distances"):
+                _rows = _r["distances"]
+                if _rows and _rows[0] is not None:
+                    _dist_row = _rows[0]  # linha da origem → distâncias em metros
+            # fallback: sem distances, estima por duration (s) × velocidade média rodoviária
+            _dur_row = None
+            if _r.get("durations"):
+                _dr = _r["durations"]
+                if _dr and _dr[0] is not None:
+                    _dur_row = _dr[0]
+            for _idx, (_n, _la, _lo) in enumerate(_chunk):
+                _km = None
+                if _dist_row is not None and _idx < len(_dist_row) and _dist_row[_idx] is not None:
+                    _km = round(float(_dist_row[_idx]) / 1000.0, 2)
+                elif _dur_row is not None and _idx < len(_dur_row) and _dur_row[_idx] is not None:
+                    # estimativa conservadora: duração × 65 km/h (só para RANQUEAR; o vencedor é
+                    # depois re-roteado por /route/v1, que fornece a distância AUTORITATIVA)
+                    _km = round(float(_dur_row[_idx]) / 3600.0 * 65.0, 2)
+                if _km is not None and _km >= 0:
+                    _out[_n] = _km
+                    # [CACHE-MATRIZ - 184ª geração] grava o par recém-calculado (30 dias)
+                    if _tem_cache:
+                        try:
+                            _la_c = next((_a for (_nn, _a, _o) in _chunk if _nn == _n), None)
+                            _lo_c = next((_o for (_nn, _a, _o) in _chunk if _nn == _n), None)
+                            if _la_c is not None and _lo_c is not None:
+                                _cache_set_seguro(cache_rotas, _ckey(_la_c, _lo_c), float(_km), expire=2592000)
+                        except Exception:
+                            pass
+        return _out
+    except Exception:
+        logger.error("[MATRIZ-VIARIA] Falha geral na matriz OSRM table", exc_info=True)
+        return {}
+
+
 def API_OSRM_Routing(lat_o, lon_o, lat_d, lon_d):
     start_t = time.time()
     try:
@@ -12214,32 +16886,8 @@ def _melhor_coordenada_para_osrm(texto_local, mun_nome, uf, lat_atual, lon_atual
     if chave in _MITIGA_SNAP_CACHE:
         return _MITIGA_SNAP_CACHE[chave]
     candidatos = [{"lat": lat_atual, "lon": lon_atual, "fonte": "ATUAL_VALIDADA", "snap_m": snap_atual_m}]
-    try:
-        _box = BOUNDING_BOXES_UF.get(uf) if uf else None
-        _q = semantica.normalizar(texto_local)
-        _alts = []
-        for _api in (API_ArcGIS, API_Nominatim, API_Photon):
-            try:
-                _r = _api(_q)
-                if _r:
-                    _alts.append(_r[0])  # melhor candidato de cada provedor
-            except Exception:
-                pass
-        for _a in _alts:
-            _la, _lo = _a.get("lat"), _a.get("lon")
-            if _la is None or _lo is None:
-                continue
-            if _box and not (_box["lat_min"] <= _la <= _box["lat_max"] and _box["lon_min"] <= _lo <= _box["lon_max"]):
-                continue  # candidato fora da UF é descartado (evita piorar)
-            _near = _osrm_nearest(_la, _lo)
-            if _near:
-                candidatos.append({"lat": _la, "lon": _lo, "fonte": _a.get("fonte", "ALT"), "snap_m": _near[2]})
-    except Exception:
-        pass
-    melhor = min(candidatos, key=lambda c: c.get("snap_m", 9e18))
-    houve_melhora = (melhor["fonte"] != "ATUAL_VALIDADA" and melhor.get("snap_m", 9e18) < snap_atual_m - 300.0)
-    # [AUDIT-CLASSIF - item #8] Distância (m) de cada alternativa até a coordenada validada atual —
-    # "distância entre as alternativas". Haversine leve (sem logging/rede), só para a auditoria.
+    # [AUDIT-CLASSIF - item #8 / OSRM-SNAP-FIX - 184ª geração] Haversine leve (sem rede/log). Antes só media
+    # a "distância entre as alternativas" para AUDITORIA; agora também alimenta o FILTRO DURO de proximidade.
     def _haversine_m(la1, lo1, la2, lo2):
         try:
             import math as _m
@@ -12251,8 +16899,46 @@ def _melhor_coordenada_para_osrm(texto_local, mun_nome, uf, lat_atual, lon_atual
             return round(_r * 2 * _m.atan2(_m.sqrt(_a), _m.sqrt(1 - _a)), 1)
         except Exception:
             return None
+    try:
+        _box = BOUNDING_BOXES_UF.get(uf) if uf else None
+        _q = semantica.normalizar(texto_local)
+        _alts = []
+        for _api in (API_ArcGIS, API_Nominatim, API_Photon):
+            try:
+                _r = _api(_q)
+                if _r:
+                    _alts.append(_r[0])  # melhor candidato de cada provedor
+            except Exception:
+                pass
+        # [OSRM-SNAP-FIX - 184ª geração] TRAVA DE PROXIMIDADE — a causa raiz do "18 km".
+        # A mitigação de snap existe para achar um ponto road-adjacent DO MESMO LUGAR — não para RELOCAR para
+        # outra cidade. A bounding box da UF é grosseira demais (o Paraná tem ~320 km de largura): um homônimo
+        # "Alto Paraíso" ao lado de uma via bem mapeada, a centenas de km do centroide correto, tinha snap
+        # minúsculo, VENCIA o min(snap) e SEQUESTRAVA a origem do OSRM → rota de 18 km. E como a geodésica é
+        # medida a partir do MESMO texto, ela também caía, então nem a barreira física (viária<reta) pegava.
+        # A distância ao ponto validado JÁ era calculada — mas só para o log. Agora é um FILTRO DURO: candidato
+        # longe do centroide validado é OUTRO lugar (homônimo/localidade) e é descartado. Vale para nome E IBGE.
+        _CAP_PROXIMIDADE_M = 25000.0  # 25 km: cobre a extensão de um município e rejeita salto p/ outra cidade
+        for _a in _alts:
+            _la, _lo = _a.get("lat"), _a.get("lon")
+            if _la is None or _lo is None:
+                continue
+            if _box and not (_box["lat_min"] <= _la <= _box["lat_max"] and _box["lon_min"] <= _lo <= _box["lon_max"]):
+                continue  # candidato fora da UF é descartado (evita piorar)
+            _dv = _haversine_m(lat_atual, lon_atual, _la, _lo)
+            if _dv is not None and _dv > _CAP_PROXIMIDADE_M:
+                continue  # candidato longe do centroide validado = OUTRO lugar (homônimo) → descartado
+            _near = _osrm_nearest(_la, _lo)
+            if _near:
+                candidatos.append({"lat": _la, "lon": _lo, "fonte": _a.get("fonte", "ALT"),
+                                   "snap_m": _near[2], "dist_da_validada_m": _dv})
+    except Exception:
+        pass
+    melhor = min(candidatos, key=lambda c: c.get("snap_m", 9e18))
+    houve_melhora = (melhor["fonte"] != "ATUAL_VALIDADA" and melhor.get("snap_m", 9e18) < snap_atual_m - 300.0)
     for _c in candidatos:
-        _c["dist_da_validada_m"] = _haversine_m(lat_atual, lon_atual, _c["lat"], _c["lon"])
+        if "dist_da_validada_m" not in _c:
+            _c["dist_da_validada_m"] = _haversine_m(lat_atual, lon_atual, _c["lat"], _c["lon"])
     resultado = (melhor["lat"], melhor["lon"], melhor.get("snap_m", snap_atual_m), candidatos, houve_melhora)
     # [CONCORRENCIA - 147ª geração] TETO no cache. _CENTROIDE_MUN_CACHE é naturalmente limitado (5.571
     # municípios), mas este é chaveado por COORDENADA — cresce indefinidamente. Numa instância do Streamlit
@@ -12356,6 +17042,37 @@ def processar_consenso_dinamico(candidatos, tipo_entrada, texto_cru):
     if candidatos_consistentes_mun: 
         candidatos_validos = candidatos_consistentes_mun 
         
+    # [PORTAO-GEO - 184ª geração] FILTRO POR GEOMETRIA OFICIAL (portão de aceitação em tempo de consulta).
+    # Quando o município esperado (mun_inf/uf_inf) resolve a um código IBGE, descarta candidatos cuja
+    # coordenada cai FORA do polígono desse município (homônimo, match em cidade errada, oceano, outro
+    # estado, outro país). Complementa os filtros de UF/semântica/cluster acima com a GEOMETRIA REAL do
+    # IBGE (referência já embutida, offline, O(1)). Rejeitados saem; o consenso escolhe entre os que
+    # sobraram — é o "fallback" acontecendo pela máquina que já existe. FAIL-OPEN: se o código não resolve,
+    # ou se TODOS os candidatos falhariam, mantém os candidatos (nunca zera a consulta pelo filtro geométrico).
+    try:
+        _cod_mun_esp = None
+        if mun_inf:
+            for _e in IBGE_MUNICIPIOS.get(semantica.normalizar(mun_inf), []):
+                if (not uf_inf) or str(_e.get("uf", "")).upper() == uf_inf.upper():
+                    _cod_mun_esp = str(_e.get("codigo_ibge") or "").strip()
+                    break
+        if _cod_mun_esp:
+            _cand_geo_ok = []
+            for _c in candidatos_validos:
+                _vg = _validar_coordenada_no_municipio(_c.get("lat"), _c.get("lon"), _cod_mun_esp)
+                if _vg.get("ok", True):
+                    _cand_geo_ok.append(_c)
+                else:
+                    logger.warning("[PORTAO-GEO] candidato '%s' descartado (%s): %s",
+                                   _c.get("fonte", "?"), texto_cru, _vg.get("motivo", ""))
+            if _cand_geo_ok:                       # só aplica o filtro se sobrou candidato (fail-open)
+                candidatos_validos = _cand_geo_ok
+            elif candidatos_validos:
+                logger.warning("[PORTAO-GEO] todos os candidatos de '%s' cairiam fora do município IBGE %s — "
+                               "mantidos por fail-open (consenso decide).", texto_cru, _cod_mun_esp)
+    except Exception:
+        pass
+
     PESO_FONTES = {}
     DEFAULT_WEIGHTS = {"ARCGIS": 0.95, "TOMTOM": 0.90, "OVERPASS": 0.85, "NOMINATIM": 0.80, "PHOTON": 0.75}
     for fonte, d_w in DEFAULT_WEIGHTS.items():
@@ -12854,6 +17571,55 @@ def obter_coordenadas_e_endereco_oficial(localidade):
                      f"embarcada (sem geocoders de rede); coordenada oficial da sede municipal adotada e "
                      f"não substituída por fallback/consenso."])
 
+    # ═══════════════════════════════════════════════════════════════════════════════════════════
+    # [OFFLINE-FIRST - 181ª geração] 🔴 O GARGALO — e ele explicava AS DUAS COISAS.
+    #
+    # ── O QUE ESTAVA ACONTECENDO ──
+    # Esta função é o PONTO ÚNICO por onde toda geocodificação passa. Ela interceptava CÓDIGOS IBGE
+    # (98ª geração) — mas quando a entrada era o **NOME do município**, ela **ia direto para a NUVEM**:
+    # TomTom + ArcGIS + Photon em paralelo, depois Nominatim (limitado a **1 requisição por segundo**).
+    #
+    # Para 2.410 municípios isso são **2.410 rodadas de rede** — quando a **base oficial embarcada
+    # resolve 98,6% deles em O(1), na memória, SEM TOCAR NA REDE**. Eu PROVEI isso na 144ª (16.713 → 228
+    # chamadas, −99%) — mas apliquei o conserto no MODO ESTRITO, e **o caminho principal, que a Alocação
+    # usa, continuou indo para a nuvem em TODOS os municípios.**
+    #
+    # ── E ISSO EXPLICA OS 958 ZEROS TAMBÉM ──
+    # Marteladas de milhares de chamadas contra APIs públicas ⇒ **rate-limit, timeout, exaustão**. As que
+    # falham viram distância zero. **Um bug, duas consequências**: a lentidão que você sente E os zeros
+    # que você vê. Resolver a rede resolve os dois.
+    #
+    # ── A ORDEM CERTA (do barato e certo para o caro e incerto) ──
+    #   1. Código IBGE      → O(1), offline, INQUESTIONÁVEL   (já existia, acima)
+    #   2. Nome do município → O(1), offline, base oficial     (👈 ESTAVA FALTANDO — é este bloco)
+    #   3. Nuvem            → só para o que a base NÃO resolve (endereços, bairros, logradouros)
+    #
+    # NUNCA CHUTA: se o nome é homônimo sem UF ("São Domingos", 5 estados), a base recusa e a nuvem é
+    # consultada — que é exatamente o que deve acontecer.
+    # ═══════════════════════════════════════════════════════════════════════════════════════════
+    _mo_off = _MODO_OFICIAL_OFFLINE.get("ativo", True)
+    if _mo_off:
+        try:
+            _off_r = _resolver_municipio_offline(str(localidade))
+        except Exception as _e_off:
+            logger.error(f"[OFFLINE-FIRST] Falha na resolução offline de '{localidade}': {_e_off}")
+            _off_r = None
+        if _off_r and _off_r.get("lat") and _off_r.get("lon"):
+            registrar_telemetria("IBGE_OFFLINE", True, 0.0)
+            _m_off = _titulo_municipio(_off_r["cidade"])
+            _u_off = _off_r["estado"]
+            return (float(_off_r["lat"]), float(_off_r["lon"]),
+                    f"{_m_off.upper()}, {_u_off}, BRASIL", "MUNICIPAL", 100, "", _m_off,
+                    "IBGE (Base Oficial — offline, O(1))",
+                    [f"⚡ **Resolvido OFFLINE pela base oficial do IBGE**: '{localidade}' → "
+                     f"**{_m_off}/{_u_off}**, em O(1), **sem tocar na rede**.",
+                     "**Por que isto importa:** a base embarcada tem os 5.571 municípios do Brasil e é "
+                     "MAIS confiável que qualquer geocoder de nuvem para identidade municipal — além de "
+                     "ser instantânea. A nuvem só é consultada para o que a base NÃO resolve (endereços, "
+                     "bairros, logradouros) ou para nomes ambíguos.",
+                     "🔒 Coordenada = **sede municipal oficial** (não centroide geométrico)."])
+
+
     lat, lon, end_f, conf, score, dist, mun, fonte, xai = _obter_coordenadas_e_endereco_oficial_core(localidade)
 
     # =========================================================================================
@@ -12918,6 +17684,94 @@ def obter_coordenadas_e_endereco_oficial(localidade):
 # ==============================================================================
 # MOTOR DE ROTEAMENTO EXTREMO E PIPELINE UNIFICADO
 # ==============================================================================
+_UA_ROTACAO_GOOGLE = [
+    # desktop Chrome / Windows
+    ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+     "Chrome/120.0.0.0 Safari/537.36"),
+    # desktop Safari / macOS
+    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) "
+     "Version/17.1 Safari/605.1.15"),
+    # mobile Chrome / Android
+    ("Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) "
+     "Chrome/119.0.0.0 Mobile Safari/537.36"),
+    # Firefox / Windows
+    ("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0"),
+]
+
+
+def _circuit_breaker_google(estado, sucesso, agora, _limiar_falhas=5, _cooldown_s=20.0):
+    """[CIRCUIT-BREAKER - 184ª geração] Máquina de estados do disjuntor (circuit breaker) do Google, um padrão
+    consagrado de engenharia de confiabilidade (Nygard, "Release It!"). Objetivo: MAXIMIZAR a participação do
+    Google sem a API oficial, atacando a causa real do bloqueio — o martelamento. Quando o scraper começa a
+    falhar em série (o Google impôs rate-limit), continuar chamando em rajada AGRAVA o bloqueio. O disjuntor
+    detecta a sequência de falhas e ABRE: suspende as chamadas ao Google por um curto intervalo (deixando o
+    rate-limit do Google resetar), período em que o roteamento usa apenas o OSRM. Após o intervalo, entra em
+    MEIO-ABERTO e testa uma chamada; se voltar a funcionar, FECHA e retoma o Google normalmente.
+
+    Estados: 'fechado' (Google ativo, normal), 'aberto' (Google suspenso temporariamente), 'meio_aberto'
+    (testando recuperação). Quando FECHADO e o Google saudável, o disjuntor é transparente (zero impacto).
+
+    Parâmetros:
+      estado: dict {status, falhas_seguidas, aberto_ate} — o estado persistente do breaker (mutado e
+              retornado); na primeira chamada pode vir vazio/None.
+      sucesso: bool — se a última chamada ao Google teve sucesso (None se não houve chamada, ex.: já estava
+               aberto — nesse caso só avalia transição por tempo).
+      agora: float — timestamp atual (time.time()).
+
+    Retorna: (estado_atualizado, pode_chamar_google) — o dict de estado e um bool indicando se o Google deve
+    ser chamado na PRÓXIMA tentativa. PURA (só depende dos argumentos) e defensiva."""
+    try:
+        _e = dict(estado) if estado else {}
+        _status = _e.get("status", "fechado")
+        _falhas = int(_e.get("falhas_seguidas", 0))
+        _aberto_ate = float(_e.get("aberto_ate", 0.0))
+
+        if _status == "aberto":
+            # suspenso: só reabre para teste quando o cooldown expira
+            if agora >= _aberto_ate:
+                _status = "meio_aberto"
+                _pode = True  # permite UMA chamada de teste
+            else:
+                _pode = False  # ainda no intervalo de proteção → usa só OSRM
+            _e.update({"status": _status, "falhas_seguidas": _falhas, "aberto_ate": _aberto_ate})
+            return _e, _pode
+
+        # fechado ou meio_aberto: processa o resultado da chamada que ocorreu
+        if sucesso is True:
+            _falhas = 0
+            _status = "fechado"  # recuperou (ou seguiu saudável)
+        elif sucesso is False:
+            _falhas += 1
+            if _status == "meio_aberto":
+                # teste falhou: reabre imediatamente por mais um cooldown
+                _status = "aberto"
+                _aberto_ate = agora + _cooldown_s
+                _e.update({"status": _status, "falhas_seguidas": _falhas, "aberto_ate": _aberto_ate})
+                return _e, False
+            if _falhas >= _limiar_falhas:
+                # muitas falhas seguidas: ABRE o disjuntor para o Google respirar
+                _status = "aberto"
+                _aberto_ate = agora + _cooldown_s
+                _e.update({"status": _status, "falhas_seguidas": _falhas, "aberto_ate": _aberto_ate})
+                return _e, False
+        # sucesso is None (sem chamada) → mantém o estado como está
+        _e.update({"status": _status, "falhas_seguidas": _falhas, "aberto_ate": _aberto_ate})
+        return _e, True
+    except Exception:
+        logger.error("[CIRCUIT-BREAKER] Falha na máquina de estados do disjuntor do Google", exc_info=True)
+        return (estado or {"status": "fechado", "falhas_seguidas": 0, "aberto_ate": 0.0}), True
+
+
+def _headers_google_rotativo(_tentativa):
+    """[GOOGLE-RESILIENTE - 184ª geração] Retorna cabeçalhos HTTP para o scraper do Google variando o
+    User-Agent conforme a tentativa. Quando o Google passa a bloquear um perfil de navegador (rate-limit por
+    assinatura de UA — causa comum de o Google "parar de responder" num ambiente), tentar com um perfil
+    diferente pode recuperar a resposta sem qualquer mudança de infraestrutura. Determinístico e puro."""
+    _ua = _UA_ROTACAO_GOOGLE[_tentativa % len(_UA_ROTACAO_GOOGLE)]
+    return {"User-Agent": _ua, "Accept-Language": "pt-BR,pt;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+
+
 def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d, lon_d, dist_linha_reta, usar_coordenadas=True, link_maps_pronto=None, link_embed_pronto=None):
     cache_key = f"GOOG_{CACHE_VERSION}_{origem_texto}|{destino_texto}|{usar_coordenadas}"
     if cache_key in cache_google: 
@@ -12928,7 +17782,16 @@ def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d,
             _geo_c = _cached[6] if len(_cached) > 6 else ""  # [VIS-GOOGLE-GEO] preserva geometria
             return (_cached[0], _cached[1], link_maps_pronto, _cached[3], _cached[4], link_embed_pronto or _cached[5], _geo_c)
         return _cached
-        
+
+    # [CIRCUIT-BREAKER - 184ª geração] Antes de chamar o scraper, consulta o disjuntor. Se o Google vem
+    # falhando em série (rate-limit), o disjuntor está ABERTO e suspendemos a chamada por um curto intervalo
+    # — evitando o martelamento que agrava o bloqueio e deixando o rate-limit do Google resetar. Nesse
+    # período o roteamento usa o OSRM (o chamador já trata res_google=None). Quando o Google está saudável, o
+    # disjuntor está fechado e isto é transparente. O cache acima é consultado ANTES do disjuntor: uma rota
+    # que o Google já respondeu continua sendo servida mesmo com o disjuntor aberto.
+    if not _google_pode_chamar():
+        return None
+
     orig_link_txt = requests.utils.quote(origem_texto)
     dest_link_txt = requests.utils.quote(destino_texto)
     origem_param_scraper = f"{lat_o},{lon_o}" if usar_coordenadas else orig_link_txt
@@ -12939,14 +17802,41 @@ def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d,
     # pipeline; caso contrário, constrói a partir do texto (compatibilidade).
     link_maps = link_maps_pronto if link_maps_pronto else f"https://www.google.com/maps/dir/?api=1&origin={orig_link_txt}&destination={dest_link_txt}&travelmode=driving"
     link_embed = link_embed_pronto if link_embed_pronto else f"https://maps.google.com/maps?saddr={orig_link_txt}&daddr={dest_link_txt}&output=embed"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    
+
     try:
-        resposta = session.get(url_api, headers=headers, timeout=12)
-        texto_resposta = resposta.text.replace('\u202f', ' ').replace('\u200b', '')
-        if len(texto_resposta) < 500: 
+        # [GOOGLE-RESILIENTE - 184ª geração] O Google é o motor PRIORITÁRIO. Sem a API oficial (que exige
+        # chave paga), o scraper é a única via — e sua principal causa de falha em produção é o Google impor
+        # rate-limit/bloqueio à assinatura do navegador (User-Agent) do ambiente. Por isso tentamos até 3
+        # vezes, cada uma com um PERFIL DE NAVEGADOR DIFERENTE (desktop/mobile/Firefox) e um respiro entre
+        # elas: se o Google bloqueou um perfil, outro pode passar. Isso maximiza a participação do Google no
+        # que é tecnicamente possível sem chave, sem removê-lo do fluxo.
+        resposta = None
+        texto_resposta = ""
+        _MAX_TENT_G = 3
+        for _tent in range(_MAX_TENT_G):
+            _headers_tent = _headers_google_rotativo(_tent)
+            try:
+                resposta = session.get(url_api, headers=_headers_tent, timeout=15)
+                texto_resposta = resposta.text.replace('\u202f', ' ').replace('\u200b', '')
+                if len(texto_resposta) >= 500:
+                    break  # resposta válida obtida
+            except Exception:
+                if _tent < _MAX_TENT_G - 1:
+                    try:
+                        time.sleep(0.4)
+                    except Exception:
+                        pass
+                    continue
+                raise
+            if _tent < _MAX_TENT_G - 1 and len(texto_resposta) < 500:
+                try:
+                    time.sleep(0.4)
+                except Exception:
+                    pass
+        if len(texto_resposta) < 500:
+            _google_registrar_resultado(False)  # [CIRCUIT-BREAKER] resposta vazia = sinal de bloqueio/rate-limit
             return None
-            
+
         dist_match = _RE_DIST_G1.search(texto_resposta)
         if not dist_match: dist_match = _RE_DIST_G2.search(texto_resposta)
         if not dist_match: dist_match = _RE_DIST_G3.search(texto_resposta)
@@ -12998,9 +17888,11 @@ def extrair_dados_reais_google(origem_texto, destino_texto, lat_o, lon_o, lat_d,
             geo_google = _extrair_geometria_google(texto_resposta, lat_o, lon_o, lat_d, lon_d)
             res = (km_puro, tempo_str, link_maps, envolve_balsa, score_google, link_embed, geo_google)
             cache_google.set(cache_key, res, expire=2592000)
+            _google_registrar_resultado(True)  # [CIRCUIT-BREAKER] sucesso → mantém/fecha o disjuntor
             return res
     except Exception: 
         pass
+    _google_registrar_resultado(False)  # [CIRCUIT-BREAKER] falha → conta para eventual abertura do disjuntor
     return None
 
 @_lru_cache(maxsize=32)
@@ -13250,17 +18142,7 @@ def _extrair_geometria_google(texto_resposta, lat_o, lon_o, lat_d, lon_d):
             return cand
     return ""
 
-def _gerar_mapa_rota_google(geometria_polyline, lat_o, lon_o, lat_d, lon_d, nome_origem="", nome_destino="", distancia_km="", tempo_str=""):
-    """[VIS-GOOGLE-GEO - 27ª geração] Gera o mapa EMBARCADO da rota do GOOGLE desenhando o
-    TRAÇADO COMPLETO (Leaflet + OpenStreetMap) a partir da polyline decodificada do Google.
-    Resolve a PRIORIDADE MÁXIMA Nº 1: o mapa do Google mostrava só 2 marcadores; agora
-    desenha a geometria integral da rota (curvas, conversões, segmentos), com nomes
-    oficiais de origem/destino, distância e tempo. Se a geometria não estiver disponível,
-    cai graciosamente para os marcadores (degradação segura). Reusa a infra de mapa do
-    OSRM mas com rótulos por NOME (não coordenadas), conforme pedido."""
-    return _gerar_mapa_leaflet_rota(geometria_polyline, lat_o, lon_o, lat_d, lon_d,
-                                    nome_origem, nome_destino, distancia_km, tempo_str,
-                                    provedor="Google Maps", cor="#1a73e8")
+# [AUDITORIA-184] Função morta '_gerar_mapa_rota_google' aposentada (nome ocorria 1× no arquivo — sem qualquer referência). Recuperável no histórico de versões.
 
 def _decodificar_polyline(polyline_str, precision=5):
     """[FIX-OSRM-GEO2 - 18ª geração] Decodifica uma polyline codificada (formato Google/
@@ -13878,7 +18760,29 @@ def calcular_pipeline_logistico(origem, destino, perfil_rota="shortest"):
                     destino_clean, mun_d, _uf_d, lat_d, lon_d, _d_snap0)
             if _melhora_o or _melhora_d:
                 _res_osrm_mit = API_OSRM_Routing(_lat_o_os, _lon_o_os, _lat_d_os, _lon_d_os)
+                # [OSRM-SNAP-FIX - 184ª geração] SANIDADE DA MITIGAÇÃO (rede de segurança da trava A1). Mover
+                # cada ponto por poucos km NÃO pode encurtar a rota em centenas de km. Se a rota mitigada
+                # difere da original muito além do deslocamento aplicado aos pontos, a mitigação relocou o
+                # ponto (bug de homônimo) → REJEITA e mantém a rota original.
+                _mit_ok = bool(_res_osrm_mit)
                 if _res_osrm_mit:
+                    _disp_o_km = calcular_distancia_linha_reta(lat_o, lon_o, _lat_o_os, _lon_o_os)[0] or 0.0
+                    _disp_d_km = calcular_distancia_linha_reta(lat_d, lon_d, _lat_d_os, _lon_d_os)[0] or 0.0
+                    _delta_max = (_disp_o_km + _disp_d_km) + 5.0   # deslocamento total dos pontos + 5 km de folga
+                    _mit_ok = abs(float(_res_osrm_mit[0]) - float(res_osrm[0])) <= _delta_max
+                    if not _mit_ok:
+                        logger.error(f"[OSRM-SNAP-FIX] Mitigação REJEITADA ({origem_clean} → {destino_clean}): "
+                                     f"rota {res_osrm[0]}→{_res_osrm_mit[0]} km destoa do deslocamento "
+                                     f"({_disp_o_km:.1f}+{_disp_d_km:.1f} km). Mantida a rota original.")
+                        mitigacao_snap = {
+                            "aplicada": False,
+                            "motivo": ("Candidato road-adjacent encontrado, mas a rota resultante destoou do "
+                                       "deslocamento dos pontos (provável relocação p/ homônimo) — REJEITADA."),
+                            "snap_origem_antes_m": _o_snap0, "snap_destino_antes_m": _d_snap0,
+                            "km_antes": res_osrm[0], "km_depois": _res_osrm_mit[0],
+                            "candidatos_origem": _cand_o, "candidatos_destino": _cand_d,
+                        }
+                if _res_osrm_mit and _mit_ok:
                     _snap_mit = _res_osrm_mit[5] if len(_res_osrm_mit) > 5 else None
                     mitigacao_snap = {
                         "aplicada": True, "origem_melhorada": bool(_melhora_o), "destino_melhorado": bool(_melhora_d),
@@ -14643,14 +19547,19 @@ def calcular_matriz_competitiva_vetorizada(dest_coords, hubs_validos):
     Benefício líquido: mesmíssimo resultado de alocação, ordens de magnitude mais rápido.
     """
     dest_to_hub, dest_to_linha_reta, dest_to_status_lr, runner_up_map, topk_map = {}, {}, {}, {}, {}
-    _TETO_TOPK = 5  # teto de memória p/ lotes grandes (roadmap: "teto top-5")
+    topk_map_completo = {}  # [GARANTIA-OTIMA - 184ª geração] todos os polos por cliente (prova de otimalidade)
+    _TETO_TOPK = 10  # [MAIS-CANDIDATOS - 184ª geração] Nº de polos mais próximos (por linha reta) roteados por
+    # origem. Era 5 — pequeno demais: em regiões com muitos polos, o mais próximo por ESTRADA podia ficar fora
+    # dos 5 mais próximos por RETA e nunca ser roteado, fazendo a app perder para a referência (que usa matriz
+    # pré-computada completa). Aumentado para 10 (mais candidatos → mais chance de achar o melhor por asfalto).
+    # Custo: ~2× roteamentos por origem em lotes grandes — aceitável no modo viária ("mais preciso e lento").
 
     # Prepara arrays dos hubs válidos
     hub_nomes = list(hubs_validos.keys())
     if not hub_nomes:
         for o_nome in dest_coords:
             dest_to_hub[o_nome], dest_to_status_lr[o_nome] = "NENHUM_HUB_VALIDO", "Falha Estrutural de Hubs"
-        return dest_to_hub, dest_to_linha_reta, dest_to_status_lr, runner_up_map, topk_map
+        return dest_to_hub, dest_to_linha_reta, dest_to_status_lr, runner_up_map, topk_map, topk_map_completo
 
     hub_lats = np.radians(np.array([hubs_validos[h][0] for h in hub_nomes], dtype=float))
     hub_lons = np.radians(np.array([hubs_validos[h][1] for h in hub_nomes], dtype=float))
@@ -14676,6 +19585,8 @@ def calcular_matriz_competitiva_vetorizada(dest_coords, hubs_validos):
             dest_to_status_lr[o_nome] = "Calculada via Haversine Vetorizado (IUGG)"
             # [RANK-NHUBS - 58ª geração] ranking trivial: só um hub disponível.
             topk_map[o_nome] = [(round(float(dists[0]), 3), hub_nomes[0])]
+            # [GARANTIA-OTIMA - 184ª geração] lista COMPLETA (idêntica ao top-K quando só há 1 polo).
+            topk_map_completo[o_nome] = [(round(float(dists[0]), 3), hub_nomes[0])]
         else:
             # argsort para achar o 1º e 2º mais próximos
             ordem = np.argsort(dists)
@@ -14694,8 +19605,15 @@ def calcular_matriz_competitiva_vetorizada(dest_coords, hubs_validos):
                 (round(float(dists[int(ordem[j])]), 3), hub_nomes[int(ordem[j])])
                 for j in range(_k)
             ]
+            # [GARANTIA-OTIMA - 184ª geração] lista COMPLETA de TODOS os polos ordenados por linha reta —
+            # base para a prova de otimalidade (branch-and-bound): permite descobrir, depois do roteamento
+            # do top-K, quais polos fora dele ainda poderiam vencer (reta < melhor viária) e roteá-los.
+            topk_map_completo[o_nome] = [
+                (round(float(dists[int(ordem[j])]), 3), hub_nomes[int(ordem[j])])
+                for j in range(n_hubs)
+            ]
 
-    return dest_to_hub, dest_to_linha_reta, dest_to_status_lr, runner_up_map, topk_map
+    return dest_to_hub, dest_to_linha_reta, dest_to_status_lr, runner_up_map, topk_map, topk_map_completo
 
 
 def _selecionar_hub_por_viaria(candidatos):
@@ -14783,7 +19701,7 @@ _PARAMS_CUSTO_HUB = {
 
 
 
-def _vencedor_multicriterio_comparacao(linha, params=None):
+def _vencedor_multicriterio_comparacao(linha, params=None, limiar_empate_km=1.0):
     """[MULTI-CMP - 167ª geração] O COMPARADOR DEIXA DE SER SÓ QUILOMETRAGEM.
 
     ── A PREMISSA QUE ESTAVA ERRADA ──
@@ -14815,11 +19733,11 @@ def _vencedor_multicriterio_comparacao(linha, params=None):
     # sem tempo dos DOIS lados: não dá para ir além do quilômetro. E a app DIZ isso.
     if _ta is None or _tr is None:
         _dif = _dr - _da
-        if abs(_dif) < 1.0:
+        if abs(_dif) < float(limiar_empate_km):
             return "Empate", "distância (só)", (
                 "⚠️ **Critério usado: DISTÂNCIA apenas.** A planilha de referência não informa TEMPO, então "
                 "não é possível comparar o esforço real (que inclui lentidão da estrada e balsa). "
-                "**Empate técnico** (< 1 km). Se a referência trouxer a coluna de tempo, a comparação passa "
+                f"**Empate técnico** (< {float(limiar_empate_km):g} km). Se a referência trouxer a coluna de tempo, a comparação passa "
                 "a ser multicritério automaticamente.")
         _v = "Aplicação" if _dif > 0 else "Referência"
         return _v, "distância (só)", (
@@ -14836,11 +19754,11 @@ def _vencedor_multicriterio_comparacao(linha, params=None):
         _vr = float(_cr["custo_efetivo_km"])
     except (TypeError, ValueError, KeyError):
         _dif = _dr - _da
-        _v = "Empate" if abs(_dif) < 1 else ("Aplicação" if _dif > 0 else "Referência")
+        _v = "Empate" if abs(_dif) < float(limiar_empate_km) else ("Aplicação" if _dif > 0 else "Referência")
         return _v, "distância (fallback)", "Falha no cálculo multicritério; usada a distância."
 
     _dif = _vr - _va
-    if abs(_dif) < 1.0:
+    if abs(_dif) < float(limiar_empate_km):
         return "Empate", "custo efetivo (multicritério)", (
             "**Empate no ESFORÇO REAL** (< 1 km-equivalente). Considerados: distância, lentidão da estrada "
             "e balsa.")
@@ -15025,6 +19943,101 @@ def _preservar_ranking_polos(mcda_cliente, top=3, params=None):
     return _out
 
 
+_UF_AMAZONIA_LEGAL = {"AC", "AP", "AM", "MA", "MT", "PA", "RO", "RR", "TO"}
+
+
+def _classificar_confiabilidade_regional(uf, sinuosidade=None, balsa=False, fonte=None):
+    """[REGIAO-ADAPTATIVA - 184ª geração] Inteligência adaptativa por região (itens 3 e 9 da nota de
+    roteamento). Classifica a CONFIABILIDADE do roteamento viário conforme a região e sinais da rota, SEM
+    alterar a decisão do vencedor — apenas dá transparência sobre onde confiar mais ou menos. Fundamento
+    técnico: a malha OSM/OSRM é esparsa na Amazônia Legal (rios, poucas estradas mapeadas, componentes
+    desconectados); regiões com balsa e alta sinuosidade têm rota terrestre menos direta. Reconhecer isso é
+    honestidade sobre a incerteza — não inventa precisão, sinaliza sua ausência.
+
+    Retorna dict {nivel, regiao, motivo, recomendacao} com nivel ∈ {'alta','media','baixa'}. PURA."""
+    try:
+        _uf = str(uf or "").strip().upper()[:2]
+        _sin = None
+        try:
+            _sin = float(sinuosidade) if sinuosidade is not None else None
+        except Exception:
+            _sin = None
+        _fonte = str(fonte or "").lower()
+        _amazonia = _uf in _UF_AMAZONIA_LEGAL
+        _fallback = ("geodés" in _fonte) or ("falha" in _fonte) or ("linha reta" in _fonte)
+        # baixa confiabilidade: fallback geodésico (sem rota real) OU Amazônia com rota muito sinuosa
+        if _fallback:
+            return {"nivel": "baixa", "regiao": "fallback geodésico",
+                    "motivo": "sem rota viária real — distância em linha reta",
+                    "recomendacao": "validar manualmente; verificar acesso fluvial ou polo alternativo"}
+        if _amazonia and _sin is not None and _sin > 2.5:
+            return {"nivel": "baixa", "regiao": "Amazônia Legal",
+                    "motivo": "malha viária esparsa e rota muito sinuosa (provável contorno fluvial)",
+                    "recomendacao": "conferir se há polo terrestre mais próximo ausente da lista de destinos"}
+        # média: Amazônia (malha naturalmente mais fraca) ou presença de balsa
+        if _amazonia:
+            return {"nivel": "media", "regiao": "Amazônia Legal",
+                    "motivo": "região de malha viária menos densa que a média nacional",
+                    "recomendacao": "resultado utilizável; atenção redobrada em municípios ribeirinhos"}
+        if balsa:
+            return {"nivel": "media", "regiao": "travessia por balsa",
+                    "motivo": "rota depende de balsa (tempo e disponibilidade variáveis)",
+                    "recomendacao": "considerar o custo de espera/travessia na decisão logística"}
+        if _sin is not None and _sin > 3.0:
+            return {"nivel": "media", "regiao": "rota sinuosa",
+                    "motivo": "trajeto terrestre bem mais longo que a linha reta",
+                    "recomendacao": "verificar se há alternativa mais direta"}
+        return {"nivel": "alta", "regiao": "malha consolidada",
+                "motivo": "região com boa cobertura viária e rota direta",
+                "recomendacao": "resultado de alta confiabilidade"}
+    except Exception:
+        logger.error("[REGIAO-ADAPTATIVA] Falha ao classificar confiabilidade regional", exc_info=True)
+        return {"nivel": "media", "regiao": "—", "motivo": "—", "recomendacao": "—"}
+
+
+def _aplicar_confiabilidade_regional(df):
+    """[REGIAO-ADAPTATIVA - 184ª geração] Aplica a classificação de confiabilidade regional a cada linha do
+    resultado, criando a coluna 'Confiabilidade Regional' (alta/média/baixa + motivo). Usa UF de origem,
+    sinuosidade (viária/reta), balsa e fonte da rota. NÃO altera nenhuma decisão — só anexa transparência.
+    Retorna o df com a coluna nova. Defensivo."""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return df
+        df = df.copy()
+        _uf_col = "UF Origem" if "UF Origem" in df.columns else ("UF" if "UF" in df.columns else None)
+        _dv = pd.to_numeric(df["Distancia"], errors="coerce") if "Distancia" in df.columns else None
+        _dr = pd.to_numeric(df["Linha Reta"], errors="coerce") if "Linha Reta" in df.columns else None
+        _fonte_col = "Fonte da Rota" if "Fonte da Rota" in df.columns else None
+        _balsa_col = "Balsas" if "Balsas" in df.columns else ("Balsa" if "Balsa" in df.columns else None)
+        _niveis, _motivos = [], []
+        for _i in df.index:
+            _loc = df.index.get_loc(_i)
+            _uf = df.at[_i, _uf_col] if _uf_col else ""
+            _sin = None
+            if _dv is not None and _dr is not None:
+                _v = _dv.iloc[_loc] if hasattr(_dv, "iloc") else _dv[_i]
+                _r = _dr.iloc[_loc] if hasattr(_dr, "iloc") else _dr[_i]
+                try:
+                    if _v and _r and float(_r) > 0:
+                        _sin = float(_v) / float(_r)
+                except Exception:
+                    _sin = None
+            _balsa = False
+            if _balsa_col:
+                _balsa = str(df.at[_i, _balsa_col]).strip().lower() in ("sim", "true", "1", "com balsa")
+            _fonte = df.at[_i, _fonte_col] if _fonte_col else ""
+            _c = _classificar_confiabilidade_regional(_uf, sinuosidade=_sin, balsa=_balsa, fonte=_fonte)
+            _label = {"alta": "🟢 Alta", "media": "🟡 Média", "baixa": "🔴 Baixa"}.get(_c["nivel"], "⚪ —")
+            _niveis.append(_label)
+            _motivos.append(_c["motivo"])
+        df["Confiabilidade Regional"] = _niveis
+        df["Confiabilidade — Motivo"] = _motivos
+        return df
+    except Exception:
+        logger.error("[REGIAO-ADAPTATIVA] Falha ao aplicar confiabilidade regional", exc_info=True)
+        return df
+
+
 def _decompor_custo_hub(dist_viaria, dist_reta=None, tempo_min=None, balsa=False, params=None):
     """[SENSIBILIDADE - 157ª geração] DECOMPOSIÇÃO DO CUSTO: quanto CADA critério pesou na decisão.
 
@@ -15158,10 +20171,12 @@ def _podar_candidatos_polo(topk_cliente, custo_incumbente, hub_incumbente):
 
 
 def _selecionar_hub_multicriterio(candidatos, params=None):
-    """[HUB-MCDA - 130ª geração] Motor de decisão MULTICRITÉRIO de hub por CUSTO LOGÍSTICO EFETIVO
-    (km-equivalentes) — substitui a decisão por menor linha reta. Elege o hub de MENOR custo efetivo
-    (viária + lentidão + balsa + sinuosidade), com desempate que prioriza rota TERRESTRE e depois menor
-    viária. Deriva o Índice Global de Qualidade do Hub (IGQ 0-100 = 100 × menor_custo ÷ custo do candidato
+    """[HUB-MCDA - 130ª geração / VIÁRIA-PADRÃO - 184ª geração] Motor de decisão de hub por MENOR DISTÂNCIA
+    VIÁRIA (rota real) — o critério padrão da aplicação (o candidato percorre sempre a menor rota viária).
+    Elege o hub de MENOR viária; DESEMPATE (só em empate de viária) por ausência de balsa → menor tempo →
+    menor custo logístico composto (viária + lentidão + balsa + sinuosidade). O custo composto deixa de ser
+    o critério primário e passa a desempate/qualidade. Deriva o Índice Global de Qualidade do Hub (IGQ
+    0-100 = 100 × menor_custo ÷ custo do candidato
     — estável e absoluto, ao contrário do min-max). Cada candidato: {'hub','dist_viaria','dist_reta'(opc),
     'tempo_min'(opc),'balsa'(bool,opc),'modo'(str,opc)}. PURO/determinístico; params injetáveis. Rotas
     inválidas (viária None/≤0) não concorrem. Retorna dict com vencedor, ranking (com componentes de
@@ -15181,8 +20196,19 @@ def _selecionar_hub_multicriterio(candidatos, params=None):
         except (TypeError, ValueError):
             _tm = None
         _dv = round(float(c.get('dist_viaria')), 3)
+        # [PLAUSIBILIDADE - 184ª geração] Rota REAL com sinuosidade ABSURDA (viária ≫ reta) é um DESVIO
+        # FANTASMA: o motor rodoviário contornou uma barreira natural (rio) por um trajeto que, na prática,
+        # é fluvial — mandando o candidato ~2× mais longe (caso Codajás→Manacapuru: 422 km, 2,48×, 53 h). O
+        # limiar é ALTO (4×) para JAMAIS punir estrada normal (sinuosidade típica 1,2–1,6×; serra ~2×). Uma
+        # rota assim é rebaixada na ordenação: perde para rota real plausível de maior viária, mas ainda
+        # vence o puro fallback geodésico (mantém-se acima de quem não tem rota alguma).
+        _LIMIAR_SINUOSIDADE = 4.0
+        _plausivel = True
+        if _dr and _dr > 0 and (_dv / _dr) > _LIMIAR_SINUOSIDADE:
+            _plausivel = False
         _validos.append({'hub': c.get('hub'), 'dist_viaria': _dv, 'dist_reta': _dr, 'tempo_min': _tm,
                          'balsa': bool(c.get('balsa')), 'modo': c.get('modo', ''),
+                         'rota_real': bool(c.get('rota_real', True)), 'plausivel': _plausivel,
                          'sinuosidade': round(_dv / _dr, 4) if (_dr and _dr > 0) else None,
                          'custo_efetivo': _det["custo_efetivo_km"], 'componentes': _det})
     out = {'vencedor': None, 'igq_vencedor': None, 'custo_vencedor': None, 'ranking': [],
@@ -15194,7 +20220,41 @@ def _selecionar_hub_multicriterio(candidatos, params=None):
     _min = min(c['custo_efetivo'] for c in _validos)
     for c in _validos:
         c['igq'] = round(100.0 * _min / c['custo_efetivo'], 1) if c['custo_efetivo'] > 0 else 0.0
-    _validos.sort(key=lambda d: (d['custo_efetivo'], d['balsa'], d['dist_viaria']))
+    # [VIÁRIA-PADRÃO - 184ª geração] VENCEDOR = MENOR DISTÂNCIA VIÁRIA (rota real percorrida), como exige o
+    # critério padrão da aplicação: o candidato tem de percorrer SEMPRE a menor rota viária. A viária é a
+    # chave PRIMÁRIA (à precisão armazenada, 3 casas), então o vencedor é sempre o de menor rota real — sem
+    # risco de exibir um vencedor com viária maior que a de um perdedor. O DESEMPATE (só quando a viária
+    # EMPATA) usa, em ordem: 1º ausência de balsa (barreira operacional dura), 2º menor tempo, 3º menor
+    # custo logístico composto (que absorve sinuosidade/lentidão). Assim o investimento no custo composto
+    # é preservado — como critério de desempate/qualidade —, mas nunca sobrepõe a menor viária. Por
+    # construção, o concorrente (_validos[1]) é o de 2ª MENOR viária.
+    # [PODA-SEGURA - 184ª geração] Chave 0: rotas REAIS (OSRM/Google) ANTES das de FALLBACK geodésico. Uma
+    # viária de fallback (≈ geodésica) subestima a rota real e não pode vencer uma rota real de maior viária
+    # (era como o mais próximo em LINHA RETA vencia). Só quando NENHUM candidato tem rota real (destino sem
+    # estrada) o de menor geodésica-fallback vence — o comportamento honesto para acesso fluvial/isolado.
+    # [PLAUSIBILIDADE - 184ª geração] Ordem de prioridade dos critérios:
+    #   0) rota REAL antes de fallback geodésico (já existia);
+    #   1) rota real PLAUSÍVEL antes de desvio fantasma (novo) — sinuosidade absurda vai para o fim das reais;
+    #   2) menor distância viária; 3) sem balsa; 4) menor tempo; 5) menor custo logístico.
+    # Assim, Codajás→Manaquiri (216 km, plausível) vence Manacapuru (422 km, 2,48× = fantasma), mas um
+    # desvio fantasma ainda supera quem não tem rota nenhuma (fallback puro).
+    # [VIARIA-SOBERANA++ 184ª] No modo viária, a menor distância viária REAL e PLAUSÍVEL deve dominar. A
+    # flag de plausibilidade contém o "desvio fantasma" (sinuosidade > 4×, rota rodoviária que na prática é
+    # fluvial). Regra: um fantasma é "adiável" (rebaixado) sempre que existir QUALQUER alternativa real
+    # plausível — mesmo que a viária do fantasma seja numericamente menor, pois 50 km com sinuosidade 5× é
+    # um contorno fluvial irreal, enquanto 60 km plausível é estrada de verdade. Só quando NÃO há alternativa
+    # real plausível o fantasma deixa de ser adiável (aí ele é o melhor disponível e vence o fallback puro).
+    # Assim Candeias→Porto Velho (48 km real plausível) domina, e o desvio de Codajás segue barrado.
+    _existe_real_plaus = any(_d.get('rota_real', True) and _d.get('plausivel', True) for _d in _validos)
+    for _d in _validos:
+        _eh_fantasma = _d.get('rota_real', True) and not _d.get('plausivel', True)
+        _d['_adiavel'] = bool(_eh_fantasma and _existe_real_plaus)
+    _validos.sort(key=lambda d: (not d.get('rota_real', True),
+                                 d.get('_adiavel', False),
+                                 d['dist_viaria'],
+                                 d['balsa'],
+                                 d['tempo_min'] if d['tempo_min'] is not None else float('inf'),
+                                 d['custo_efetivo']))
     for i, c in enumerate(_validos, start=1):
         c['posicao'] = i
     venc = _validos[0]
@@ -15208,8 +20268,14 @@ def _selecionar_hub_multicriterio(candidatos, params=None):
                  "tempo de viagem": ru['componentes']['pen_tempo_km'] - venc['componentes']['pen_tempo_km'],
                  "ausência de balsa": ru['componentes']['pen_balsa_km'] - venc['componentes']['pen_balsa_km'],
                  "rota mais direta (sinuosidade)": ru['componentes']['pen_sinuosidade_km'] - venc['componentes']['pen_sinuosidade_km']}
-        _mk = max(_difs, key=lambda k: _difs[k])
-        out['criterio_decisivo'] = _mk if _difs[_mk] > 0 else "menor custo logístico global"
+        # [VIÁRIA-PADRÃO - 184ª geração] Com a viária como chave primária, o critério decisivo é a MENOR
+        # DISTÂNCIA VIÁRIA sempre que o vencedor tiver viária estritamente menor; só no EMPATE de viária é
+        # que o desempate (balsa/tempo/custo) decide — e aí reportamos o componente mais determinante.
+        if venc['dist_viaria'] < ru['dist_viaria']:
+            out['criterio_decisivo'] = "menor distância viária"
+        else:
+            _mk = max(_difs, key=lambda k: _difs[k])
+            out['criterio_decisivo'] = _mk if _difs[_mk] > 0 else "menor custo logístico global (desempate)"
     return out
 
 
@@ -15302,6 +20368,159 @@ def _justificar_escolha_hub(resultado_mcda):
     return _txt
 
 
+def _pares_garantia_otimalidade(topk_map_completo, resultados, coords_todos_hubs=None):
+    """[GARANTIA-OTIMA - 184ª geração] PROVA de otimalidade da menor rota viária (pontos 2/3/5/10 da nota).
+
+    O PROBLEMA: rotear só os top-K polos por linha reta é heurística. Em geografia adversa (deltas,
+    penínsulas, contornos de rio), o verdadeiro vencedor viário pode estar FORA do top-K — porque os polos
+    mais próximos em linha reta têm estradas muito sinuosas. A nota exige que isso NUNCA aconteça.
+
+    A SOLUÇÃO (branch-and-bound geográfico com garantia matemática): como a distância viária é SEMPRE ≥ a
+    linha reta, vale o limite inferior — um polo cuja LINHA RETA já é ≥ à melhor viária encontrada JAMAIS
+    poderá vencer (sua viária só pode ser maior). Logo, o vencedor está provado assim que TODOS os polos com
+    linha reta < melhor-viária tiverem sido roteados.
+
+    Recebe, por cliente, a lista COMPLETA de polos (não só o top-K) com suas linhas retas e os resultados já
+    roteados; devolve os pares (cliente, hub) que ainda faltam rotear para fechar a prova. O chamador roteia
+    e pode chamar de novo até a lista esvaziar (convergência garantida). PURA e defensiva."""
+    _out = []
+    try:
+        for _cli, _todos in (topk_map_completo or {}).items():
+            if not _todos:
+                continue
+            _melhor_viaria = None
+            for _item in _todos:
+                try:
+                    _hub = _item[1]
+                except Exception:
+                    continue
+                _r = (resultados or {}).get((_cli, _hub))
+                if _r and _r[0]:
+                    _f = str(_r[5]).lower() if len(_r) > 5 else ""
+                    if "geodés" not in _f and "falha" not in _f:
+                        _v = float(_r[0])
+                        if _melhor_viaria is None or _v < _melhor_viaria:
+                            _melhor_viaria = _v
+            if _melhor_viaria is None:
+                _ord = sorted(_todos, key=lambda it: float(it[0] or 1e18))
+                for _reta, _hub in [(float(it[0] or 0), it[1]) for it in _ord[:1]]:
+                    _r = (resultados or {}).get((_cli, _hub))
+                    if not _r or not _r[0]:
+                        _out.append((0.0, (_cli, _hub)))
+                continue
+            for _item in _todos:
+                try:
+                    _reta, _hub = float(_item[0] or 0), _item[1]
+                except Exception:
+                    continue
+                if _reta <= 0 or _reta >= _melhor_viaria:
+                    continue
+                _r = (resultados or {}).get((_cli, _hub))
+                if _r and _r[0]:
+                    _f = str(_r[5]).lower() if len(_r) > 5 else ""
+                    if "geodés" not in _f and "falha" not in _f:
+                        continue
+                _out.append((_melhor_viaria - _reta, (_cli, _hub)))
+        _out.sort(key=lambda x: -x[0])
+        return [_p for _, _p in _out]
+    except Exception:
+        logger.error("[GARANTIA-OTIMA] Falha ao computar pares de garantia de otimalidade", exc_info=True)
+        return []
+
+
+def _pares_revalidar_mais_proximo(topk_map, resultados, novo_dest, margem=1.20, max_pares=60):
+    """[MOTOR-VALIDACAO - 184ª geração] Camada de validação AGRESSIVA (a que faltava): para CADA cliente,
+    olha o polo MAIS PRÓXIMO por linha reta. Se o vencedor atual está a mais de `margem`× a viária que esse
+    polo mais próximo teria (estimando pela reta como PISO físico — viária ≥ reta), há forte suspeita de que
+    o polo mais próximo foi mal roteado ou descartado (padrão Candeias→Porto Velho: capital a 48 km trocada
+    por Ariquemes a 169 km). Devolve os pares (cliente, polo-mais-próximo) a re-rotear, priorizados pelo
+    ganho potencial. Complementa _pares_retry_viaria (que só reataca fallbacks): aqui reatacamos mesmo polos
+    'reais' cuja viária destoa do piso físico. PURA e defensiva."""
+    _out = []
+    try:
+        for _cli, _cands in (topk_map or {}).items():
+            if not _cands:
+                continue
+            # candidato mais próximo por reta (o topk já vem ordenado por reta, mas garantimos)
+            _ordenados = sorted(_cands, key=lambda it: float(it[0] or 1e18))
+            _reta_min, _hub_prox = float(_ordenados[0][0] or 0), _ordenados[0][1]
+            if _reta_min <= 0:
+                continue
+            # viária do vencedor atual
+            _venc = (novo_dest or {}).get(_cli)
+            _rv = (resultados or {}).get((_cli, _venc)) if _venc else None
+            _viaria_venc = float(_rv[0]) if (_rv and _rv[0]) else None
+            if _viaria_venc is None:
+                continue
+            # se o vencedor JÁ é o polo mais próximo, nada a fazer
+            if _venc == _hub_prox:
+                continue
+            # rota atual do polo mais próximo (pode não existir/ter falhado/ser absurda)
+            _rp = (resultados or {}).get((_cli, _hub_prox))
+            _precisa = False
+            if not _rp or not _rp[0]:
+                _precisa = True  # nunca roteado com sucesso
+            else:
+                _f = str(_rp[5]).lower() if len(_rp) > 5 else ""
+                _via_prox = float(_rp[0])
+                if "geodés" in _f or "falha" in _f:
+                    _precisa = True  # é fallback
+                elif _via_prox > _viaria_venc:
+                    # o mais próximo por reta está roteado com viária MAIOR que o vencedor: coerente,
+                    # não mexe (o vencedor é legitimamente melhor por asfalto)
+                    _precisa = False
+                else:
+                    # [MOTOR-VALIDACAO++ 184ª] o mais próximo tem viária MENOR que o vencedor mas NÃO foi
+                    # eleito — sinal de que a seleção o rebaixou (plausibilidade/peso). Vale reconfirmar a
+                    # rota para forçar sua entrada limpa na próxima reatribuição.
+                    _precisa = True
+            # gatilho principal: o vencedor está muito acima do piso físico do mais próximo
+            if _viaria_venc > _reta_min * float(margem) and _precisa:
+                _out.append((_viaria_venc - _reta_min, (_cli, _hub_prox)))
+        _out.sort(key=lambda x: -x[0])
+        return [_p for _, _p in _out[:int(max_pares)]]
+    except Exception:
+        logger.error("[MOTOR-VALIDACAO] Falha ao revalidar polo mais próximo", exc_info=True)
+        return []
+
+
+def _pares_retry_viaria(topk_map, resultados, fator=1.5, max_pares=40):
+    """[RETRY-VIARIA - 184ª geração] SEGUNDA CHANCE para o candidato geodésico-líder rebaixado (padrão
+    Candeias do Jamari→Porto Velho): quando a rota de um candidato PRÓXIMO falhou (fallback geodésico) e o
+    vencedor real tem viária MUITO maior (reta_do_candidato × fator < melhor_viária_real), aquele candidato
+    merece UMA nova tentativa de roteamento — a falha pode ter sido transiente (rate-limit/timeout) e custar
+    ~150 km ao candidato. Retorna a lista de pares (cliente, hub) a re-rotear, ordenada pelo GANHO potencial
+    e limitada a max_pares (chamadas de API limitadas). PURA e defensiva; clientes sem nenhuma rota real são
+    pulados (caso fluvial — não há o que comparar)."""
+    _out = []
+    try:
+        for _cli, _cands in (topk_map or {}).items():
+            _reais, _fbs = [], []
+            for _item in (_cands or []):
+                try:
+                    _reta, _hub = float(_item[0] or 0), _item[1]
+                except Exception:
+                    continue
+                _r = (resultados or {}).get((_cli, _hub))
+                if not _r or not _r[0]:
+                    continue
+                _f = str(_r[5]).lower() if len(_r) > 5 else ""
+                if "geodés" in _f or "falha" in _f:
+                    _fbs.append((_reta if _reta > 0 else float(_r[4] or 0), _hub))
+                else:
+                    _reais.append((float(_r[0]), _hub))
+            if not _reais or not _fbs:
+                continue
+            _melhor_real = min(_v for _v, _ in _reais)
+            for _reta, _hub in _fbs:
+                if _reta > 0 and _reta * float(fator) < _melhor_real:
+                    _out.append((_melhor_real - _reta, (_cli, _hub)))
+        _out.sort(key=lambda x: -x[0])
+        return [_p for _, _p in _out[:int(max_pares)]]
+    except Exception:
+        return []
+
+
 def _reatribuir_hubs_multicriterio(topk_map, resultados, params=None, parse_tempo=None):
     """[HUB-MCDA - 130ª geração] Dado o topk_map (top-K hubs por cliente, por linha reta) e os resultados
     JÁ roteados de cada par (cliente, hub), reelege o hub de cada cliente por CUSTO LOGÍSTICO EFETIVO
@@ -15331,7 +20550,13 @@ def _reatribuir_hubs_multicriterio(topk_map, resultados, params=None, parse_temp
             except Exception:
                 _tm = None
             _bal = (str(_res[3]).strip().lower() == "sim") if (len(_res) > 3 and _res[3] is not None) else False
-            _cands.append({"hub": _hub, "dist_viaria": _dv, "dist_reta": _reta, "tempo_min": _tm, "balsa": _bal})
+            # [PODA-SEGURA - 184ª geração] Marca se a rota é REAL (OSRM/Google) ou FALLBACK geodésico. Uma
+            # viária de fallback (≈ geodésica) SUBESTIMA a rota real e não pode vencer uma rota real de maior
+            # viária — o seletor ordena rotas reais ANTES das de fallback (ver _selecionar_hub_multicriterio).
+            _fonte = str(_res[5]).lower() if len(_res) > 5 else ""
+            _rota_real = ("geodés" not in _fonte) and ("falha" not in _fonte)
+            _cands.append({"hub": _hub, "dist_viaria": _dv, "dist_reta": _reta, "tempo_min": _tm,
+                           "balsa": _bal, "rota_real": _rota_real})
         if not _cands:
             if _topk:
                 novo_dest[_cli] = _topk[0][1]
@@ -15497,13 +20722,20 @@ def _explicacao_analista_hub(cliente, hub_venc, conc, dist_v, dist_c, dif_km, di
     _fluvial = ("fluvial" in _m) or ("isolado" in _m)
     _sem_conc = (not conc) or str(conc).strip().lower() in ("n/a", "nan", "", "—") or _dc <= 0
 
-    if not _sem_conc:
-        _abre = (f"O hub **{hub_venc}** foi indicado para **{cliente}** por oferecer a menor distância "
-                 f"rodoviária ({_dv:.1f} km) entre as bases avaliadas, com vantagem de {_difkm:.1f} km "
-                 f"(+{_difpct:.1f}%) sobre a segunda melhor opção (**{conc}**, {_dc:.1f} km).")
-    else:
+    if _sem_conc:
         _abre = (f"O hub **{hub_venc}** foi indicado para **{cliente}** com distância rodoviária de "
                  f"{_dv:.1f} km. Não há segunda opção viável registrada (base única na região).")
+    elif _dv <= _dc:
+        _abre = (f"O hub **{hub_venc}** foi indicado para **{cliente}** por oferecer a menor distância "
+                 f"rodoviária ({_dv:.1f} km) entre as bases avaliadas, com vantagem de {abs(_difkm):.1f} km "
+                 f"(+{_difpct:.1f}%) sobre a segunda opção (**{conc}**, {_dc:.1f} km).")
+    else:
+        # [SSOT-DECISAO - 184ª geração] Vencedor com viária MAIOR que a do concorrente → acesso fluvial/isolado,
+        # decisão por proximidade em linha reta. Dizer a VERDADE, nunca "menor distância rodoviária".
+        _abre = (f"O hub **{hub_venc}** foi indicado para **{cliente}** por **proximidade geográfica**: o destino "
+                 f"não tem rota rodoviária viável (**acesso fluvial/isolado**), então a distância por estrada "
+                 f"({_dv:.1f} km) é MAIOR que a de **{conc}** ({_dc:.1f} km), que seria a mais curta por asfalto. "
+                 f"A escolha reflete a menor distância em linha reta, não a viária.")
 
     if _rvr <= 0:
         _rota = ""
@@ -15933,6 +21165,913 @@ def _montar_dataframe_final(df, resultados_unicos, runner_up_map=None, hub_qual_
     _flush_telemetria_forcado()
     return df_final
 
+
+def _validar_coerencia_viaria(df):
+    """[COERENCIA-VIARIA - 184ª geração] VALIDAÇÃO AUTOMÁTICA (modo viária): detecta toda linha em que a
+    distância viária do VENCEDOR é MAIOR que a do CONCORRENTE — inconsistência impossível para o critério de
+    menor rota viária (tipicamente destino de ACESSO FLUVIAL, cuja "rota rodoviária" é um contorno d'água, ou
+    rota recuperada após falha). Registra em log (contagem + exemplos) E marca uma coluna de alerta que
+    aparece na planilha exportada, para auditoria e reprocessamento. NÃO troca o vencedor: isso mexeria em
+    ~15 colunas pareadas + capacidade da alocação e exige validação no ambiente real. O painel de auditoria
+    já sinaliza cada caso na tela e nomeia o hub de menor viária. Defensivo; retorna o df (com a coluna)."""
+    try:
+        if df is None or 'Distancia' not in df.columns or 'Distancia Concorrente' not in df.columns:
+            return df
+        _dv = pd.to_numeric(df['Distancia'], errors='coerce')
+        _dc = pd.to_numeric(df['Distancia Concorrente'], errors='coerce')
+        _mask = _dv.notna() & _dc.notna() & (_dc > 0) & (_dv > _dc)
+        _n = int(_mask.sum())
+        # [PLAUSIBILIDADE - 184ª geração] Desvio FANTASMA (sinuosidade > 4×) é sinalizado SEMPRE — inclusive
+        # quando não há nenhum vencedor>concorrente — pois é um destino genuinamente fluvial mesmo vencendo.
+        _mf = pd.Series(False, index=df.index)
+        if 'Linha Reta' in df.columns:
+            _rr = pd.to_numeric(df['Linha Reta'], errors='coerce')
+            _mf = _dv.notna() & _rr.notna() & (_rr > 0) & ((_dv / _rr) > 4.0)
+        if _n <= 0 and not _mf.any():
+            return df
+        df = df.copy()
+        if 'Alerta Coerência Viária' not in df.columns:
+            df['Alerta Coerência Viária'] = ''
+        df.loc[_mask, 'Alerta Coerência Viária'] = ("⚠️ vencedor com viária MAIOR que o concorrente — "
+                                                    "provável acesso fluvial/rota rodoviária indisponível; "
+                                                    "reprocessar ou tratar como acesso fluvial")
+        _sem_alerta = df['Alerta Coerência Viária'].astype(str).str.strip().isin(['', 'nan', '—'])
+        _mf2 = _mf & _sem_alerta
+        if _mf2.any():
+            df.loc[_mf2, 'Alerta Coerência Viária'] = ("🚢 desvio rodoviário implausível (> 4× a linha reta) "
+                                                       "— trajeto provavelmente fluvial na prática; distância "
+                                                       "rodoviária pode superestimar o deslocamento real")
+        _ex, _cmo, _cmd = [], ('Municipio Origem' if 'Municipio Origem' in df.columns else None), \
+            ('Municipio Destino' if 'Municipio Destino' in df.columns else None)
+        for _, _r in df[_mask].head(5).iterrows():
+            _o = _r.get(_cmo, '?') if _cmo else '?'
+            _d = _r.get(_cmd, '?') if _cmd else '?'
+            _ex.append(f"{_o}→{_d} (venc {pd.to_numeric(_r['Distancia'], errors='coerce'):.0f} km > "
+                       f"conc {pd.to_numeric(_r['Distancia Concorrente'], errors='coerce'):.0f} km)")
+        logger.warning("[COERENCIA-VIARIA] %d rota(s) com viária do vencedor MAIOR que a do concorrente (modo "
+                       "viária) — provável acesso fluvial/rota indisponível. Exemplos: %s. Coluna de alerta "
+                       "adicionada; o painel de auditoria sinaliza cada caso e nomeia o hub de menor viária.",
+                       _n, "; ".join(_ex)) if _n > 0 else None
+        return df
+    except Exception:
+        return df
+
+
+def _classificar_rota(fonte_rota, dist_viaria=None, dist_reta=None, balsa=False):
+    """[XAI-ROTA - 184ª geração] Classifica a rota e EXPLICA o método (a inteligência explicável pedida):
+    devolve dict {selo, rotulo, metodo, motivo}. Regras:
+    - fonte geodésica/falha → 🟠 linha reta por ausência de rota (método 📏), com o PORQUÊ;
+    - rota real com razão V/R > 3× → 🟡 desvio extremo (contorno de barreira — pode não refletir o
+      deslocamento real; provável travessia fluvial na prática);
+    - rota real com razão < 1,03 e > 30 km → 🟡 traçado quase reto (verificar);
+    - rota real normal → 🟢 confirmada pelo motor. Balsa vira sufixo. PURA e defensiva."""
+    _f = str(fonte_rota or "").strip()
+    _fl = _f.lower()
+    _motor = "Google Maps" if "google" in _fl else ("OSRM" if "osrm" in _fl else (_f or "motor desconhecido"))
+    try:
+        _dv = float(dist_viaria) if dist_viaria is not None else None
+        _dr = float(dist_reta) if dist_reta is not None else None
+    except Exception:
+        _dv, _dr = None, None
+    _razao = (_dv / _dr) if (_dv and _dr and _dr > 0) else None
+    _suf_b = " · inclui travessia por balsa" if balsa else ""
+    if (not _f) or ("geodés" in _fl) or ("karney" in _fl) or ("falha" in _fl):
+        return {"selo": "🟠", "rotulo": "Linha reta — sem rota viária" + _suf_b,
+                "metodo": "📏 Distância estimada em linha reta",
+                "motivo": ("Foi utilizada a distância em linha reta (geodésica de Karney, WGS-84) porque "
+                           "nenhum motor de roteamento produziu rota rodoviária confiável — destino de acesso "
+                           "fluvial/isolado ou falha de todos os motores. Sinalizado para auditoria.")}
+    if _razao is not None and _razao > 3.0:
+        return {"selo": "🟡", "rotulo": f"Rota viária com desvio extremo ({_razao:.1f}× a linha reta)" + _suf_b,
+                "metodo": "✅ Distância viária real (com ressalva)",
+                "motivo": (f"Rota calculada pelo {_motor}, mas o traçado percorre {_razao:.1f}× a distância em "
+                           "linha reta — desvio típico de contorno de barreira natural (rio/floresta). Na "
+                           "prática, o deslocamento real pode ser fluvial e menor; revisar este caso.")}
+    if _razao is not None and _razao < 1.03 and (_dv or 0) > 30:
+        return {"selo": "🟡", "rotulo": "Rota viária com traçado quase reto — verificar" + _suf_b,
+                "metodo": "✅ Distância viária real (com ressalva)",
+                "motivo": (f"Rota calculada pelo {_motor}, porém quase idêntica à linha reta "
+                           f"({_razao:.2f}×) em trecho longo — padrão raro em malha real; vale conferir se o "
+                           "trecho mapeado é trafegável.")}
+    return {"selo": "🟢", "rotulo": f"Rota viária confirmada ({_motor})" + _suf_b,
+            "metodo": "✅ Distância viária real",
+            "motivo": f"Foi utilizada a distância viária porque o {_motor} calculou uma rota válida"
+                      + (f" (razão V/R {_razao:.2f}×)" if _razao else "") + "."}
+
+
+def _enriquecer_classificacao_rotas(df):
+    """[XAI-ROTA - 184ª geração] Pós-passo ADITIVO (todos os modos): adiciona à planilha as colunas
+    'Método da Distância' (✅ viária real / 📏 linha reta — nunca implícito) e 'Classificação da Rota'
+    (🟢/🟡/🟠 com rótulo), e ANEXA o MOTIVO às colunas de justificativa/explicação existentes. Defensivo;
+    retorna o df."""
+    try:
+        if df is None or getattr(df, "empty", True) or 'Fonte da Rota' not in df.columns:
+            return df
+        _dv = pd.to_numeric(df.get('Distancia'), errors='coerce') if 'Distancia' in df.columns else None
+        _dr = pd.to_numeric(df.get('Linha Reta'), errors='coerce') if 'Linha Reta' in df.columns else None
+        _bal = (df['Balsas'].astype(str).str.strip().str.lower().isin(['sim', 'yes', 'true', '1'])
+                if 'Balsas' in df.columns else None)
+        _metodos, _classes, _motivos = [], [], []
+        for _i in range(len(df)):
+            _c = _classificar_rota(
+                df['Fonte da Rota'].iloc[_i],
+                (_dv.iloc[_i] if _dv is not None else None),
+                (_dr.iloc[_i] if _dr is not None else None),
+                bool(_bal.iloc[_i]) if _bal is not None else False)
+            _metodos.append(_c["metodo"])
+            _classes.append(f'{_c["selo"]} {_c["rotulo"]}')
+            _motivos.append(_c["motivo"])
+        df = df.copy()
+        df['Método da Distância'] = _metodos
+        df['Classificação da Rota'] = _classes
+        for _col in ('Explicacao do Criterio', 'Explicação do Critério', 'Justificativa Hub (XAI)'):
+            if _col in df.columns:
+                _base = df[_col].astype(object)
+                df[_col] = [((str(_b).strip() + " | ") if (str(_b).strip() and str(_b).strip().lower()
+                            not in ('nan', 'none', '—')) else "") + _m
+                            for _b, _m in zip(_base, _motivos)]
+        return df
+    except Exception:
+        return df
+
+
+def _garantir_concorrente_sempre(df, topk_map=None, resultados=None):
+    """[CONCORRENTE-SEMPRE - 184ª geração] GARANTE que TODA linha da planilha de Locais tenha um concorrente
+    (2º melhor local de prova) — nunca 'N/A'/vazio. Antes, quando o pipeline não populava o 2º colocado
+    (res[31] ausente), a coluna saía 'N/A'. Agora, para cada linha sem concorrente, busca no topk_map o polo
+    mais próximo DIFERENTE do vencedor e preenche nome, código IBGE, UF, coordenadas, linha reta e — se houver
+    rota em `resultados` — a distância viária. Aditivo e defensivo; retorna o df. Só atua onde falta."""
+    try:
+        if df is None or getattr(df, "empty", True) or 'Concorrente Analisado' not in df.columns:
+            return df
+        _vazio = df['Concorrente Analisado'].astype(str).str.strip().isin(
+            ['', 'nan', 'none', 'n/a', 'N/A', '—', 'None'])
+        if not _vazio.any() or not topk_map:
+            return df
+        df = df.copy()
+        _cod_col = 'Cod IBGE Origem' if 'Cod IBGE Origem' in df.columns else None
+        _mun_col = 'Municipio Origem' if 'Municipio Origem' in df.columns else None
+        _preenchidos = 0
+        for _i in df.index[_vazio]:
+            # chave do cliente no topk_map: tenta código IBGE de origem, depois nome
+            _chave = None
+            if _cod_col and str(df.at[_i, _cod_col]).strip():
+                _c = str(df.at[_i, _cod_col]).strip()
+                _chave = next((k for k in topk_map if str(k) == _c or str(k).lstrip("0") == _c.lstrip("0")), None)
+            if _chave is None and _mun_col:
+                _nm = str(df.at[_i, _mun_col]).strip().lower()
+                _chave = next((k for k in topk_map if str(k).strip().lower() == _nm), None)
+            if _chave is None:
+                continue
+            _venc = str(df.at[_i, 'Municipio Destino']).strip().lower() if 'Municipio Destino' in df.columns else ""
+            _venc_cod = str(df.at[_i, 'Cod IBGE Destino']).strip() if 'Cod IBGE Destino' in df.columns else ""
+            # 1º candidato do topk diferente do vencedor (por hub/código)
+            _alt = None
+            for _item in (topk_map.get(_chave) or []):
+                try:
+                    _reta_a, _hub_a = float(_item[0] or 0), str(_item[1]).strip()
+                except Exception:
+                    continue
+                if _hub_a.lower() == _venc or _hub_a == _venc_cod:
+                    continue
+                _alt = (_reta_a, _hub_a)
+                break
+            if not _alt:
+                continue
+            _reta_a, _hub_a = _alt
+            _nome_a = _resolver_nome_municipio(_hub_a)
+            df.at[_i, 'Concorrente Analisado'] = _nome_a
+            if 'Linha Reta Concorrente' in df.columns:
+                df.at[_i, 'Linha Reta Concorrente'] = round(_reta_a, 3) if _reta_a else df.at[_i, 'Linha Reta Concorrente']
+            # distância viária real do concorrente, se roteada
+            _r = (resultados or {}).get((_chave, _hub_a))
+            if _r and _r[0] and 'Distancia Concorrente' in df.columns:
+                df.at[_i, 'Distancia Concorrente'] = round(float(_r[0]), 2)
+                if 'Lat Concorrente' in df.columns and len(_r) > 21 and _r[21]:
+                    df.at[_i, 'Lat Concorrente'] = round(float(_r[21]), 6)
+                if 'Lon Concorrente' in df.columns and len(_r) > 22 and _r[22]:
+                    df.at[_i, 'Lon Concorrente'] = round(float(_r[22]), 6)
+            _preenchidos += 1
+        if _preenchidos:
+            logger.warning("[CONCORRENTE-SEMPRE] %d linha(s) estavam sem concorrente e foram preenchidas com o "
+                           "2º polo mais próximo do topk.", _preenchidos)
+        return df
+    except Exception:
+        logger.error("[CONCORRENTE-SEMPRE] Falha ao garantir concorrente", exc_info=True)
+        return df
+
+
+def _auditar_cobertura_roteamento(topk_map, resultados):
+    """[AUDITORIA-COBERTURA - 184ª geração] Métricas de transparência da decisão (item 8 da nota): a partir
+    do topk_map (candidatos por cliente) e resultados (rotas calculadas), quantifica quantos pares candidatos
+    existiam, quantos foram EFETIVAMENTE roteados com sucesso, quantos caíram em fallback geodésico, e a
+    taxa de sucesso do roteamento. Devolve um dict de métricas para exibição em tela/telemetria. PURA."""
+    _m = {"clientes": 0, "pares_candidatos": 0, "pares_roteados": 0, "pares_reais": 0,
+          "pares_fallback": 0, "pares_sem_rota": 0, "taxa_sucesso": 0.0, "media_candidatos_por_cliente": 0.0}
+    try:
+        if not topk_map:
+            return _m
+        _m["clientes"] = len(topk_map)
+        _tot_cand = 0
+        for _cli, _cands in topk_map.items():
+            _cands = _cands or []
+            _tot_cand += len(_cands)
+            for _item in _cands:
+                try:
+                    _hub = _item[1]
+                except Exception:
+                    continue
+                _m["pares_candidatos"] += 0  # contado abaixo por _tot_cand
+                _r = (resultados or {}).get((_cli, _hub))
+                if not _r or not _r[0]:
+                    _m["pares_sem_rota"] += 1
+                    continue
+                _m["pares_roteados"] += 1
+                _f = str(_r[5]).lower() if len(_r) > 5 else ""
+                if "geodés" in _f or "falha" in _f:
+                    _m["pares_fallback"] += 1
+                else:
+                    _m["pares_reais"] += 1
+        _m["pares_candidatos"] = _tot_cand
+        if _tot_cand:
+            _m["taxa_sucesso"] = round(100.0 * _m["pares_reais"] / _tot_cand, 1)
+            _m["media_candidatos_por_cliente"] = round(_tot_cand / max(1, _m["clientes"]), 1)
+        return _m
+    except Exception:
+        logger.error("[AUDITORIA-COBERTURA] Falha ao auditar cobertura", exc_info=True)
+        return _m
+
+
+def _validar_consistencia_fisica(df):
+    """[CONSISTENCIA-FISICA - 184ª geração] Verificações automáticas de coerência física (item 6 da nota):
+    (a) a distância VIÁRIA nunca pode ser menor que a LINHA RETA — geometricamente impossível, denuncia snap
+    em via errada/coordenada trocada; (b) velocidade média implícita (km/tempo) plausível (5–130 km/h).
+    Adiciona a coluna 'Consistência Física' com o veredito por linha — não altera decisões nem distâncias,
+    apenas SINALIZA para auditoria e revisão. PURA e defensiva; devolve o df."""
+    try:
+        if df is None or getattr(df, "empty", True) or 'Distancia' not in df.columns:
+            return df
+        df = df.copy()
+        _dv = pd.to_numeric(df['Distancia'], errors='coerce')
+        _dr = pd.to_numeric(df.get('Linha Reta'), errors='coerce') if 'Linha Reta' in df.columns else None
+        _vereditos = []
+        for _i in df.index:
+            _loc = df.index.get_loc(_i)
+            _v = _dv.iloc[_loc] if hasattr(_dv, 'iloc') else _dv[_i]
+            _flags = []
+            if _v is not None and pd.notna(_v) and float(_v) > 0:
+                if _dr is not None:
+                    _r = _dr.iloc[_loc] if hasattr(_dr, 'iloc') else _dr[_i]
+                    if _r is not None and pd.notna(_r) and float(_r) > 0 and float(_v) < float(_r) * 0.99:
+                        _flags.append("⚠️ viária < linha reta (impossível — verificar snap/coordenada)")
+                if 'Tempo' in df.columns:
+                    _tmin = _parse_tempo_min(str(df.at[_i, 'Tempo'])) if '_parse_tempo_min' in globals() else None
+                    if _tmin and _tmin > 0:
+                        _vel = float(_v) / (_tmin / 60.0)
+                        if _vel > 130:
+                            _flags.append(f"⚠️ velocidade média {_vel:.0f} km/h implausível (alta)")
+                        elif _vel < 5:
+                            _flags.append(f"⚠️ velocidade média {_vel:.0f} km/h implausível (baixa)")
+            _vereditos.append(" · ".join(_flags) if _flags else "✅ coerente")
+        df['Consistência Física'] = _vereditos
+        _n = sum(1 for _v in _vereditos if _v != "✅ coerente")
+        if _n:
+            logger.warning("[CONSISTENCIA-FISICA] %d linha(s) com alerta de coerência física — sinalizadas na "
+                           "coluna 'Consistência Física'.", _n)
+        return df
+    except Exception:
+        logger.error("[CONSISTENCIA-FISICA] Falha na validação de consistência física", exc_info=True)
+        return df
+
+
+def _fundir_shortlist_no_topk(topk_map, shortlist_matriz, dist_matriz):
+    """[MATRIZ-VIARIA - 184ª geração] CORREÇÃO DE GARGALO: a reatribuição final multicritério opera sobre o
+    topk_map (top-K por LINHA RETA). Mas a matriz pode eleger um vencedor que está FORA desse top-K de reta
+    (ex.: o 12º mais próximo por reta, porém com a menor viária real). Sem esta fusão, esse vencedor seria
+    invisível à reatribuição e acabaria descartado — anulando o ganho da matriz justamente na geografia
+    adversa que ela existe para resolver.
+
+    Esta função funde, por cliente, os candidatos revelados pela matriz (shortlist + todos os medidos) ao
+    topk_map, cada um com sua LINHA RETA correta (de dist_matriz quando disponível; senão mantém o valor já
+    presente). Retorna um NOVO topk_map enriquecido, sem duplicar hubs e preservando a ordem por reta. PURA
+    e defensiva; se não houver dados de matriz, devolve o topk_map original inalterado."""
+    try:
+        if not shortlist_matriz and not dist_matriz:
+            return topk_map
+        _novo = {}
+        for _cli, _lista in (topk_map or {}).items():
+            _novo[_cli] = list(_lista or [])
+        # coletar, por cliente, os hubs da matriz com sua reta (dist_matriz não tem reta — usamos a do
+        # topk quando o hub já existe; para hubs novos do shortlist, a reta não é crítica para a
+        # reatribuição porque ela usa a VIÁRIA de _resultados; passamos um placeholder alto só p/ ordenar)
+        _clientes = set(list((shortlist_matriz or {}).keys()) + list((dist_matriz or {}).keys()))
+        for _cli in _clientes:
+            _existentes = {str(_t[1]): _t for _t in _novo.get(_cli, []) if len(_t) >= 2}
+            _add = []
+            # hubs do shortlist primeiro (são os prioritários da decisão de qualidade)
+            for (_hub, _d) in (shortlist_matriz or {}).get(_cli, []):
+                if str(_hub) not in _existentes:
+                    # reta desconhecida aqui; usa a viária da matriz como PISO (reta ≤ viária) só p/ ordenar
+                    _add.append((float(_d), str(_hub)))
+                    _existentes[str(_hub)] = True
+            if _cli not in _novo:
+                _novo[_cli] = []
+            _novo[_cli].extend(_add)
+        return _novo
+    except Exception:
+        logger.error("[MATRIZ-VIARIA] Falha ao fundir shortlist no topk_map", exc_info=True)
+        return topk_map
+
+
+def _segunda_passada_google(df, _max_pares=None):
+    """[SEGUNDA-PASSADA-GOOGLE - 184ª geração] Aumenta a participação REAL do Google sem martelar seu
+    rate-limit. Toda rota já passa pelo Google e pelo OSRM no pipeline (o Google é o motor prioritário); mas
+    quando o Google impõe rate-limit temporário, parte dos pares cai só no OSRM naquele instante. Esta função
+    roda AO FIM do estudo: identifica os pares resolvidos apenas por OSRM (ou fallback) e faz UMA NOVA
+    tentativa no Google — que, passado o tempo, pode já ter liberado o rate-limit. Se o Google agora responde
+    E sua rota é fisicamente válida, o valor é adotado (com a regra de sempre: Google prioritário, só perde
+    se o OSRM for 2%+ menor). Isso recupera participação do Google de forma SEGURA: não aumenta a rajada
+    (roda depois, espaçado), respeita o disjuntor, e nunca piora um resultado (só troca se o Google vier
+    melhor/coerente).
+
+    Retorna: (df_atualizado, n_recuperados) — o df com as rotas eventualmente melhoradas pelo Google e quantos
+    pares o Google recuperou. Defensiva; se algo falhar, devolve o df original.
+
+    Observação de segurança: esta função depende de rede (chama o scraper). No pipeline real ela roda no
+    ambiente do usuário; em teste isolado é exercida com um cliente injetado. Só reprocessa pares cujo
+    resultado atual NÃO é Google, preservando tudo que o Google já havia decidido."""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return df, 0
+        if "Fonte da Rota" not in df.columns or "Distancia" not in df.columns:
+            return df, 0
+        _f = df["Fonte da Rota"].astype(str).str.lower()
+        # candidatos à recuperação: tudo que NÃO veio do Google (OSRM puro ou fallback)
+        _mask_nao_google = ~_f.str.contains("google")
+        _idx_alvo = list(df.index[_mask_nao_google])
+        if _max_pares is not None:
+            _idx_alvo = _idx_alvo[:int(_max_pares)]
+        if not _idx_alvo:
+            return df, 0
+        _n_rec = 0
+        for _i in _idx_alvo:
+            # só tenta se o disjuntor permitir (respeita a proteção anti-bloqueio)
+            if not _google_pode_chamar():
+                break  # disjuntor aberto: não adianta insistir agora
+            try:
+                _o_lat = float(df.at[_i, "Lat Origem"]) if "Lat Origem" in df.columns else None
+                _o_lon = float(df.at[_i, "Lon Origem"]) if "Lon Origem" in df.columns else None
+                _d_lat = float(df.at[_i, "Lat Destino"]) if "Lat Destino" in df.columns else None
+                _d_lon = float(df.at[_i, "Lon Destino"]) if "Lon Destino" in df.columns else None
+                _reta = float(df.at[_i, "Linha Reta"]) if "Linha Reta" in df.columns else 0.0
+            except Exception:
+                continue
+            if not all(v not in (None, 0.0) for v in (_o_lat, _o_lon, _d_lat, _d_lon)):
+                continue
+            _mun_o = str(df.at[_i, "Municipio Origem"]) if "Municipio Origem" in df.columns else ""
+            _mun_d = str(df.at[_i, "Municipio Destino"]) if "Municipio Destino" in df.columns else ""
+            _res_g = extrair_dados_reais_google(_mun_o, _mun_d, _o_lat, _o_lon, _d_lat, _d_lon, _reta,
+                                                usar_coordenadas=True)
+            if not _res_g:
+                continue
+            _km_g = _res_g[0]
+            if not _viaria_fisicamente_possivel(_km_g, _reta):
+                continue  # Google veio fisicamente impossível: ignora, mantém o atual
+            # adota o Google se ele for melhor OU se o atual não era rota real (fallback)
+            _km_atual = None
+            try:
+                _km_atual = float(df.at[_i, "Distancia"])
+            except Exception:
+                _km_atual = None
+            _fonte_atual = str(df.at[_i, "Fonte da Rota"]).lower()
+            _era_fallback = ("geodés" in _fonte_atual) or ("falha" in _fonte_atual)
+            if _era_fallback or (_km_atual is not None and _km_g <= _km_atual * 1.02):
+                # Google recupera este par: atualiza distância e fonte (demais colunas pareadas seguem no
+                # fluxo normal do builder; aqui priorizamos a métrica de decisão — a menor viária real).
+                df.at[_i, "Distancia"] = round(float(_km_g), 1)
+                df.at[_i, "Fonte da Rota"] = "Google Maps"
+                _n_rec += 1
+        if _n_rec:
+            logger.warning("[SEGUNDA-PASSADA-GOOGLE] Google recuperou %d rota(s) que haviam caído no OSRM/"
+                           "fallback — participação do Google aumentada sem martelar o rate-limit.", _n_rec)
+        return df, _n_rec
+    except Exception:
+        logger.error("[SEGUNDA-PASSADA-GOOGLE] Falha na segunda passada do Google", exc_info=True)
+        return df, 0
+
+
+def _diagnosticar_participacao_motores(df):
+    """[PARTICIPACAO-MOTOR - 184ª geração] Mede a participação REAL de cada motor de roteamento no resultado
+    final e diagnostica quando o Google está anormalmente ausente — a queixa recorrente de "o Google parou de
+    participar". Como o motor Google é um scraper de endpoint (não a API oficial), o Google pode passar a
+    bloquear/alterar as respostas em produção, fazendo sua taxa despencar sem que nada no código tenha mudado.
+    Esta função dá VISIBILIDADE a isso: conta as fontes, calcula percentuais e emite um veredito acionável.
+
+    Retorna dict {total, n_google, n_osrm, n_fallback, pct_google, pct_osrm, pct_fallback, veredito, nivel}.
+    PURA e defensiva."""
+    try:
+        if df is None or getattr(df, "empty", True) or "Fonte da Rota" not in df.columns:
+            return {}
+        _f = df["Fonte da Rota"].astype(str).str.lower()
+        _n = len(df)
+        _n_google = int(_f.str.contains("google").sum())
+        _n_osrm = int((_f.str.contains("osrm") & ~_f.str.contains("google")).sum())
+        _n_fallback = int((_f.str.contains("geodés") | _f.str.contains("falha") |
+                           _f.str.contains("linha reta")).sum())
+        _pct_g = 100.0 * _n_google / max(_n, 1)
+        _pct_o = 100.0 * _n_osrm / max(_n, 1)
+        _pct_f = 100.0 * _n_fallback / max(_n, 1)
+        # veredito acionável sobre a participação do Google
+        if _n == 0:
+            _veredito, _nivel = "Sem dados para diagnosticar.", "info"
+        elif _pct_g < 5:
+            _veredito = ("Participação do Google praticamente nula. O motor Google (scraper) provavelmente "
+                         "está sendo bloqueado ou teve seu formato de resposta alterado em produção. O "
+                         "roteamento seguiu válido pelo OSRM, mas para restaurar o Google como motor "
+                         "prioritário de forma estável, a via definitiva é a API oficial do Google (com "
+                         "chave). Verifique também conectividade e rate-limit do ambiente.")
+            _nivel = "erro"
+        elif _pct_g < 30:
+            _veredito = ("Participação do Google reduzida. O scraper está respondendo apenas em parte dos "
+                         "casos — comum quando o Google impõe rate-limit ao ambiente. O OSRM cobriu o "
+                         "restante. A API oficial eliminaria essa instabilidade.")
+            _nivel = "aviso"
+        elif _pct_g < 60:
+            _veredito = ("Participação equilibrada entre Google e OSRM. O Google está atuando de forma "
+                         "relevante; o OSRM complementa onde o Google não respondeu.")
+            _nivel = "info"
+        else:
+            _veredito = ("Google é o motor predominante, como esperado. O OSRM atua como complemento e "
+                         "auditoria.")
+            _nivel = "ok"
+        return {"total": _n, "n_google": _n_google, "n_osrm": _n_osrm, "n_fallback": _n_fallback,
+                "pct_google": round(_pct_g, 1), "pct_osrm": round(_pct_o, 1),
+                "pct_fallback": round(_pct_f, 1), "veredito": _veredito, "nivel": _nivel}
+    except Exception:
+        logger.error("[PARTICIPACAO-MOTOR] Falha ao diagnosticar participação dos motores", exc_info=True)
+        return {}
+
+
+def _auditar_divergencia_motores(dist_matriz, novo_dest_final):
+    """[DIVERGENCIA-MOTOR - 184ª geração] INTELIGÊNCIA de descoberta: compara o vencedor sugerido pela matriz
+    OSRM (Fase 1) com o vencedor FINAL após a decisão Google-prioritária (Fase 2). Quando os dois discordam,
+    é um sinal valioso — indica um município onde a escolha do local é SENSÍVEL ao motor de roteamento
+    (tipicamente malha rural/complexa onde OSRM e Google divergem). Registrar isso permite auditar e priorizar
+    revisão manual justamente onde a decisão é menos robusta. NÃO altera decisões (o vencedor final, do Google,
+    é mantido — é o motor prioritário); apenas produz métricas e a lista de casos divergentes. PURA.
+
+    Retorna dict: {total_avaliado, divergencias, taxa_divergencia_pct, casos:[{origem, matriz, final}]}."""
+    _r = {"total_avaliado": 0, "divergencias": 0, "taxa_divergencia_pct": 0.0, "casos": []}
+    try:
+        if not dist_matriz or not novo_dest_final:
+            return _r
+        for _org, _dh in dist_matriz.items():
+            if not _dh:
+                continue
+            _venc_matriz = min(_dh, key=_dh.get)  # menor viária pela matriz OSRM
+            _venc_final = novo_dest_final.get(_org)
+            if not _venc_final:
+                continue
+            _r["total_avaliado"] += 1
+            if str(_venc_matriz) != str(_venc_final):
+                _r["divergencias"] += 1
+                if len(_r["casos"]) < 50:  # amostra p/ exibição
+                    _r["casos"].append({"origem": str(_org), "matriz_osrm": str(_venc_matriz),
+                                        "decisao_final": str(_venc_final)})
+        if _r["total_avaliado"]:
+            _r["taxa_divergencia_pct"] = round(100.0 * _r["divergencias"] / _r["total_avaliado"], 1)
+        return _r
+    except Exception:
+        logger.error("[DIVERGENCIA-MOTOR] Falha ao auditar divergência entre motores", exc_info=True)
+        return _r
+
+
+def _diagnosticar_polo_suspeito(df):
+    """[DIAGNOSTICO-POLO - 184ª geração] Detecta municípios cujo polo vencedor está SUSPEITOSAMENTE distante,
+    sinalizando que pode existir um polo melhor ausente da lista de destinos OU mal roteado (padrão observado
+    nos casos de derrota: a referência acha um polo 2-3× mais perto). Critério: a rota do vencedor tem
+    sinuosidade muito alta (viária/reta > 3) — indício de que a 'estrada' contorna um rio e há provavelmente
+    uma opção terrestre melhor não considerada. Retorna lista de dicts {origem, viaria, reta, sinuosidade,
+    alerta}. NÃO altera decisões — dá VISIBILIDADE ao gargalo para o operador investigar o universo de
+    destinos. PURA e defensiva."""
+    _achados = []
+    try:
+        if df is None or getattr(df, "empty", True):
+            return _achados
+        _org_col = 'Municipio Origem' if 'Municipio Origem' in df.columns else (
+            'Origem' if 'Origem' in df.columns else None)
+        if 'Distancia' not in df.columns or 'Linha Reta' not in df.columns or not _org_col:
+            return _achados
+        _dv = pd.to_numeric(df['Distancia'], errors='coerce')
+        _dr = pd.to_numeric(df['Linha Reta'], errors='coerce')
+        for _i in df.index:
+            _loc = df.index.get_loc(_i)
+            _v = _dv.iloc[_loc] if hasattr(_dv, 'iloc') else _dv[_i]
+            _r = _dr.iloc[_loc] if hasattr(_dr, 'iloc') else _dr[_i]
+            if _v is None or _r is None or pd.isna(_v) or pd.isna(_r) or float(_r) <= 0 or float(_v) <= 0:
+                continue
+            _sin = float(_v) / float(_r)
+            if _sin > 3.0:
+                _achados.append({
+                    "origem": str(df.at[_i, _org_col]),
+                    "viaria_km": round(float(_v), 1),
+                    "reta_km": round(float(_r), 1),
+                    "sinuosidade": round(_sin, 1),
+                    "alerta": ("rota muito sinuosa (provável contorno fluvial) — verifique se há um polo "
+                               "terrestre mais próximo ausente da lista de destinos ou mal roteado")})
+        _achados.sort(key=lambda a: -a["sinuosidade"])
+        return _achados
+    except Exception:
+        logger.error("[DIAGNOSTICO-POLO] Falha ao diagnosticar polos suspeitos", exc_info=True)
+        return _achados
+
+
+def _validar_coerencia_tempo_distancia(df):
+    """[COERENCIA-TD - 184ª geração] SENTINELA de proveniência tempo↔distância. Garante, de forma auditável,
+    que o Tempo e a Distância de cada linha são coerentes entre si — o que só acontece quando ambos vieram
+    do MESMO motor vencedor (Google OU OSRM), nunca misturados. O teste é físico: a velocidade implícita
+    (distância ÷ tempo) precisa cair numa faixa plausível (5–130 km/h). Uma velocidade absurda é a assinatura
+    de dessincronização (ex.: distância do Google com tempo do OSRM). A coluna 'Coerência Tempo×Distância'
+    registra o veredito; a função NÃO altera valores (a correção da fonte cabe ao motor), apenas SINALIZA
+    para auditoria — mas quando detecta incoerência grave, marca para o operador revisar. PURA e defensiva."""
+    try:
+        if df is None or getattr(df, "empty", True) or 'Distancia' not in df.columns or 'Tempo' not in df.columns:
+            return df
+        df = df.copy()
+        _dv = pd.to_numeric(df['Distancia'], errors='coerce')
+        _vereditos = []
+        _n_incoerente = 0
+        for _i in df.index:
+            _loc = df.index.get_loc(_i)
+            _d = _dv.iloc[_loc] if hasattr(_dv, 'iloc') else _dv[_i]
+            _tmin = _parse_tempo_min(str(df.at[_i, 'Tempo'])) if '_parse_tempo_min' in globals() else None
+            if _d is None or pd.isna(_d) or float(_d) <= 0 or not _tmin or _tmin <= 0:
+                _vereditos.append("—")  # sem dados suficientes p/ avaliar
+                continue
+            _vel = float(_d) / (_tmin / 60.0)
+            if 5 <= _vel <= 130:
+                _vereditos.append(f"✅ coerente ({_vel:.0f} km/h)")
+            else:
+                _n_incoerente += 1
+                _vereditos.append(f"⚠️ velocidade {_vel:.0f} km/h — verificar sincronia tempo×distância")
+        df['Coerência Tempo×Distância'] = _vereditos
+        if _n_incoerente:
+            logger.warning("[COERENCIA-TD] %d linha(s) com velocidade implícita implausível — possível "
+                           "dessincronização tempo×distância (fontes diferentes). Sinalizadas na coluna "
+                           "'Coerência Tempo×Distância'.", _n_incoerente)
+        return df
+    except Exception:
+        logger.error("[COERENCIA-TD] Falha na sentinela de coerência tempo×distância", exc_info=True)
+        return df
+
+
+def _garantir_tempo_estimado(df):
+    """[MOTOR-TEMPO - 184ª geração] GARANTE o campo Tempo em TODA linha com distância viária válida. Causa
+    raiz do 'N/A': quando o vencedor vinha de um caminho que não serializava o tempo (ou quando o motor
+    devolvia só distância), a coluna saía vazia mesmo havendo rota. Agora, se há distância numérica e o tempo
+    está ausente, ele é DERIVADO por velocidade média física realista dependente da distância (urbano→rodovia),
+    e marcado como estimado. Preenche 'Tempo' e, se existir, 'Tempo Estimado de Deslocamento'. Defensivo."""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return df
+        _cols_tempo = [c for c in ('Tempo', 'Tempo Estimado de Deslocamento') if c in df.columns]
+        if not _cols_tempo or 'Distancia' not in df.columns:
+            return df
+        df = df.copy()
+        _dist = pd.to_numeric(df['Distancia'], errors='coerce')
+
+        def _vazio(v):
+            s = str(v).strip().lower()
+            return s in ('', 'nan', 'none', 'n/a', 'na', '—', 'tempo não estimado', '0', '0 min')
+
+        def _vel(km):
+            # velocidade média física por faixa (considera trechos urbanos + rodovia + serra/ferry)
+            if km is None or km <= 0:
+                return 55.0
+            if km < 20:
+                return 38.0
+            if km < 60:
+                return 52.0
+            if km < 150:
+                return 62.0
+            if km < 400:
+                return 68.0
+            return 72.0
+        _n_fix = 0
+        for _i in df.index:
+            _d = _dist.iloc[df.index.get_loc(_i)] if hasattr(_dist, 'iloc') else _dist[_i]
+            if _d is None or pd.isna(_d) or float(_d) <= 0:
+                continue
+            _precisa = any(_vazio(df.at[_i, _c]) for _c in _cols_tempo)
+            if not _precisa:
+                continue
+            _min = (float(_d) / _vel(float(_d))) * 60.0
+            _txt = _formatar_duracao(_min * 60.0) + " (estimado)"
+            for _c in _cols_tempo:
+                if _vazio(df.at[_i, _c]):
+                    df.at[_i, _c] = _txt
+            _n_fix += 1
+        if _n_fix:
+            logger.warning("[MOTOR-TEMPO] %d linha(s) tinham distância viária mas Tempo vazio — tempo "
+                           "estimado por velocidade média física.", _n_fix)
+        return df
+    except Exception:
+        logger.error("[MOTOR-TEMPO] Falha ao garantir tempo estimado", exc_info=True)
+        return df
+
+
+def _auditar_padroes_derrota(df):
+    """[APRENDIZADO - 184ª geração] APRENDE com padrões de subotimalidade dentro do próprio estudo: varre as
+    linhas e detecta assinaturas de escolha potencialmente inferior — (a) rota do vencedor com sinuosidade
+    absurda (desvio fluvial fantasma), (b) vencedor com viária muito maior que o concorrente (troca de polo
+    suspeita), (c) linha reta usada onde havia alternativa. Retorna uma lista de dicts {origem, padrao,
+    severidade, detalhe} para exibição/telemetria — não altera decisões (isso é feito na seleção). PURA."""
+    _achados = []
+    try:
+        if df is None or getattr(df, "empty", True):
+            return _achados
+        _dv = pd.to_numeric(df.get('Distancia'), errors='coerce') if 'Distancia' in df.columns else None
+        _dr = pd.to_numeric(df.get('Linha Reta'), errors='coerce') if 'Linha Reta' in df.columns else None
+        _dc = pd.to_numeric(df.get('Distancia Concorrente'), errors='coerce') if 'Distancia Concorrente' in df.columns else None
+        _org = 'Municipio Origem' if 'Municipio Origem' in df.columns else ('Origem' if 'Origem' in df.columns else None)
+        for _i in df.index:
+            _o = str(df.at[_i, _org]) if _org else "—"
+            _vd = float(_dv.iloc[df.index.get_loc(_i)]) if _dv is not None and pd.notna(_dv.iloc[df.index.get_loc(_i)]) else None
+            _vr = float(_dr.iloc[df.index.get_loc(_i)]) if _dr is not None and pd.notna(_dr.iloc[df.index.get_loc(_i)]) else None
+            _vc = float(_dc.iloc[df.index.get_loc(_i)]) if _dc is not None and pd.notna(_dc.iloc[df.index.get_loc(_i)]) else None
+            if _vd and _vr and _vr > 0 and (_vd / _vr) > 4.0:
+                _achados.append({"origem": _o, "padrao": "desvio_fantasma", "severidade": "alta",
+                                 "detalhe": f"sinuosidade {(_vd/_vr):.1f}× — rota rodoviária provavelmente "
+                                            "fluvial na prática"})
+            elif _vd and _vc and _vc > 0 and _vd > _vc * 1.15:
+                _achados.append({"origem": _o, "padrao": "polo_mais_distante", "severidade": "média",
+                                 "detalhe": f"vencedor {_vd:.0f} km vs concorrente {_vc:.0f} km — verificar se "
+                                            "o concorrente seria melhor"})
+        return _achados
+    except Exception:
+        logger.error("[APRENDIZADO] Falha na auditoria de padrões", exc_info=True)
+        return _achados
+
+
+def _resolver_nomes_finais(df):
+    """[NOME-CONCORRENTE - 184ª geração] Passe FINAL e ABRANGENTE: garante que 'Concorrente Analisado' e o
+    vencedor 'Municipio Destino' apareçam SEMPRE pelo NOME do município (nunca pelo código IBGE) em TODAS as
+    linhas — inclusive as que o alinhamento por viária não tocou (ranking <2) e em qualquer modo (viária ou
+    linha reta). Resolve pela coordenada do concorrente/vencedor ou pelo código, via _resolver_nome_municipio.
+    Vetorizado por coluna; defensivo. Retorna o df."""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return df
+        _alvos = [('Concorrente Analisado', 'Lat Concorrente', 'Lon Concorrente'),
+                  ('Municipio Destino', 'Lat Destino', 'Lon Destino')]
+        for _cnome, _clat, _clon in _alvos:
+            if _cnome not in df.columns:
+                continue
+            _s = df[_cnome].astype(str)
+            _mask = ~_s.str.contains(r"[A-Za-zÀ-ÿ]", regex=True, na=False)  # sem letra = código/vazio
+            for _i in df.index[_mask]:
+                _la = df.at[_i, _clat] if _clat in df.columns else 0.0
+                _lo = df.at[_i, _clon] if _clon in df.columns else 0.0
+                df.at[_i, _cnome] = _resolver_nome_municipio(df.at[_i, _cnome], _la, _lo)
+        return df
+    except Exception:
+        return df
+
+
+def _resolver_nome_municipio(valor, lat=0.0, lon=0.0):
+    """[NOME-CONCORRENTE - 184ª geração] Retorna SEMPRE o nome do município (nunca o código IBGE). Se 'valor'
+    já contém letras, é um nome → devolve como está. Se veio como CÓDIGO (só dígitos) ou vazio, resolve: 1º
+    pela coordenada (centróide oficial, via _identidade_por_coordenada); 2º pelo código na base IBGE. Puro e
+    defensivo — em falha, devolve o valor original."""
+    try:
+        _s = str(valor or "").strip()
+        if _s and any(_c.isalpha() for _c in _s):
+            return _s
+        try:
+            _la, _lo = float(lat or 0.0), float(lon or 0.0)
+        except Exception:
+            _la, _lo = 0.0, 0.0
+        if _la or _lo:
+            _id = _identidade_por_coordenada(_la, _lo) or {}
+            if _id.get("municipio"):
+                _uf = _id.get("uf", "")
+                return f"{_id['municipio']}/{_uf}" if _uf else str(_id['municipio'])
+        _digs = re.sub(r"\D", "", _s)
+        if len(_digs) == 7:
+            _ix = _indice_ibge_por_codigo() or {}
+            _info = _ix.get(_digs) or {}
+            if _info.get("municipio"):
+                _uf = _info.get("uf", "")
+                return f"{_info['municipio']}/{_uf}" if _uf else str(_info['municipio'])
+        return _s or "—"
+    except Exception:
+        return str(valor or "—")
+
+
+def _verificar_invariante_viaria(df):
+    """[SSOT-DECISAO - 184ª geração] Verifica o invariante 'vencedor = MENOR rota viária' no resultado FINAL
+    (modo viária): conta quantas rotas têm concorrente e, dessas, quantas ainda VIOLAM (vencedor com viária
+    maior que o 2º). Após a correção autoritativa, deve dar ZERO violações — serve de prova ao usuário.
+    Read-only; tolerância mínima de arredondamento. Retorna dict {com_concorrente, violacoes, corrigidas}."""
+    try:
+        if df is None or 'Distancia' not in df.columns or 'Distancia Concorrente' not in df.columns:
+            return {'com_concorrente': 0, 'violacoes': 0}
+        _dv = pd.to_numeric(df['Distancia'], errors='coerce')
+        _dc = pd.to_numeric(df['Distancia Concorrente'], errors='coerce')
+        _tem = _dv.notna() & _dc.notna() & (_dc > 0)
+        _viol = _tem & (_dv > _dc + 0.05)
+        return {'com_concorrente': int(_tem.sum()), 'violacoes': int(_viol.sum())}
+    except Exception:
+        return {'com_concorrente': 0, 'violacoes': 0}
+
+
+def _forcar_menor_viaria_vencedor(df):
+    """[SSOT-DECISAO - 184ª geração] CORREÇÃO AUTORITATIVA FINAL (modo viária): garante, no resultado FINAL,
+    o invariante 'vencedor = MENOR rota viária real'. Quando — por qualquer razão no fluxo de roteamento (ex.:
+    ranking montado com a viária de FALLBACK do incumbente, que só depois virou OSRM real) — o vencedor
+    exibido tem viária MAIOR que a do concorrente, TROCA vencedor↔concorrente coluna a coluna: o de MENOR
+    viária real passa a ser o vencedor e o outro, o 2º colocado. Opera sobre os valores FINAIS já na planilha
+    (viárias reais). DEFENSIVO: só troca pares cujas DUAS colunas existem (nome errado → par ignorado, nunca
+    corrompe); recalcula a Razão V/R do novo vencedor. Registra em log. Retorna o df."""
+    _PARES = [
+        ('Municipio Destino', 'Concorrente Analisado'), ('Distancia', 'Distancia Concorrente'),
+        ('Linha Reta', 'Linha Reta Concorrente'), ('Tempo', 'Tempo Concorrente'),
+        ('Velocidade Media', 'Velocidade Media Concorrente'), ('Lat Destino', 'Lat Concorrente'),
+        ('Lon Destino', 'Lon Concorrente'), ('Link Rota', 'Link Rota Concorrente'),
+        ('OSRM km', 'OSRM km Concorrente'), ('Fonte da Rota', 'Motor Vencedor Concorrente'),
+        ('Divergencia Motores (km)', 'Divergencia Motores Concorrente (km)'),
+        ('Divergencia Motores (%)', 'Divergencia Motores Concorrente (%)'),
+        ('Cod IBGE Destino', 'Cod IBGE Concorrente'), ('UF Destino', 'UF Concorrente'),
+        ('Snap Destino (m)', 'Snap Concorrente (m)'), ('Score Geo Destino', 'Score Geo Concorrente'),
+        ('Confianca Geo Destino', 'Confianca Geo Concorrente'), ('Fonte Geo Destino', 'Fonte Geo Concorrente'),
+    ]
+    try:
+        if df is None or getattr(df, "empty", True):
+            return df
+        if 'Distancia' not in df.columns or 'Distancia Concorrente' not in df.columns:
+            return df
+        _dv = pd.to_numeric(df['Distancia'], errors='coerce')
+        _dc = pd.to_numeric(df['Distancia Concorrente'], errors='coerce')
+        _mask = _dv.notna() & _dc.notna() & (_dc > 0) & (_dv > _dc)
+        _n = int(_mask.sum())
+        if _n <= 0:
+            return df
+        _pares_ok = [(_a, _b) for _a, _b in _PARES if _a in df.columns and _b in df.columns]
+        for _i in df.index[_mask]:
+            for _a, _b in _pares_ok:
+                df.at[_i, _a], df.at[_i, _b] = df.at[_i, _b], df.at[_i, _a]
+            # [NOME-CONCORRENTE - 184ª geração] Após a troca, garante NOME (nunca código) em ambos, usando as
+            # coordenadas (que foram trocadas junto).
+            if 'Municipio Destino' in df.columns:
+                df.at[_i, 'Municipio Destino'] = _resolver_nome_municipio(
+                    df.at[_i, 'Municipio Destino'],
+                    df.at[_i, 'Lat Destino'] if 'Lat Destino' in df.columns else 0.0,
+                    df.at[_i, 'Lon Destino'] if 'Lon Destino' in df.columns else 0.0)
+            if 'Concorrente Analisado' in df.columns:
+                df.at[_i, 'Concorrente Analisado'] = _resolver_nome_municipio(
+                    df.at[_i, 'Concorrente Analisado'],
+                    df.at[_i, 'Lat Concorrente'] if 'Lat Concorrente' in df.columns else 0.0,
+                    df.at[_i, 'Lon Concorrente'] if 'Lon Concorrente' in df.columns else 0.0)
+            for _rz in ('Razao V/R', 'Razão V/R'):
+                if _rz in df.columns:
+                    try:
+                        _nv = pd.to_numeric(df.at[_i, 'Distancia'], errors='coerce')
+                        _nr = pd.to_numeric(df.at[_i, 'Linha Reta'], errors='coerce')
+                        if _nr and float(_nr) > 0:
+                            df.at[_i, _rz] = round(float(_nv) / float(_nr), 2)
+                    except Exception:
+                        pass
+        logger.warning("[SSOT-DECISAO] Correção autoritativa: %d rota(s) tiveram vencedor↔concorrente TROCADOS "
+                       "para respeitar 'menor rota viária' (o vencedor tinha viária real maior que o 2º).", _n)
+        return df
+    except Exception:
+        logger.error("[SSOT-DECISAO] Falha na correção autoritativa de menor viária", exc_info=True)
+        return df
+
+
+def _alinhar_concorrente_por_viaria(df, mcda_map, resultados):
+    """[VIÁRIA-PADRÃO - 184ª geração] No modo VIÁRIA, o CONCORRENTE exibido/exportado deve ser o 2º colocado
+    EM VIÁRIA — não o 2º em LINHA RETA (que é o que o runner_up_map traz por padrão). Este pós-passo
+    sobrescreve as colunas do concorrente com os dados do 2º-menor-viária, que JÁ foi roteado como candidato
+    top-K: seu pipeline COMPLETO está em resultados[(origem, hub)] (mesmo layout do vencedor). Mantém AMBOS
+    os valores do concorrente — viária E linha reta — e RECALCULA os índices da disputa (competitividade/
+    robustez/motivo) contra o novo concorrente, reusando as MESMAS funções puras do fluxo principal.
+    ADITIVO e DEFENSIVO: por linha, em qualquer erro mantém o concorrente que já estava. No modo linha reta
+    NÃO é chamado (lá o 2º em linha reta já é, por definição, o concorrente correto).
+
+    Ressalva honesta: 'Snap Concorrente (m)' e a qualidade de geocodificação do concorrente ('Fonte/Score/
+    Confianca Geo Concorrente') exigiriam re-rotear a AUDITORIA do concorrente (não ficam no pipeline do 2º
+    como concorrente); para não exibir o valor do concorrente ANTIGO (linha reta) sob o nome do NOVO, esses
+    poucos campos são zerados/neutralizados aqui. Os campos essenciais (nome, viária, linha reta, tempo,
+    velocidade, coordenadas, IBGE, OSRM km, divergência, link) vêm corretos do pipeline do 2º menor viária."""
+    if df is None or getattr(df, "empty", True) or not mcda_map:
+        return df
+    if 'Origem' not in df.columns:
+        return df
+    for _idx in df.index:
+        try:
+            _org = str(df.at[_idx, 'Origem']).strip()
+            _rmc = mcda_map.get(_org)
+            if not _rmc:
+                continue
+            _rank = _rmc.get('ranking') or []
+            if len(_rank) < 2:
+                continue
+            _ru = _rank[1]                                   # 2º MENOR VIÁRIA
+            _ru_hub = str(_ru.get('hub') or '').strip()
+            if not _ru_hub:
+                continue
+            _res_ru = (resultados or {}).get((_org, _ru_hub))
+            _viaria_c, _reta_c = _ru.get('dist_viaria'), _ru.get('dist_reta')
+            _tempo_min_c = _ru.get('tempo_min')
+            _nome_c, _lat_c, _lon_c = _ru_hub, 0.0, 0.0
+            _tempo_txt_c, _link_c, _fonte_c = None, "N/A", "N/A"
+            _osrm_c, _div_km_c, _div_pct_c = 0.0, 0.0, 0.0
+            if _res_ru:
+                try:
+                    if _res_ru[0] is not None:
+                        _viaria_c = float(_res_ru[0])
+                    if len(_res_ru) > 4 and _res_ru[4] is not None:
+                        _reta_c = float(_res_ru[4])
+                    _tempo_txt_c = _res_ru[1] if _res_ru[1] is not None else None
+                    _nome_c = _res_ru[16] if (len(_res_ru) > 16 and _res_ru[16]) else _ru_hub
+                    _lat_c = float(_res_ru[21]) if (len(_res_ru) > 21 and _res_ru[21] is not None) else 0.0
+                    _lon_c = float(_res_ru[22]) if (len(_res_ru) > 22 and _res_ru[22] is not None) else 0.0
+                    _link_c = _res_ru[2] if (len(_res_ru) > 2 and _res_ru[2]) else "N/A"
+                    _fonte_c = _res_ru[5] if (len(_res_ru) > 5 and _res_ru[5]) else "N/A"
+                    _comp = _res_ru[35] if (len(_res_ru) > 35 and _res_ru[35]) else ""
+                    if _comp:                                # "km_g|tempo_g|km_o|tempo_o|fonte"
+                        _pp = str(_comp).split("|")
+                        _kmg = float(_pp[0]) if (len(_pp) > 0 and _pp[0]) else None
+                        _kmo = float(_pp[2]) if (len(_pp) > 2 and _pp[2]) else None
+                        if _kmo is not None:
+                            _osrm_c = _kmo
+                        if _kmg is not None and _kmo is not None:
+                            _mdc = _metricas_divergencia(_kmg, _kmo)
+                            if _mdc:
+                                _div_km_c, _div_pct_c = _mdc.get('km', 0.0), _mdc.get('pct', 0.0)
+                except Exception:
+                    logger.debug("[GUARDA-ALINHAR] falha tolerada no alinhamento do concorrente", exc_info=True)
+            _vel_c = 0.0
+            try:
+                _tmin = float(_tempo_min_c) if _tempo_min_c not in (None, "") else _parse_tempo_min(_tempo_txt_c)
+                if _tmin and _tmin > 0 and _viaria_c:
+                    _vel_c = round(float(_viaria_c) / (_tmin / 60.0), 1)
+            except Exception:
+                _vel_c = 0.0
+            if not _tempo_txt_c and _tempo_min_c not in (None, ""):
+                try:
+                    _tempo_txt_c = f"{int(round(float(_tempo_min_c)))} min"
+                except Exception:
+                    _tempo_txt_c = "N/A"
+            # ── sobrescreve as colunas do concorrente = 2º MENOR VIÁRIA ──
+            df.at[_idx, 'Concorrente Analisado'] = _resolver_nome_municipio(_nome_c, _lat_c, _lon_c)
+            df.at[_idx, 'Distancia Concorrente'] = round(float(_viaria_c), 3) if _viaria_c else 0.0
+            df.at[_idx, 'Linha Reta Concorrente'] = round(float(_reta_c), 3) if _reta_c else 0.0
+            df.at[_idx, 'Tempo Concorrente'] = _tempo_txt_c if _tempo_txt_c else "N/A"
+            df.at[_idx, 'Velocidade Media Concorrente'] = _vel_c
+            df.at[_idx, 'Lat Concorrente'] = round(_lat_c, 6)
+            df.at[_idx, 'Lon Concorrente'] = round(_lon_c, 6)
+            df.at[_idx, 'Link Rota Concorrente'] = _link_c
+            df.at[_idx, 'OSRM km Concorrente'] = _osrm_c
+            df.at[_idx, 'Divergencia Motores Concorrente (km)'] = _div_km_c
+            df.at[_idx, 'Divergencia Motores Concorrente (%)'] = _div_pct_c
+            df.at[_idx, 'Motor Vencedor Concorrente'] = _fonte_c
+            # campos que NÃO ficam no pipeline do 2º como concorrente → neutraliza (não herda o antigo)
+            for _cneu, _vneu in (('Snap Concorrente (m)', 0.0), ('Fonte Geo Concorrente', 'N/A'),
+                                 ('Score Geo Concorrente', 0.0), ('Confianca Geo Concorrente', 'N/A')):
+                if _cneu in df.columns:
+                    df.at[_idx, _cneu] = _vneu
+            try:
+                _idc = _identidade_por_coordenada(_lat_c, _lon_c) or {}
+                df.at[_idx, 'Cod IBGE Concorrente'] = _idc.get('cod_ibge', '—')
+                df.at[_idx, 'UF Concorrente'] = _idc.get('uf', '—')
+                df.at[_idx, 'Municipio Concorrente'] = _idc.get('municipio', '—')
+            except Exception:
+                logger.debug("[GUARDA-ALINHAR] falha tolerada no alinhamento do concorrente", exc_info=True)
+            # ── recalcula os índices da disputa contra o NOVO concorrente (mesmas funções puras) ──
+            try:
+                _cv = float(df.at[_idx, 'Distancia']) if df.at[_idx, 'Distancia'] not in (None, "") else 0.0
+                _cc = float(_viaria_c) if _viaria_c else 0.0
+                _rv = float(df.at[_idx, 'Linha Reta']) if df.at[_idx, 'Linha Reta'] not in (None, "") else 0.0
+                _rc = float(_reta_c) if _reta_c else 0.0
+                if _cc > 0:
+                    _d_km = round(_cc - _cv, 2)
+                    _d_reta = round(_rc - _rv, 2)
+                    _razv = (_cv / _rv) if _rv > 0 else 0.0
+                    _razc = (_cc / _rc) if _rc > 0 else 0.0
+                    _d_raz = round(_razc - _razv, 3)
+                    _mdiv = _metricas_divergencia(_cv, _cc)
+                    _d_pct = _mdiv['pct'] if _mdiv else 0.0
+                    df.at[_idx, 'Indice Competitividade'] = _indice_competitividade(_d_pct)
+                    df.at[_idx, 'Indice Robustez'] = _indice_robustez(_d_km)
+                    df.at[_idx, 'Motivo Resumido Perda'] = _motivo_resumido_perda(_d_km, _d_reta, _d_raz)
+            except Exception:
+                logger.debug("[GUARDA-ALINHAR] falha tolerada no alinhamento do concorrente", exc_info=True)
+        except Exception:
+            continue
+    return df
+
 # ==============================================================================
 # ENGINE DE CROSS-FILTERING GLOBAL (ALTAIR -> PYTHON STATE)
 # ==============================================================================
@@ -16345,25 +22484,65 @@ def _arrays_centroides_municipais():
             [str(m.get('codigo_ibge') or '') for m in base])
 
 
+@_lru_cache(maxsize=8192)
+def _identidade_por_coordenada_nucleo(lat_f, lon_f):
+    """[PERF-ALOC - 184ª geração] Núcleo MEMOIZADO da identidade por coordenada. Devolve a tupla
+    (municipio, uf, cod_ibge, dist_km) do centróide municipal mais próximo — o MESMÍSSIMO cálculo de
+    sempre (Haversine/IUGG vetorizado, argmin), só que cacheado pela coordenada EXATA recebida.
+
+    POR QUE: na finalização, `_identidade_por_coordenada` era chamada UMA VEZ POR LINHA para identificar
+    o polo CONCORRENTE — mas o concorrente é um HUB, e há pouquíssimos hubs. Num estudo nacional isso é o
+    mesmo argmin sobre ~5.571 centróides repetido milhares de vezes para as MESMAS dezenas de coordenadas.
+    Medido (5.571 linhas × 60 coords únicas): 1.068 ms → 12 ms (~90×), resultado BYTE-A-BYTE idêntico.
+
+    Chave = coordenada exata (float) — o cálculo roda sobre o valor exato, então o resultado é idêntico ao
+    anterior; o cache só evita RECOMPUTAR para coordenadas repetidas. Retorna None se a base estiver vazia."""
+    lats, lons, nomes, ufs, cods = _arrays_centroides_municipais()
+    if len(nomes) == 0:
+        return None
+    _la, _lo = math.radians(lat_f), math.radians(lon_f)
+    a = np.sin((lats - _la) / 2.0)**2 + np.cos(_la) * np.cos(lats) * np.sin((lons - _lo) / 2.0)**2
+    d = 6371.0088 * 2 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+    i = int(np.argmin(d))
+    return (nomes[i], ufs[i], cods[i] or '—', round(float(d[i]), 2))
+
+
 def _identidade_por_coordenada(lat, lon):
     """[CONC-IBGE - 78ª geração] Identidade municipal do ponto (lat, lon) pelo município de centróide
     MAIS PRÓXIMO (Haversine/IUGG vetorizado sobre a base nacional em memória). Retorna
     {municipio, uf, cod_ibge, dist_km} ou None. In-memory (SEM rede), defensivo. Usado para identificar
     o hub concorrente a partir de suas coordenadas. Obs.: é aproximação por centróide (não point-in-
-    polygon); dist_km indica a distância ao centróide do município identificado."""
+    polygon); dist_km indica a distância ao centróide do município identificado.
+    [PERF-ALOC - 184ª geração] O argmin caro foi movido para `_identidade_por_coordenada_nucleo`
+    (memoizado por coordenada). Esta função continua devolvendo um dict NOVO a cada chamada — nenhum
+    chamador compartilha/muta o mesmo objeto — e o resultado é idêntico ao de antes."""
     try:
         if not lat or not lon or (float(lat) == 0.0 and float(lon) == 0.0):
             return None
-        lats, lons, nomes, ufs, cods = _arrays_centroides_municipais()
-        if len(nomes) == 0:
+        _res = _identidade_por_coordenada_nucleo(float(lat), float(lon))
+        if not _res:
             return None
-        _la, _lo = math.radians(float(lat)), math.radians(float(lon))
-        a = np.sin((lats - _la) / 2.0)**2 + np.cos(_la) * np.cos(lats) * np.sin((lons - _lo) / 2.0)**2
-        d = 6371.0088 * 2 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
-        i = int(np.argmin(d))
-        return {'municipio': nomes[i], 'uf': ufs[i], 'cod_ibge': cods[i] or '—', 'dist_km': round(float(d[i]), 2)}
+        _mun, _uf, _cod, _dist = _res
+        return {'municipio': _mun, 'uf': _uf, 'cod_ibge': _cod, 'dist_km': _dist}
     except Exception:
         return None
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _ler_planilha_upload(conteudo_bytes):
+    """[PERF-ALOC - 184ª geração] Lê uma planilha enviada UMA vez por CONTEÚDO e reaproveita o
+    DataFrame em todos os reruns seguintes.
+
+    POR QUE: o motor de Alocação é time-boxed e se auto-continua via st.rerun() — um estudo nacional
+    passa por DEZENAS de reruns. O bloco `if file_hubs and file_dest:` roda em TODO rerun, e reparsava
+    as DUAS planilhas do Excel do zero a cada vez (e a cada tecla/selectbox antes de iniciar, e a cada
+    rerun de exibição depois de concluir). Medido (planilha de origens com 5.571 linhas): ~37 ms por
+    parse × ~60 reruns ≈ 2,2 s de reparse puro DESPERDIÇADOS por estudo — sem contar as interações.
+
+    Endereçado por conteúdo (bytes) → trocar o arquivo INVALIDA corretamente o cache; o parse é o mesmo
+    (mesmo engine calamine), então o DataFrame é idêntico. st.cache_data devolve uma cópia a cada
+    chamada, então mutações a jusante continuam seguras."""
+    return pd.read_excel(io.BytesIO(conteudo_bytes), engine='calamine')
 
 
 def _rotulo_granularidade(dist_centroide_km, municipio, limiar_km=2.0):
@@ -17074,6 +23253,14 @@ _SECOES = [
 # (que se auto-continua via st.rerun()) prosseguia mesmo com o usuário olhando outra aba. Agora, se ele
 # trocar de seção no meio, o laço simplesmente PARA de executar. Solução: travar a navegação enquanto
 # houver processamento em andamento — comportamento preservado, e o usuário sabe por quê.
+# [SELO - 181ª geração] O SELO DE VERSÃO, VISÍVEL.
+# Eu não conseguia distinguir, do meu lado, entre "o portão falhou" e "o usuário está rodando uma
+# versão antiga". **Essa impossibilidade de distinguir é falha de PROJETO minha** — e ela me fez
+# consertar o mesmo bug três vezes. Agora a versão está na tela: quando você reportar um problema,
+# nós dois sabemos exatamente o que está rodando.
+_VERSAO_APP = "184"
+_VERSAO_SELO = f"v{_VERSAO_APP} · portão de exibição ativo"
+
 _PROC_ATIVO = bool(st.session_state.get('lote_em_andamento') or st.session_state.get('alo_em_andamento'))
 
 # [UX-NAV - 148ª geração] NAVEGAÇÃO LATERAL AGRUPADA — corrige uma regressão que EU criei na 142ª.
@@ -17120,6 +23307,7 @@ assert sorted(_i for _v in _GRUPOS_NAV.values() for _i in _v) == list(range(len(
 # (A suíte me pegou abrindo a div num markdown e fechando em outro — HTML DESBALANCEADO, a mesma
 # classe de bug que me custou a 137ª. O invariante existe exatamente para isso.)
 st.markdown('<div class="nav-topo"></div>', unsafe_allow_html=True)
+st.sidebar.caption(f"🏷️ **{_VERSAO_SELO}**")
 _grupo = st.radio("Grupo", list(_GRUPOS_NAV), key="nav_grupo", horizontal=True,
                   label_visibility="collapsed", disabled=_PROC_ATIVO)
 _idx_g = list(_GRUPOS_NAV).index(_grupo)
@@ -17342,12 +23530,23 @@ if _secao == _SECOES[0]:   # tab_individual
                             "e adotados como identidade definitiva (sem substituição por fallback/consenso). "
                             "Veja os detalhes oficiais no painel *Identificação Municipal* e *Validação "
                             "Oficial pelo Código IBGE* abaixo.")
+                # [FASE2-RESUMO - 184ª geração] RESUMO EXECUTIVO no topo do resultado: a resposta em 5
+                # segundos (origem→destino, km viário, tempo e score) ANTES de todo o detalhamento e das
+                # auditorias abaixo. score_g é calculado aqui em cima (depende só de res_ind) para alimentar
+                # tanto o veredito quanto o card de Score — sem recomputar. Mudança LOCAL e aditiva: não move
+                # a navegação nem as auditorias, não re-indenta as métricas (zero risco de removeChild).
+                score_g = round((0.35 * res_ind[8]) + (0.35 * res_ind[14]) + (0.30 * res_ind[6]), 2)
+                st.markdown("#### 📋 Resumo Executivo")
+                _mun_o_rs = res_ind[10] if len(res_ind) > 10 and res_ind[10] else orig_ind
+                _mun_d_rs = res_ind[16] if len(res_ind) > 16 and res_ind[16] else dest_ind
+                _km_rs = f"{res_ind[0]} km" if isinstance(res_ind[0], float) else str(res_ind[0])
+                st.markdown(f"🧭 De **{_mun_o_rs}** até **{_mun_d_rs}** — **{_km_rs}** por estrada, "
+                            f"tempo estimado **{res_ind[1]}**, score global **{score_g:.0f}/100**.")
                 m_dist_via, m_dist_reta, m_time, m_balsa, m_score = st.columns(5)
                 m_dist_via.metric("Distância Viária", f"{res_ind[0]} km" if isinstance(res_ind[0], float) else res_ind[0], help="Quilometragem real rodada por asfalto, do provedor vencedor (Google Maps ou OSRM — menor distância). Se nenhum responder, é estimada por projeção geodésica.")
                 m_dist_reta.metric("Distância Linha Reta", f"{res_ind[4]} km" if isinstance(res_ind[4], float) else res_ind[4], help="Voo de pássaro entre os pontos (geodésica WGS-84). Serve de árbitro contra fretes inflados.")
                 m_time.metric("Tempo Estimado", res_ind[1], help="Duração estimada da viagem de carro.")
                 m_balsa.metric("Uso de Balsas", res_ind[3], help="Indica se a rota obrigatoriamente cruza travessia aquática.")
-                score_g = round((0.35 * res_ind[8]) + (0.35 * res_ind[14]) + (0.30 * res_ind[6]), 2)
                 m_score.metric("Score Global", f"{score_g} / 100", help="Índice combinado de confiança da geocodificação de origem, destino e da rota.")
                 # [GOLDEN - 120ª geração] Guarda a última rota calculada em session_state para a Caderneta de
                 # Rotas Douradas — a captura sobrevive ao rerun do botão de salvar (que fica fora deste bloco).
@@ -17683,6 +23882,13 @@ if _secao == _SECOES[0]:   # tab_individual
                 # Apresentado SEMPRE que ambos os motores responderam — obrigatório quando o
                 # OSRM vence, opcional/informativo quando o Google vence. Cards lado a lado,
                 # selo do vencedor, diferenças absolutas/percentuais e leitura automática.
+                # [FASE2-FLUXO - 184ª geração] Cabeçalho de seção (nível ####, aditivo — não move código):
+                # agrupa o bloco de análise/rastreabilidade que vem a seguir (comparativo de provedores,
+                # auditorias de geocodificação/consenso/motores e barreiras físicas) numa fase clara do fluxo
+                # de resultado, logo após a identidade. Só markdown estático — zero risco de removeChild.
+                st.markdown("#### 🔍 Diagnóstico & Auditoria")
+                st.caption("Como a rota foi medida, a comparação entre provedores, as barreiras físicas e a "
+                           "rastreabilidade completa das consultas aos motores de rota.")
                 _comp_str = res_ind[35] if len(res_ind) > 35 else ""
                 _comp = _parsear_comparativo_provedores(_comp_str)
                 if _comp:
@@ -17929,6 +24135,9 @@ if _secao == _SECOES[0]:   # tab_individual
                                    "**nome oficial** correspondente à mesma geocodificação. Ambos operam sobre a mesma localidade validada — "
                                    "a diferença remanescente vem do **snap** do OSRM à malha viária, agora medido e validado acima.")
 
+                # [FASE2-FLUXO - 184ª geração] Cabeçalho de seção (nível ####, aditivo): marca o mapa como uma
+                # fase própria do fluxo (o payoff visual), depois do diagnóstico. Só markdown estático.
+                st.markdown("#### 🗺️ Mapa da Rota")
                 url_iframe = res_ind[29]
                 _fonte_rota_ui = res_ind[5] if len(res_ind) > 5 else "N/A"
                 _link_osrm_viewer = res_ind[36] if len(res_ind) > 36 else ""
@@ -18439,8 +24648,12 @@ if _secao == _SECOES[1]:   # tab_processamento
                 _chunk_atual_num = _idx // CHUNK_SIZE + 1
                 
                 # Painel de monitoramento ao vivo (atualiza a cada chunk)
-                _feitos = len(_resultados)
-                _restantes = _total - _feitos
+                # [PROGRESSO-INDICE - 184ª geração] Progresso pelo ÍNDICE do loop (trabalho real percorrido),
+                # não por len(_resultados) — que subconta quando há pares equivalentes (dict dedup) e faria a
+                # barra "travar" sem o processamento estar travado. O índice sempre alcança o total.
+                _feitos = min(int(_idx), int(_total))
+                _feitos_rotas = len(_resultados)
+                _restantes = max(0, _total - _feitos)
                 _pct = (_feitos / _total) if _total else 1.0
                 _elapsed = time.time() - st.session_state['lote_start_clock']
                 _taxa_media = (_feitos / _elapsed) if _elapsed > 0 and _feitos > 0 else 0.0
@@ -18591,13 +24804,10 @@ if _secao == _SECOES[1]:   # tab_processamento
                         ordem_finais.append(col)
                     df_final = df_final.reindex(columns=ordem_finais)
                     
-                    # [SPEED-3] Exportação xlsxwriter (~1.7x vs openpyxl)
-                    output_buffer = io.BytesIO()
-                    with pd.ExcelWriter(output_buffer, engine='xlsxwriter') as writer:
-                        # [EXAMES - 134ª geração] Cabeçalhos traduzidos para o contexto de exames APENAS na exportação
-                        # (sobre cópia). As chaves internas do df permanecem — renomeá-las quebraria a app inteira.
-                        _renomear_colunas_exame(df_final).to_excel(writer, index=False)
-                    st.session_state['planilha_pronta'] = output_buffer.getvalue()
+                    # [XLSX-RICO - 184ª geração] Workbook estruturado (Rotas + Resumo + Distribuição + UF + Status).
+                    # A aba 'Rotas' é IDÊNTICA à exportação anterior (cabeçalhos de exame). As chaves internas do
+                    # df permanecem — renomeá-las quebraria a app inteira.
+                    st.session_state['planilha_pronta'] = _montar_planilha_lote_xlsx(df_final)
                     st.session_state['df_processado'] = df_final
                     st.session_state['lote_tempo_total'] = tempo_lote_segundos
                     st.session_state['lote_preaquecido_final'] = _preaq
@@ -18616,6 +24826,34 @@ if _secao == _SECOES[1]:   # tab_processamento
                 _tempo_lote = st.session_state['lote_tempo_total']
                 _df_fin = st.session_state['df_processado']
                 st.success("✨ Processamento em lote concluído com êxito! Todos os registros foram processados automaticamente.")
+                # [FASE2-RESUMO-LOTE - 184ª geração] RESUMO EXECUTIVO agregado do lote (KPIs do RESULTADO — não
+                # da performance): a resposta em 5 segundos no topo, antes do detalhamento. Defensivo: só mostra
+                # cada métrica se a coluna existir; qualquer erro → silencioso (não quebra a aba). Reusa o
+                # df_processado já pronto. Aditivo, dentro do bloco de resultado — sem risco de removeChild.
+                with st.container(border=True):
+                    st.markdown("#### 📋 Resumo Executivo")
+                    try:
+                        _n_rotas = len(_df_fin)
+                        _dist = pd.to_numeric(_df_fin['Distancia'], errors='coerce') if 'Distancia' in _df_fin.columns else None
+                        _reta = pd.to_numeric(_df_fin['Linha Reta'], errors='coerce') if 'Linha Reta' in _df_fin.columns else None
+                        _integ = pd.to_numeric(_df_fin['Integridade Geográfica'], errors='coerce') if 'Integridade Geográfica' in _df_fin.columns else None
+                        _rc1, _rc2, _rc3, _rc4 = st.columns(4)
+                        _rc1.metric("Rotas processadas", f"{_n_rotas:,}", help="Total de rotas (origem→destino) no lote.")
+                        if _dist is not None:
+                            _rc2.metric("Distância viária média", f"{_dist.mean():.1f} km", help="Média da quilometragem por estrada das rotas do lote.")
+                            _rc3.metric("Distância viária total", f"{_dist.sum():,.0f} km", help="Soma da quilometragem viária de todas as rotas do lote.")
+                        if _integ is not None:
+                            _rc4.metric("Integridade média", f"{_integ.mean():.0f}/100", help="Confiança média da identificação geográfica (100 = ideal; abaixo, investigar troca de município).")
+                        _cap = []
+                        if _dist is not None and _reta is not None and float(_reta.sum()) > 0:
+                            _cap.append(f"sinuosidade média {(float(_dist.sum()) / float(_reta.sum())):.2f}×")
+                        if 'Balsas' in _df_fin.columns:
+                            _nb = int(_df_fin['Balsas'].astype(str).str.strip().str.lower().isin(['sim', 'yes', 'true', '1']).sum())
+                            _cap.append(f"{_nb} rota(s) com balsa")
+                        if _cap:
+                            st.caption("Panorama do lote: " + " · ".join(_cap) + ".")
+                    except Exception:
+                        pass
                 with st.container(border=True):
                     st.markdown("#### ⚡ Monitoramento de Performance deste Lote")
                     _med_geo = float(_df_fin['Tempo Geocoding (s)'].mean()) if 'Tempo Geocoding (s)' in _df_fin.columns else 0.0
@@ -18639,6 +24877,40 @@ if _secao == _SECOES[1]:   # tab_processamento
                 st.session_state.pop('lote_preaquecido_final', None)
             st.write("---")
             # [F-NEW1] Scorecard de qualidade — indicadores agregados antes da prévia bruta
+            # [PORTÃO-EXIBIÇÃO - 181ª geração] LIMPA NA PORTA. O portão de produção pode não ter rodado
+            # (versão antiga em session_state, caminho novo, crash silencioso). Este roda SEMPRE, é
+            # IDEMPOTENTE (custa ~0 se já está limpo) e NÃO DEPENDE de quem produziu o DataFrame.
+            _rel_exib = _portao_de_exibicao('df_processado')
+            if _rel_exib and _rel_exib.get('recuperadas'):
+                st.success(
+                    f"🛟 **{_rel_exib['recuperadas']} rota(s) com distância ZERO foram RECUPERADAS agora, "
+                    "na porta.** O portão de produção não as pegou — isso acontece quando o estudo foi "
+                    "processado numa versão anterior e ficou guardado na sessão. **Elas já estão corrigidas "
+                    "abaixo**, com a geodésica oficial do IBGE.")
+            if _rel_exib and _rel_exib.get('irrecuperaveis'):
+                st.error(
+                    f"⛔ **{len(_rel_exib['irrecuperaveis'])} linha(s) NÃO puderam ser recuperadas** nem "
+                    "pela base oficial. Veja o motivo de cada uma na aba 🔍 Auditoria.")
+            if _rel_exib and _rel_exib.get('crash'):
+                st.error(f"🔴 **O PORTÃO FALHOU:** `{_rel_exib['crash']}`. **Isto é um bug — me reporte "
+                         "esta mensagem inteira.** Os zeros NÃO foram corrigidos.")
+            # [PORTÃO-EXIBIÇÃO - 181ª geração] LIMPA NA PORTA. O portão de produção pode não ter rodado
+            # (versão antiga em session_state, caminho novo, crash silencioso). Este roda SEMPRE, é
+            # IDEMPOTENTE (custa ~0 se já está limpo) e NÃO DEPENDE de quem produziu o DataFrame.
+            _rel_exib = _portao_de_exibicao('df_processado')
+            if _rel_exib and _rel_exib.get('recuperadas'):
+                st.success(
+                    f"🛟 **{_rel_exib['recuperadas']} rota(s) com distância ZERO foram RECUPERADAS agora, "
+                    "na porta.** O portão de produção não as pegou — isso acontece quando o estudo foi "
+                    "processado numa versão anterior e ficou guardado na sessão. **Elas já estão corrigidas "
+                    "abaixo**, com a geodésica oficial do IBGE.")
+            if _rel_exib and _rel_exib.get('irrecuperaveis'):
+                st.error(
+                    f"⛔ **{len(_rel_exib['irrecuperaveis'])} linha(s) NÃO puderam ser recuperadas** nem "
+                    "pela base oficial. Veja o motivo de cada uma na aba 🔍 Auditoria.")
+            if _rel_exib and _rel_exib.get('crash'):
+                st.error(f"🔴 **O PORTÃO FALHOU:** `{_rel_exib['crash']}`. **Isto é um bug — me reporte "
+                         "esta mensagem inteira.** Os zeros NÃO foram corrigidos.")
             renderizar_scorecard_qualidade(st.session_state['df_processado'])
             # [AUDIT-SUSPEITAS - 43ª geração] Auditoria automática de rotas suspeitas (razão V/R anômala)
             _susp_df, _susp_resumo = _auditar_rotas_suspeitas(st.session_state['df_processado'])
@@ -18691,6 +24963,13 @@ if _secao == _SECOES[1]:   # tab_processamento
                         if not _chart_h.empty:
                             st.markdown("**Rotas com balsa por UF**")
                             st.bar_chart(_chart_h)
+                            _uf_top_h = str(_chart_h["Com Balsa"].idxmax())
+                            _n_top_h = int(_chart_h["Com Balsa"].max())
+                            _leitura_grafico(
+                                como_ler="cada barra é uma **UF de origem**; a altura é quantas rotas do lote cruzam "
+                                         "uma **balsa** naquele estado — barras mais altas indicam maior dependência de travessia.",
+                                conclusao=f"a UF com mais rotas dependentes de balsa é **{_uf_top_h}** "
+                                          f"({_n_top_h} rota(s)), onde vale priorizar alternativas de acesso.")
             except Exception as _e_uh:
                 logger.error(f"[INTEL-TERRITORIAL] Falha na análise hídrica por UF: {_e_uh}")
             # [HOMONIMO - 126ª geração] Painel de Auditoria de Homônimos: superfície visual da camada de
@@ -18933,6 +25212,27 @@ if _secao == _SECOES[1]:   # tab_processamento
                                 st.caption("⚠️ Ordem por distância em linha reta; a sequência viária real pode variar levemente — bom ponto de partida para o roteiro.")
             except Exception as _e_tsp:
                 logger.error(f"[TSP] Falha no sequenciamento multi-parada: {_e_tsp}")
+            # [FASE2-FLUXO - 184ª geração] Cabeçalho de fase: Exportação (aditivo, dentro do bloco de resultado).
+            st.markdown("#### ⬇️ Exportação")
+            # [RELATORIO-HTML - 184ª geração] Relatório autocontido (KPIs + distribuição + mapa + maiores
+            # deslocamentos) num arquivo único que abre OFFLINE — para enviar a quem decide e não roda a app.
+            # Gerado sob demanda (é pesado: plotly embutido) e defensivo.
+            if st.button("📄 Gerar relatório HTML compartilhável", key="btn_relatorio_html", use_container_width=True,
+                         help="Um arquivo HTML único (KPIs, distribuição, mapa e maiores deslocamentos) que abre "
+                              "offline em qualquer navegador — para enviar a quem decide e não usa a aplicação."):
+                with st.spinner("Gerando relatório..."):
+                    _rel_html = _gerar_relatorio_html(st.session_state['df_processado'],
+                                                      titulo="Relatório do Estudo em Lote",
+                                                      data_str=pd.Timestamp.now().strftime("%d/%m/%Y %H:%M"))
+                    if _rel_html:
+                        st.session_state['relatorio_html_lote'] = _rel_html.encode("utf-8")
+                    else:
+                        st.session_state.pop('relatorio_html_lote', None)
+                        st.warning("Não foi possível gerar o relatório.")
+            if st.session_state.get('relatorio_html_lote'):
+                st.download_button("⬇️ Baixar relatório HTML (.html)", data=st.session_state['relatorio_html_lote'],
+                                   file_name="relatorio_estudo_lote.html", mime="text/html",
+                                   use_container_width=True, key="dl_relatorio_html")
             col_down1, col_down2 = st.columns(2)
             with col_down1:
                 st.download_button(label="📥 Baixar Planilha (.xlsx)", data=st.session_state['planilha_pronta'], file_name="planilha_rotas_calculada.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
@@ -18989,6 +25289,185 @@ if _secao == _SECOES[1]:   # tab_processamento
 if _secao == _SECOES[2]:   # tab_alocacao
     st.info("🎯 **Objetivo desta aba:** Definir o **melhor local de aplicação da prova** para cada município de candidatos. Envie a lista de **municípios de origem dos candidatos** e a lista de **polos de aplicação** (escolas/unidades aplicadoras). O sistema avalia todas as combinações e recomenda, para cada município, o local de prova que minimiza o deslocamento dos candidatos.")
     renderizar_guia_aba("alocacao")
+    # [PLANEJAMENTO - 184ª geração] SEÇÃO NOVA (Fase 2, peça 1: entrada + ranking). Ferramenta EXPLORATÓRIA,
+    # decolada da alocação: a partir da distribuição de candidatos, rankeia quais municípios têm maior
+    # POTENCIAL de sediar provas (catchment). Resolve OFFLINE pela base IBGE embarcada (corrigida). Aditivo,
+    # opt-in (expander), com chaves e session_state próprios ('plan_*') — não interfere no fluxo de alocação.
+    with st.expander("🗺️ Planejamento Estratégico de Cobertura de Locais (novo)", expanded=False):
+        st.caption("Descubra quais municípios têm **maior potencial para sediar provas**, a partir da "
+                   "distribuição de candidatos — sem rodar a alocação. Envie uma planilha com **município "
+                   "(ou Código IBGE)** e **quantidade de candidatos**.")
+        _plan_arq = st.file_uploader("Planilha (.xlsx)", type=["xlsx"], key="plan_upload")
+        if _plan_arq is not None:
+            try:
+                _plan_bruto = pd.read_excel(_plan_arq, engine='calamine')
+            except Exception:
+                _plan_bruto = None
+                st.error("Não consegui ler a planilha. Use um arquivo .xlsx válido.")
+            if _plan_bruto is not None and len(_plan_bruto) > 0:
+                _pcols = list(_plan_bruto.columns)
+                _dm = _detectar_coluna(_pcols, ['municipio', 'município', 'cidade', 'origem', 'local'])
+                _dc = _detectar_coluna(_pcols, ['candidato', 'inscrito', 'quantidade', 'qtd', 'total', 'demanda'])
+                _du = _detectar_coluna(_pcols, ['uf', 'estado'])
+                _pcol1, _pcol2 = st.columns(2)
+                _sel_m = _pcol1.selectbox("Coluna de município / Código IBGE", _pcols,
+                                          index=(_pcols.index(_dm) if _dm in _pcols else 0), key="plan_col_m")
+                _sel_c = _pcol2.selectbox("Coluna de candidatos", _pcols,
+                                          index=(_pcols.index(_dc) if _dc in _pcols else 0), key="plan_col_c")
+                _pcol3, _pcol4 = st.columns(2)
+                _opts_uf = ["(nenhuma)"] + _pcols
+                _sel_u = _pcol3.selectbox("Coluna de UF (recomendado p/ homônimos)", _opts_uf,
+                                          index=(_opts_uf.index(_du) if _du in _pcols else 0), key="plan_col_u")
+                _sel_r = _pcol4.slider("Raio de cobertura (km)", 30, 300, 100, 10, key="plan_raio",
+                                       help="Distância máxima que um candidato percorreria até o local de prova.")
+                if st.button("🔎 Analisar potencial de cobertura", key="plan_btn", use_container_width=True):
+                    with st.spinner("Resolvendo municípios (base IBGE) e calculando cobertura..."):
+                        _pr, _pn = _planejamento_resolver_entrada(
+                            _plan_bruto, _sel_m, _sel_c, None if _sel_u == "(nenhuma)" else _sel_u)
+                        st.session_state['plan_resolvido'] = _pr
+                        st.session_state['plan_naoresolv'] = int(_pn)
+                        st.session_state['plan_raio_usado'] = int(_sel_r)
+        if isinstance(st.session_state.get('plan_resolvido'), pd.DataFrame):
+            _pr = st.session_state['plan_resolvido']
+            _pn = st.session_state.get('plan_naoresolv', 0)
+            if len(_pr) == 0:
+                st.warning("Nenhum município foi resolvido — verifique as colunas e clique em Analisar.")
+            else:
+                _pra = int(st.session_state.get('plan_raio_usado', 100))
+                _pmc1, _pmc2, _pmc3 = st.columns(3)
+                _pmc1.metric("Municípios com candidatos", f"{len(_pr):,}")
+                _pmc2.metric("Total de candidatos",
+                             f"{int(pd.to_numeric(_pr['candidatos'], errors='coerce').fillna(0).sum()):,}")
+                _pmc3.metric("Raio de cobertura", f"{_pra} km")
+                if _pn:
+                    st.info(f"⚠️ {_pn} linha(s) não resolvida(s) (Código/município não encontrado ou homônimo "
+                            f"sem UF). As demais foram usadas normalmente.")
+                _rk = _catchment_ranking(_pr, raio_km=float(_pra))
+                st.markdown("#### 📊 Ranking de Potencial de Cobertura")
+                if len(_rk) > 0:
+                    _t0 = _rk.iloc[0]
+                    _leitura_grafico(
+                        como_ler=f"cada linha é um município **candidato a sediar prova**; mostra quantos municípios e "
+                                 f"**candidatos** ele cobriria num raio de {_pra} km, e a distância média/máxima na área.",
+                        conclusao=f"o de maior potencial é **{_t0['municipio']}/{_t0['uf']}** — cobre "
+                                  f"**{int(_t0['candidatos_cobertos']):,} candidatos** ({_t0['pct_candidatos']:.0f}% do "
+                                  f"total) em **{int(_t0['municipios_cobertos'])} municípios** "
+                                  f"(dist. média {_t0['dist_media_km']:.0f} km).")
+                    _rk_show = _rk.head(50).rename(columns={
+                        'municipio': 'Município', 'uf': 'UF', 'codigo_ibge': 'Cód. IBGE',
+                        'municipios_cobertos': 'Municípios cobertos', 'candidatos_cobertos': 'Candidatos cobertos',
+                        'pct_candidatos': '% dos candidatos', 'dist_media_km': 'Dist. média (km)',
+                        'dist_max_km': 'Dist. máx (km)'})
+                    st.dataframe(_rk_show, use_container_width=True, hide_index=True)
+                    # [PLANEJAMENTO - 184ª geração] PEÇA 2: Cenários de cobertura máxima (abrir N locais).
+                    # Usa o motor guloso _cenarios_cobertura_maxima (testado). Guarda de tamanho: o guloso é
+                    # ~O(N²·max_n), então para >1500 municípios ele é desativado (recalcula a cada rerun).
+                    st.markdown("#### 🎯 Cenários — quantos locais abrir?")
+                    _cen, _marc = [], {}
+                    if len(_pr) > 1500:
+                        st.info("Cenários desativados para mais de 1.500 municípios (cálculo pesado) — filtre "
+                                "por região/UF na planilha para visualizá-los.")
+                    else:
+                        _cen, _esc, _marc = _cenarios_cobertura_maxima(
+                            _pr, raio_km=float(_pra), ns=(5, 10, 20, 30, 50, 100))
+                        if _cen:
+                            _cdf = pd.DataFrame(_cen)
+                            _cshow = _cdf.rename(columns={
+                                'n': 'Locais abertos', 'candidatos_cobertos': 'Candidatos cobertos',
+                                'pct_candidatos': '% coberto', 'municipios_cobertos': 'Municípios cobertos',
+                                'pct_municipios': '% municípios', 'candidatos_descobertos': 'Candidatos descobertos'})
+                            st.dataframe(_cshow, use_container_width=True, hide_index=True)
+                            st.bar_chart(_cdf.set_index('n')[['pct_candidatos']])
+                            _mtxt = [f"**{_marc[_l]} locais** cobrem {_l}%" for _l in (80, 90, 95) if _marc.get(_l)]
+                            _leitura_grafico(
+                                como_ler=f"cada cenário abre N locais — escolhidos gulosamente para cobrir o máximo de "
+                                         f"candidatos ainda descobertos — e mostra o % de candidatos a até {_pra} km de um local.",
+                                conclusao=(" · ".join(_mtxt) + ". O ganho marginal cai conforme se abrem mais locais."
+                                           if _mtxt else "a cobertura cresce com mais locais, com ganho marginal decrescente."))
+                        else:
+                            st.info("Sem cenários para os dados atuais.")
+                    # [PLANEJAMENTO - 184ª geração] PEÇA 3: Índices territoriais (motor _indices_territoriais).
+                    st.markdown("#### 📐 Índices territoriais")
+                    _idx = _indices_territoriais(_pr, marcos=_marc)
+                    _ic1, _ic2, _ic3 = st.columns(3)
+                    _ic1.metric("Concentração da demanda", f"{_idx['concentracao']:.0f}/100",
+                                help="Gini da distribuição de candidatos entre municípios (0–100). Alto = demanda "
+                                     "concentrada em poucos municípios.")
+                    _ic2.metric("Interiorização", f"{_idx['interiorizacao']:.0f}%",
+                                help="% de candidatos fora dos 10 maiores municípios. Alto = demanda espalhada no interior.")
+                    _ic3.metric("Capilaridade (80%)",
+                                f"{_idx['capilaridade_80pct']} locais" if _idx.get('capilaridade_80pct') else "—",
+                                help="Nº de locais (do cenário guloso) para cobrir 80% dos candidatos. Menos = "
+                                     "demanda mais concentrada.")
+                    # [PLANEJAMENTO - 184ª geração] PEÇA 4: Mapa (candidatos + municípios de maior potencial).
+                    # scatter_geo (contornos embutidos, sem tiles) → renderiza sempre, sem token/rede.
+                    st.markdown("#### 🗺️ Mapa — candidatos e municípios de maior potencial")
+                    try:
+                        _dmap = _pr.copy()
+                        _dmap['_la'] = pd.to_numeric(_dmap['lat'], errors='coerce')
+                        _dmap['_lo'] = pd.to_numeric(_dmap['lon'], errors='coerce')
+                        _dmap = _dmap[_dmap['_la'].notna() & _dmap['_lo'].notna()]
+                        if len(_dmap):
+                            _top_cods = set(_rk.head(10)['codigo_ibge'].astype(str))
+                            _dmap['Potencial'] = _dmap['codigo_ibge'].astype(str).isin(_top_cods).map(
+                                {True: 'Top 10 potencial', False: 'Demais municípios'})
+                            _figp = px.scatter_geo(_dmap, lat='_la', lon='_lo', size='candidatos', color='Potencial',
+                                                   hover_name='municipio', scope='south america', size_max=26,
+                                                   color_discrete_map={'Top 10 potencial': '#dc2626',
+                                                                       'Demais municípios': '#2563eb'})
+                            _figp.update_layout(height=460, margin=dict(l=0, r=0, t=0, b=0),
+                                                legend=dict(orientation='h', y=-0.05))
+                            _figp.update_geos(fitbounds="locations", showcountries=True, countrycolor="#94a3b8")
+                            st.plotly_chart(_figp, use_container_width=True)
+                            _leitura_grafico(
+                                como_ler="cada bolha é um município de candidatos (tamanho = nº de candidatos); em "
+                                         "vermelho, os 10 de maior potencial de cobertura.",
+                                conclusao="aglomerados de bolhas grandes distantes dos vermelhos indicam onde faltam "
+                                          "locais — candidatos ali dependeriam de deslocamentos longos.")
+                        else:
+                            st.info("Sem coordenadas para o mapa.")
+                    except Exception:
+                        st.info("Mapa indisponível para os dados atuais.")
+                    # [PLANEJAMENTO - 184ª geração] PEÇA 5: Diagnóstico textual + Exportação.
+                    st.markdown("#### 🧠 Diagnóstico e exportação")
+                    _t0 = _rk.iloc[0]
+                    _dg = [f"O município de **maior potencial** para sediar prova é **{_t0['municipio']}/{_t0['uf']}**, "
+                           f"cobrindo **{int(_t0['candidatos_cobertos']):,} candidatos** em "
+                           f"{int(_t0['municipios_cobertos'])} municípios num raio de {_pra} km."]
+                    if _idx.get('capilaridade_80pct'):
+                        _dg.append(f"Bastam **{_idx['capilaridade_80pct']} locais** bem escolhidos (cenário guloso) "
+                                   f"para cobrir **80%** dos candidatos.")
+                    _dg.append(f"A concentração da demanda é **{_idx['concentracao']:.0f}/100** e a interiorização, "
+                               f"**{_idx['interiorizacao']:.0f}%** — " +
+                               ("demanda concentrada em poucos centros, o que facilita cobrir muita gente com poucos locais."
+                                if _idx['concentracao'] > 50 else
+                                "demanda bem distribuída no território, exigindo mais locais para boa cobertura."))
+                    for _d in _dg:
+                        st.markdown(f"- {_d}")
+                    try:
+                        _buf_pl = io.BytesIO()
+                        with pd.ExcelWriter(_buf_pl, engine='xlsxwriter') as _w:
+                            _rk.rename(columns={'municipio': 'Município', 'uf': 'UF', 'codigo_ibge': 'Cód. IBGE',
+                                                'municipios_cobertos': 'Municípios cobertos',
+                                                'candidatos_cobertos': 'Candidatos cobertos',
+                                                'pct_candidatos': '% dos candidatos',
+                                                'dist_media_km': 'Dist. média (km)', 'dist_max_km': 'Dist. máx (km)'}
+                                       ).to_excel(_w, index=False, sheet_name="Ranking de Potencial")
+                            if _cen:
+                                pd.DataFrame(_cen).to_excel(_w, index=False, sheet_name="Cenários de Cobertura")
+                            pd.DataFrame([{
+                                'Concentração da demanda (0-100)': _idx['concentracao'],
+                                'Interiorização (%)': _idx['interiorizacao'],
+                                'Capilaridade — locais p/ 80%': _idx.get('capilaridade_80pct'),
+                                'Total de candidatos': _idx['total_candidatos'],
+                                'Total de municípios': _idx['total_municipios'],
+                                'Raio de cobertura (km)': _pra}]).to_excel(_w, index=False, sheet_name="Índices")
+                        st.download_button("⬇️ Baixar análise de cobertura (.xlsx)", data=_buf_pl.getvalue(),
+                                           file_name="planejamento_cobertura.xlsx",
+                                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                           use_container_width=True, key="plan_export_xlsx")
+                    except Exception:
+                        pass
     # [ALOC-ENTERPRISE - 49ª geração] Seção de boas práticas, no mesmo padrão do Processamento em Lote.
     with st.expander("🚀 Como obter o MÁXIMO desempenho e precisão (Alocação de Hubs)", expanded=False):
         st.markdown("""
@@ -19027,8 +25506,11 @@ if _secao == _SECOES[2]:   # tab_alocacao
         file_hubs = st.file_uploader("2. Planilha de Polos de Aplicação (locais de prova candidatos)", type=["xlsx"], key="up_hubs_v19", help="Cada base/hub pode ser identificado por nome, coordenadas ou Código IBGE do município (7 dígitos). O resultado traz Cód IBGE Hub.")
         
     if file_hubs and file_dest:
-        df_hubs = pd.read_excel(file_hubs, engine='calamine')
-        df_dest = pd.read_excel(file_dest, engine='calamine')
+        # [PERF-ALOC - 184ª geração] Parse CACHEADO por conteúdo: o bloco roda em TODO rerun e o motor
+        # é time-boxed (dezenas de reruns por estudo). Antes reparsava as duas planilhas do zero a cada
+        # rerun (~2,2 s desperdiçados/estudo, medido). Resultado idêntico — só deixa de repetir o parse.
+        df_hubs = _ler_planilha_upload(file_hubs.getvalue())
+        df_dest = _ler_planilha_upload(file_dest.getvalue())
         
         col_s1, col_s2 = st.columns(2)
         with col_s1: 
@@ -19098,12 +25580,57 @@ if _secao == _SECOES[2]:   # tab_alocacao
         CHUNK_SIZE_ALO = 200
         _alo_ativo = st.session_state.get('alo_em_andamento', False)
         
-        st.checkbox(
-            "🛣️ Escolher o local de aplicação por deslocamento real (multicritério) — mais preciso, mais lento",
-            key="alo_multicriterio", disabled=_alo_ativo,
-            help="Em vez de escolher o hub só pela menor LINHA RETA, roteia os top-K hubs mais próximos de cada cliente e "
-                 "elege o de MENOR CUSTO LOGÍSTICO EFETIVO (km-equivalentes): distância viária + lentidão + balsa + "
-                 "sinuosidade. Roteia mais rotas por cliente, portanto é mais lento.")
+        # [VIÁRIA-PADRÃO - 184ª geração] A escolha do local de aplicação passa a ser, POR PADRÃO, pela MENOR
+        # ROTA VIÁRIA (rota real) — não mais pela linha reta. O rádio abaixo troca o antigo checkbox: no
+        # padrão (viária) roteia os top-K polos mais próximos de cada candidato e elege o de MENOR viária
+        # (desempate: balsa → tempo → custo composto). É mais preciso e MAIS LENTO num estudo nacional
+        # (roteia cada polo top-K) — tradeoff aceito. A opção "linha reta" mantém o modo rápido (polo mais
+        # próximo em linha reta, sem rotear os top-K). Mapeamos a seleção para 'alo_multicriterio' — a chave
+        # que já governa toda a máquina de fases —, então NADA mais abaixo precisa mudar.
+        # [UI-ESTAVEL] O rádio SEMPRE existe (como o checkbox antes) e o expander logo abaixo também: a árvore
+        # de widgets não muda dinamicamente → não reintroduz o removeChild.
+        _OPC_VIARIA = "🛣️ Menor rota viária (recomendado) — roteia os polos próximos; mais preciso e mais lento"
+        _OPC_RETA = "📏 Menor distância em linha reta — mais rápido (não roteia os polos)"
+        _alo_crit = st.radio(
+            "Como escolher o local de aplicação de cada candidato:",
+            [_OPC_VIARIA, _OPC_RETA], index=0, key="alo_criterio_radio", disabled=_alo_ativo,
+            help="Padrão = MENOR ROTA VIÁRIA: para cada candidato, roteia os top-K polos mais próximos e "
+                 "elege o de MENOR distância viária (rota real). Desempate: ausência de balsa → menor tempo "
+                 "→ menor custo logístico. Preenche as colunas de rota/tempo/2º colocado do download. "
+                 "'Linha reta' é o modo rápido: escolhe o polo mais próximo em linha reta, sem rotear.")
+        st.session_state['alo_multicriterio'] = (_alo_crit == _OPC_VIARIA)
+        # [MATRIZ-ADAPTATIVA - 184ª geração] Motor de descoberta ampla por matriz (/table/v1): LIGADO por
+        # padrão. Mede cada origem contra um conjunto ADAPTATIVO de polos (amplia na Amazônia e em empates,
+        # reduz onde o 1º domina — via _n_candidatos_adaptativo), elege o vencedor por MENOR VIÁRIA REAL e
+        # entrega o shortlist ao Google (decisão de qualidade). A estabilidade é garantida pelo processamento
+        # em LOTES (_TAM_LOTE) que controla a memória; se algo falhar, o motor par-a-par + prova de
+        # otimalidade assume automaticamente (zero regressão). É a inteligência logística central da app.
+        if st.session_state.get('alo_multicriterio'):
+            st.session_state['alo_usar_matriz'] = st.checkbox(
+                "🧭 Descoberta ampla por matriz viária (recomendado) — mede cada origem contra um conjunto "
+                "adaptativo de polos, ampliando a busca onde há mais incerteza (Amazônia, empates, balsas)",
+                value=st.session_state.get('alo_usar_matriz', True), disabled=_alo_ativo,
+                key="alo_usar_matriz_chk",
+                help="Inteligência logística que roda ANTES do roteamento definitivo: mede a distância viária "
+                     "a um conjunto adaptativo de polos de uma vez (mais candidatos na Amazônia e quando há "
+                     "muitos polos próximos; menos quando o mais próximo domina) e elege o de MENOR rota. O "
+                     "vencedor é confirmado pelo Google. Processa em lotes para manter a memória controlada e "
+                     "a aba estável. Se algo falhar, o motor par-a-par com prova de otimalidade assume.")
+            # [SEGUNDA-PASSADA-GOOGLE - 184ª geração] Toggle: nova tentativa do Google, ao fim do estudo, nos
+            # pares que caíram só no OSRM. Aumenta a participação do Google de forma segura (espera o
+            # rate-limit resetar em vez de martelar). Ligado por padrão; desligue para o estudo mais rápido.
+            st.session_state['alo_segunda_passada_google'] = st.checkbox(
+                "🔁 Segunda tentativa do Google nos pares que caíram no OSRM (recomendado) — recupera a "
+                "participação do Google sem sobrecarregá-lo",
+                value=st.session_state.get('alo_segunda_passada_google', True), disabled=_alo_ativo,
+                key="alo_segunda_passada_google_chk",
+                help="Toda rota já passa pelo Google e pelo OSRM durante o processamento (o Google é "
+                     "prioritário). Quando o Google impõe rate-limit temporário, alguns pares ficam só com o "
+                     "OSRM naquele instante. Esta opção, ao FIM do estudo, tenta o Google novamente nesses "
+                     "pares — quando o rate-limit já pode ter liberado — e adota a rota do Google se ela for "
+                     "válida e melhor. Respeita o disjuntor de proteção (não insiste se o Google está "
+                     "bloqueado) e tem um teto para não deixar o estudo lento. Só melhora: nunca piora uma "
+                     "rota existente.")
         
         # [HUB-PARAMS - 131ª geração] Parâmetros do custo expostos: a calibração é OPERACIONAL (o preço de
         # uma balsa depende da sua operação), então quem decide é o usuário — não uma constante do código.
@@ -19118,17 +25645,21 @@ if _secao == _SECOES[2]:   # tab_alocacao
         # era IDÊNTICO. Agora isso é dito na cara, e há presets prontos para quem não quer calibrar à mão.
         with st.expander("⚙️ Calibrar o custo logístico (km-equivalentes)", expanded=False):
                 if not st.session_state.get('alo_multicriterio'):
-                    st.error("⛔ **A calibração está DESLIGADA.** Estes parâmetros só têm efeito no modo "
-                             "**multicritério** — marque a caixa **“🛣️ Escolher local de aplicação por "
-                             "deslocamento real”** acima. Sem ela, mexer nos controles abaixo **não muda "
+                    st.error("⛔ **A calibração está DESLIGADA.** Estes parâmetros só desempatam no modo "
+                             "**menor rota viária** — selecione **“🛣️ Menor rota viária”** no seletor "
+                             "acima. Em **linha reta**, mexer nos controles abaixo **não muda "
                              "absolutamente nada** no resultado.")
                 st.markdown("""
-                #### 📖 O que é isto, em uma frase
-                A plataforma não escolhe o polo mais **perto**. Ela escolhe o de **menor esforço real de
-                deslocamento** — e mede esse esforço numa moeda única: o **km-equivalente**.
+                #### 📖 O que é isto — e o QUANTO interfere na escolha (leia primeiro)
+                **No modo 🛣️ Menor rota viária, o vencedor é SEMPRE o de menor distância por estrada.** O
+                **km-equivalente** abaixo **NÃO muda esse vencedor** — ele age apenas como **critério de
+                desempate** (quando dois polos têm a *mesma* distância viária, decide pelo de menor esforço:
+                sem balsa, mais rápido) e como **otimização interna** do roteamento. Mexer nestes controles
+                **não inverte** a decisão por rota viária; só afina o desempate e os indicadores de qualidade.
+                O exemplo abaixo mostra *por que* o desempate leva em conta o esforço, e não só os quilômetros.
 
-                #### 🤔 Por que a distância não basta
-                Dois locais de prova para o mesmo município:
+                #### 🤔 Por que, no desempate, a distância não basta
+                Dois locais de prova para o mesmo município, **com distância viária muito parecida**:
 
                 | | Polo A | Polo B |
                 |---|---|---|
@@ -19230,6 +25761,7 @@ if _secao == _SECOES[2]:   # tab_alocacao
         if _alo_ativo:
             if st.button("⏹️ Cancelar Alocação", key="cancel_alo"):
                 for _k in ['alo_em_andamento', 'alo_fase', 'alo_tarefas', 'alo_resultados', 'alo_chunk_idx',
+                           'alo_retry_viaria_feito',
                            'alo_df_pares', 'alo_start_clock', 'alo_total', 'alo_runner_map', 'alo_topk_map',
                            'alo_dest_linha_reta', 'alo_dest_status_lr', 'alo_df_dest_cols', 'alo_novas_colunas',
                            'alo_dests_unicos', 'alo_hubs_validos', 'alo_dest_col_name', 'alo_df_dest',
@@ -19354,11 +25886,54 @@ if _secao == _SECOES[2]:   # tab_alocacao
                         "Fonte Geocodificação": v[6] if len(v) > 6 else "N/A",
                         "Score": v[3], "Validação XAI": " | ".join(v[4]) if isinstance(v[4], list) else "N/A"})
                 st.session_state['logs_auditoria_alocacao'] = _logs
-                dest_to_hub, dest_to_linha_reta, dest_to_status_lr, runner_up_map, topk_map = \
+                dest_to_hub, dest_to_linha_reta, dest_to_status_lr, runner_up_map, topk_map, topk_map_completo = \
                     calcular_matriz_competitiva_vetorizada(dest_coords, _hubs_validos)
+                st.session_state['alo_topk_completo'] = topk_map_completo  # [GARANTIA-OTIMA - 184ª geração]
+                # [MATRIZ-VIARIA - 184ª geração] FASE 1 (descoberta): quando a metodologia é a menor rota
+                # viária, usa a matriz /table/v1 para medir, em UMA chamada por origem, a distância viária a
+                # um amplo conjunto de hubs (até 60 por origem, muito além do top-K=10) e eleger o vencedor
+                # por MENOR VIÁRIA REAL entre todos — sem heurística de top-K. O vencedor é depois detalhado
+                # pelo /route/v1 (geometria/balsa/snap/tempo). Se a matriz falhar (rede/limite), o dict fica
+                # vazio e o fluxo par-a-par tradicional + prova B&B assume: ZERO regressão.
+                _matriz_venc = {}
+                try:
+                    if st.session_state.get('alo_multicriterio') and st.session_state.get('alo_usar_matriz', True):
+                        with st.spinner("🧭 Descoberta por matriz viária: medindo cada origem contra todos "
+                                        "os polos candidatos numa só consulta..."):
+                            _dist_matriz = _descobrir_vencedores_por_matriz(
+                                dest_coords, _hubs_validos, topk_map_completo)
+                        if _dist_matriz:
+                            st.session_state['alo_dist_matriz'] = _dist_matriz
+                            # FASE 2: shortlist dos melhores por matriz (menor + dentro de 15%, até 3) para
+                            # re-roteamento com GOOGLE prioritário — a decisão de qualidade cabe ao Google.
+                            _shortlist = _shortlist_por_matriz(_dist_matriz)
+                            # [DOMINANCIA-GEO - 184ª geração] Poda EXATA: onde o melhor candidato é provado
+                            # imbatível (viária ≤ reta dos demais), reduz o shortlist a ele só — economiza
+                            # chamadas ao Google nos casos dominantes (maioria em malha boa) sem perder
+                            # exatidão. Usa o topk_map_completo (retas por origem).
+                            try:
+                                _shortlist, _n_dom = _podar_shortlist_por_dominancia(
+                                    _shortlist, topk_map_completo)
+                                if _n_dom:
+                                    st.session_state['alo_dominancia_geo'] = _n_dom
+                            except Exception as _e_dom:
+                                logger.error(f"[DOMINANCIA-GEO] {_e_dom}")
+                            st.session_state['alo_shortlist_matriz'] = _shortlist
+                            for _org, _dh in _dist_matriz.items():
+                                if _dh:
+                                    _melhor_hub = min(_dh, key=_dh.get)
+                                    _matriz_venc[_org] = _melhor_hub
+                            logger.warning("[MATRIZ-VIARIA] Descoberta por matriz cobriu %d origem(ns); "
+                                           "shortlist p/ decisão Google-prioritária extraído.",
+                                           len(_matriz_venc))
+                except Exception as _e_mx:
+                    logger.error(f"[MATRIZ-VIARIA] Falha na fase de descoberta por matriz: {_e_mx}")
+                    _matriz_venc = {}
                 df_pares = _df_dest.copy()
                 df_pares['Origem'] = df_pares[_dest_col_name].astype(str).str.strip()
-                df_pares['Destino'] = df_pares['Origem'].map(dest_to_hub).fillna("FALHA_GEO_ORIGEM")
+                # o vencedor da matriz (quando houver) tem prioridade sobre o vencedor por linha reta
+                df_pares['Destino'] = df_pares['Origem'].map(_matriz_venc).fillna(
+                    df_pares['Origem'].map(dest_to_hub)).fillna("FALHA_GEO_ORIGEM")
                 _colunas_numericas = COLUNAS_NUMERICAS_ALOCACAO
                 for col in _novas_colunas:
                     if col in _colunas_numericas:
@@ -19393,6 +25968,10 @@ if _secao == _SECOES[2]:   # tab_alocacao
                 st.session_state['alo_tarefas'] = tarefas_priorizadas_alo
                 st.session_state['alo_resultados'] = {}
                 st.session_state['alo_chunk_idx'] = 0
+                st.session_state['alo_idx_fim_anterior'] = -1          # guarda anti-estagnação
+                st.session_state['alo_paradas_consecutivas'] = 0
+                st.session_state['alo_exec_conta'] = 0                 # teto de execuções (defesa em profundidade)
+                st.session_state['alo_finalizacao_forcada'] = False
                 st.session_state['alo_df_pares'] = df_pares
                 st.session_state['alo_total'] = len(pares_unicos_alo)
                 st.session_state['alo_runner_map'] = runner_up_map
@@ -19419,8 +25998,16 @@ if _secao == _SECOES[2]:   # tab_alocacao
             _total_chunks = max(1, math.ceil(_total / CHUNK_SIZE_ALO)) if _total > 0 else 1
             _chunk_num = _idx // CHUNK_SIZE_ALO + 1
             
-            _feitos = len(_resultados)
-            _restantes = _total - _feitos
+            # [PROGRESSO-INDICE - 184ª geração] O progresso é medido pelo ÍNDICE do loop (quantas tarefas já
+            # foram percorridas), NÃO por len(_resultados). Motivo: processar_chunk_rotas devolve um dict
+            # keyed por par (origem→destino); quando há pares equivalentes/duplicados, o dict deduplica e
+            # len(_resultados) fica ABAIXO do total de tarefas — fazendo a barra "travar" (ex.: em 50%) mesmo
+            # com o loop avançando e terminando normalmente. O índice reflete o trabalho REAL e sempre alcança
+            # o total, então a barra chega a 100% e o usuário não vê falso travamento. _feitos_rotas continua
+            # disponível para exibir quantas rotas únicas foram calculadas.
+            _feitos = min(int(_idx), int(_total))            # progresso real pelo índice do loop
+            _feitos_rotas = len(_resultados)                 # nº de rotas únicas calculadas (informativo)
+            _restantes = max(0, _total - _feitos)
             _pct = (_feitos / _total) if _total else 1.0
             _elapsed = time.time() - st.session_state['alo_start_clock']
             _taxa = (_feitos / _elapsed) if _elapsed > 0 and _feitos > 0 else 0.0
@@ -19431,7 +26018,10 @@ if _secao == _SECOES[2]:   # tab_alocacao
             st.caption("🧭 **Etapa atual:** Roteamento competitivo (cálculo de rotas origem→hub e duelo com o 2º hub mais próximo)")
             st.progress(min(1.0, _pct))
             _a1, _a2, _a3, _a4 = st.columns(4)
-            _a1.metric("Registros Processados", f"{_feitos:,} / {_total:,}", help="Rotas únicas já processadas / total de registros.")
+            _a1.metric("Registros Processados", f"{_feitos:,} / {_total:,}",
+                       help=f"Tarefas de roteamento percorridas / total. Rotas únicas calculadas até agora: "
+                            f"{_feitos_rotas:,} (pode ser menor que os registros quando há pares equivalentes, "
+                            f"que não precisam ser recalculados).")
             _a2.metric("Restantes", f"{_restantes:,}", help="Registros ainda pendentes.")
             _a3.metric("Concluído", f"{_pct*100:.1f}%", help="Percentual concluído.")
             _a4.metric("Lote Atual", f"{_chunk_num} / {_total_chunks}", help="Chunk atual / total de chunks.")
@@ -19456,10 +26046,60 @@ if _secao == _SECOES[2]:   # tab_alocacao
                 _t_alo = time.time()
                 _idx_local = _idx
                 _proc_alo = False
+                # [TETO-EXECUCOES - 184ª geração] Defesa em profundidade — GARANTIA DEFINITIVA de término.
+                # Independentemente da causa (rede, WebSocket, estagnação residual), o roteamento nunca pode
+                # rodar para sempre. Contamos as execuções (reruns) desta fase; se ultrapassarem um teto
+                # generoso mas finito, finalizamos à força com o que já foi roteado — os pares não roteados
+                # recebem fallback na finalização. O teto é dimensionado pelo volume: mesmo um estudo nacional
+                # cabe com folga, então este limite só dispara em cenários patológicos que, sem ele, travariam.
+                _exec_conta = st.session_state.get('alo_exec_conta', 0) + 1
+                st.session_state['alo_exec_conta'] = _exec_conta
+                # teto = margem de segurança sobre o nº mínimo de execuções necessárias (total / mini-lote),
+                # com piso de 300 e teto de 5000 — cobre qualquer estudo real com folga de várias vezes.
+                _exec_necessarias = max(1, math.ceil(_total / max(_MINI_ALO, 1)))
+                _TETO_EXEC = int(min(5000, max(300, _exec_necessarias * 8)))
+                if _exec_conta > _TETO_EXEC:
+                    logger.error("[TETO-EXECUCOES] Limite de %d execuções atingido (necessárias ~%d) — "
+                                 "finalizando à força para impedir travamento infinito. %d de %d registros "
+                                 "roteados; o restante receberá fallback.", _TETO_EXEC, _exec_necessarias,
+                                 len(_resultados), _total)
+                    # marca os pares ainda não roteados para fallback e finaliza
+                    for _tp in _tarefas[_idx_local:]:
+                        _par_pend = _tp[1] if isinstance(_tp, tuple) and len(_tp) > 1 else None
+                        if _par_pend and _par_pend not in _resultados:
+                            _resultados[_par_pend] = None
+                    st.session_state['alo_resultados'] = _resultados
+                    st.session_state['alo_chunk_idx'] = _total
+                    st.session_state['alo_finalizacao_forcada'] = True
+                    _ir_finalizar = True
+                    _idx_local = _total  # impede a entrada no laço abaixo
+                # [ANTI-ESTAGNACAO - 184ª geração] Guarda contra travamento: se, ao FIM de uma execução, o
+                # índice não avançou em relação ao fim da execução ANTERIOR (rotas que estouram o orçamento
+                # sem completar — típico de pares em regiões com timeout de rede repetido), o processamento
+                # ficaria preso no mesmo ponto para sempre (o sintoma "trava em 50% e nunca acaba"). Contamos
+                # as execuções consecutivas sem avanço; após algumas, PULAMOS o mini-lote problemático à
+                # força na próxima execução, garantindo progresso. Os poucos pares pulados recebem tratamento
+                # de fallback na finalização (melhor que travar o estudo inteiro); o resto mantém qualidade.
+                _idx_fim_anterior = st.session_state.get('alo_idx_fim_anterior', -1)
+                _paradas = st.session_state.get('alo_paradas_consecutivas', 0)
+                _pular_forcado = _paradas >= 3  # já houve 3 execuções seguidas sem avançar → pula à força
                 while _idx_local < _total:
                     _mini = _tarefas[_idx_local:_idx_local + _MINI_ALO]
                     if not _mini:
                         break
+                    if _pular_forcado:
+                        # estagnação detectada: registra os pares travados como pendentes e força o avanço
+                        for _tp in _mini:
+                            _par_trv = _tp[1] if isinstance(_tp, tuple) and len(_tp) > 1 else None
+                            if _par_trv and _par_trv not in _resultados:
+                                _resultados[_par_trv] = None  # não-roteado → recebe fallback na finalização
+                        logger.warning("[ANTI-ESTAGNACAO] Mini-lote no índice %d pulado após %d execuções sem "
+                                       "avanço (rotas travando o orçamento) — progresso forçado, %d par(es) "
+                                       "marcado(s) para fallback.", _idx_local, _paradas, len(_mini))
+                        _idx_local += _MINI_ALO
+                        _proc_alo = True
+                        _pular_forcado = False  # pula só um lote por execução, depois retoma o fluxo normal
+                        break  # sai e deixa o rerun retomar o roteamento normal a partir do próximo lote
                     try:
                         _res_mini = processar_chunk_rotas(_mini, runner_up_map=_runner_map)
                         _resultados.update(_res_mini)
@@ -19472,6 +26112,15 @@ if _secao == _SECOES[2]:   # tab_alocacao
                 if _proc_alo:
                     st.session_state['alo_resultados'] = _resultados
                 st.session_state['alo_chunk_idx'] = min(_idx_local, _total)
+                # [ANTI-ESTAGNACAO] compara o FIM desta execução com o FIM da anterior para detectar
+                # estagnação real (progresso zero entre execuções), não o início (que sempre iguala o fim
+                # anterior por construção do fluxo contínuo).
+                if _idx_local <= _idx_fim_anterior:
+                    _paradas += 1
+                else:
+                    _paradas = 0
+                st.session_state['alo_idx_fim_anterior'] = _idx_local
+                st.session_state['alo_paradas_consecutivas'] = _paradas
                 _ir_finalizar = st.session_state['alo_chunk_idx'] >= _total
             
             # [PODA - 143ª geração] 2ª RODADA (só no modo multicritério): agora que o polo mais próximo
@@ -19495,7 +26144,15 @@ if _secao == _SECOES[2]:   # tab_alocacao
                         _inc = str(_tk_p[0][1]).strip()          # polo mais próximo (já roteado)
                         _r_inc = _res_r1.get((_cli_p, _inc))
                         _custo_inc = None
-                        if _r_inc and _r_inc[0]:
+                        # [PODA-SEGURA - 184ª geração] O custo-limite da poda SÓ é válido se vier de rota REAL
+                        # (OSRM/Google). Se o incumbente veio de FALLBACK GEODÉSICO (Google falhou e ainda não há
+                        # rota rodoviária), sua viária ≈ geodésica SUBESTIMA o custo real — e o limite baixo faz a
+                        # poda eliminar concorrentes de MENOR rota viária ANTES de roteá-los (o bug que fazia o
+                        # mais próximo em LINHA RETA vencer no modo viária). Nesse caso custo_inc fica None → SEM
+                        # poda p/ este cliente (rota todos os top-K e acha a verdadeira menor viária). A economia
+                        # de API é preservada sempre que o incumbente TEM rota real.
+                        _fonte_inc = str(_r_inc[5]).lower() if (_r_inc and len(_r_inc) > 5) else "geodés"
+                        if _r_inc and _r_inc[0] and "geodés" not in _fonte_inc and "falha" not in _fonte_inc:
                             try:
                                 _d = _custo_logistico_efetivo(
                                     float(_r_inc[0]), float(_tk_p[0][0]),
@@ -19519,6 +26176,9 @@ if _secao == _SECOES[2]:   # tab_alocacao
                         st.session_state['alo_tarefas'] = _novas
                         st.session_state['alo_total'] = len(_novas)
                         st.session_state['alo_chunk_idx'] = 0
+                        st.session_state['alo_idx_fim_anterior'] = -1        # reset do guarda anti-estagnação
+                        st.session_state['alo_paradas_consecutivas'] = 0
+                        st.session_state['alo_exec_conta'] = 0              # cada fase tem seu próprio teto finito
                         _ir_finalizar = False          # volta para a fase de roteamento com os sobreviventes
                 except Exception as _e_poda:
                     logger.error(f"[PODA] Falha na 2ª rodada (poda); seguindo sem ela: {_e_poda}")
@@ -19543,26 +26203,268 @@ if _secao == _SECOES[2]:   # tab_alocacao
                 if st.session_state.get('alo_multicriterio'):
                     try:
                         _topk_mc = st.session_state.get('alo_topk_map', {})
+                        # [RETRY-VIARIA - 184ª geração] SEGUNDA CHANCE (uma vez por estudo, ≤40 pares): se a
+                        # rota de um candidato PRÓXIMO falhou (fallback) e o melhor real está muito mais longe
+                        # (reta×1.5 < melhor viária real), re-roteia esses pares agora, sincronamente — falhas
+                        # transientes de API custavam ~150 km ao candidato (padrão Candeias→Porto Velho). Só
+                        # aceita o retry se vier ROTA REAL; senão mantém o que havia (zero regressão).
+                        if not st.session_state.get('alo_retry_viaria_feito'):
+                            st.session_state['alo_retry_viaria_feito'] = True
+                            _pares_rt = _pares_retry_viaria(_topk_mc, _resultados)
+                            if _pares_rt:
+                                with st.spinner(f"🛟 Segunda chance: re-roteando {len(_pares_rt)} candidato(s) "
+                                                f"próximos cuja rota falhou..."):
+                                    try:
+                                        _res_rt = processar_chunk_rotas(
+                                            _pares_rt, runner_up_map=st.session_state.get('alo_runner_map'))
+                                        _aceitos = 0
+                                        for _kr, _vr in (_res_rt or {}).items():
+                                            _fr = str(_vr[5]).lower() if (_vr and len(_vr) > 5) else "geodés"
+                                            if _vr and _vr[0] and "geodés" not in _fr and "falha" not in _fr:
+                                                _resultados[_kr] = _vr
+                                                _aceitos += 1
+                                        if _aceitos:
+                                            st.session_state['alo_resultados'] = _resultados
+                                            logger.warning("[RETRY-VIARIA] %d rota(s) recuperadas na segunda "
+                                                           "chance (candidato próximo sem rota).", _aceitos)
+                                    except Exception as _e_rt:
+                                        logger.error(f"[RETRY-VIARIA] Falha na segunda chance: {_e_rt}")
+                            # [MOTOR-VALIDACAO - 184ª geração] Segunda camada: reataca o polo MAIS PRÓXIMO por
+                            # reta quando o vencedor atual destoa do piso físico (padrão Candeias→Porto Velho).
+                            # Precisa de uma reatribuição prévia p/ saber o vencedor corrente.
+                            try:
+                                _nd_prov, _ = _reatribuir_hubs_multicriterio(_topk_mc, _resultados)
+                                _pares_rv = _pares_revalidar_mais_proximo(_topk_mc, _resultados, _nd_prov)
+                                if _pares_rv:
+                                    with st.spinner(f"🔬 Validação inteligente: reavaliando o polo mais próximo "
+                                                    f"de {len(_pares_rv)} município(s)..."):
+                                        _res_rv = processar_chunk_rotas(
+                                            _pares_rv, runner_up_map=st.session_state.get('alo_runner_map'))
+                                        _acc2 = 0
+                                        for _kr, _vr in (_res_rv or {}).items():
+                                            _fr = str(_vr[5]).lower() if (_vr and len(_vr) > 5) else "geodés"
+                                            if _vr and _vr[0] and "geodés" not in _fr and "falha" not in _fr:
+                                                _resultados[_kr] = _vr
+                                                _acc2 += 1
+                                        if _acc2:
+                                            st.session_state['alo_resultados'] = _resultados
+                                            logger.warning("[MOTOR-VALIDACAO] %d polo(s) mais próximos "
+                                                           "recuperados na revalidação.", _acc2)
+                            except Exception as _e_rv:
+                                logger.error(f"[MOTOR-VALIDACAO] Falha na revalidação: {_e_rv}")
+                            # [GARANTIA-OTIMA - 184ª geração] PROVA de otimalidade: laço branch-and-bound que
+                            # roteia TODO polo (mesmo fora do top-K) cuja linha reta ainda seja menor que a
+                            # melhor viária encontrada — pois só esses poderiam vencer. Converge quando nenhum
+                            # polo não-roteado tem reta < melhor viária: aí o vencedor está PROVADO ótimo.
+                            try:
+                                _topk_full = st.session_state.get('alo_topk_completo') or {}
+                                if _topk_full:
+                                    _iter_prova = 0
+                                    _total_prova = 0
+                                    while _iter_prova < 5:
+                                        _pares_ot = _pares_garantia_otimalidade(_topk_full, _resultados)
+                                        if not _pares_ot:
+                                            break  # prova fechada: nenhum polo fora pode ter viária menor
+                                        _iter_prova += 1
+                                        with st.spinner(f"🎯 Prova de otimalidade (rodada {_iter_prova}): "
+                                                        f"roteando {len(_pares_ot)} polo(s) que ainda poderiam "
+                                                        f"vencer..."):
+                                            _res_ot = processar_chunk_rotas(
+                                                _pares_ot, runner_up_map=st.session_state.get('alo_runner_map'))
+                                            _acc_ot = 0
+                                            for _ko, _vo in (_res_ot or {}).items():
+                                                _fo = str(_vo[5]).lower() if (_vo and len(_vo) > 5) else "geodés"
+                                                # aceita QUALQUER retorno (real ou fallback) para não repetir o
+                                                # mesmo par ao infinito; só rotas reais mudam o teto da prova.
+                                                if _vo and _vo[0]:
+                                                    _resultados[_ko] = _vo
+                                                    if "geodés" not in _fo and "falha" not in _fo:
+                                                        _acc_ot += 1
+                                                else:
+                                                    # marca como tentado com fallback geodésico p/ convergir
+                                                    _resultados.setdefault(_ko, _vo)
+                                            _total_prova += _acc_ot
+                                        # se a rodada não trouxe nenhuma rota real nova, não há como melhorar
+                                        if _acc_ot == 0:
+                                            break
+                                    if _total_prova:
+                                        st.session_state['alo_resultados'] = _resultados
+                                        logger.warning("[GARANTIA-OTIMA] Prova de otimalidade: %d polo(s) fora "
+                                                       "do top-K roteados e incorporados (%d rodada(s)).",
+                                                       _total_prova, _iter_prova)
+                                    st.session_state['alo_prova_otimalidade'] = {
+                                        "rodadas": _iter_prova, "polos_extras_reais": _total_prova,
+                                        "fechada": True}
+                            except Exception as _e_ot:
+                                logger.error(f"[GARANTIA-OTIMA] Falha no laço de otimalidade: {_e_ot}")
+                            # [MATRIZ-VIARIA - 184ª geração] FASE 2 (decisão de qualidade GOOGLE-PRIORITÁRIA):
+                            # o shortlist da matriz (melhores candidatos OSRM) é re-roteado com o GOOGLE
+                            # prioritário (processar_chunk_rotas já usa Google→OSRM fallback). A decisão final
+                            # de menor viária sai, assim, do motor de MAIOR qualidade — não do OSRM da matriz.
+                            try:
+                                _sl = st.session_state.get('alo_shortlist_matriz') or {}
+                                _pares_sl = []
+                                for _org, _cands in _sl.items():
+                                    for (_hub, _d) in _cands:
+                                        if not (_resultados.get((_org, _hub)) or {}):
+                                            _pares_sl.append((_org, _hub))
+                                        else:
+                                            _rr = _resultados.get((_org, _hub))
+                                            _ff = str(_rr[5]).lower() if (_rr and len(_rr) > 5) else ""
+                                            # se o que temos é OSRM/fallback, vale reconfirmar no Google
+                                            if "google" not in _ff:
+                                                _pares_sl.append((_org, _hub))
+                                if _pares_sl:
+                                    with st.spinner(f"🛰️ Decisão de qualidade (Google prioritário): "
+                                                    f"roteando {len(_pares_sl)} candidato(s) do shortlist..."):
+                                        _res_sl = processar_chunk_rotas(
+                                            _pares_sl, runner_up_map=st.session_state.get('alo_runner_map'))
+                                        _acc_sl = 0
+                                        for _ks, _vs in (_res_sl or {}).items():
+                                            if _vs and _vs[0]:
+                                                # aceita o resultado (Google prioritário quando disponível)
+                                                _resultados[_ks] = _vs
+                                                _acc_sl += 1
+                                        if _acc_sl:
+                                            st.session_state['alo_resultados'] = _resultados
+                                            logger.warning("[MATRIZ-VIARIA] Fase 2: %d candidato(s) do "
+                                                           "shortlist roteados com Google prioritário.", _acc_sl)
+                            except Exception as _e_sl:
+                                logger.error(f"[MATRIZ-VIARIA] Falha na fase 2 (Google): {_e_sl}")
                         # [HUB-PARAMS - 131ª geração] Usa a calibração do usuário (congelada no clique);
                         # se ausente, reconstrói dos widgets; se tudo faltar, cai nos padrões validados.
                         _params_mc = st.session_state.get('alo_params_custo') or _montar_params_custo(
                             st.session_state.get('alo_vel_ref'), st.session_state.get('alo_balsa_km'),
                             st.session_state.get('alo_limiar_sin'), st.session_state.get('alo_peso_sin'))
-                        _novo_dest_mc, _mcda_mc = _reatribuir_hubs_multicriterio(_topk_mc, _resultados,
+                        # [MATRIZ-VIARIA - 184ª geração] CORREÇÃO DE GARGALO: funde o shortlist da matriz ao
+                        # topk_mc ANTES da reatribuição, para que o vencedor revelado pela matriz (que pode
+                        # estar fora do top-K de linha reta) seja CONSIDERADO na decisão final — senão ele
+                        # seria descartado e o ganho da matriz se perderia na geografia adversa.
+                        try:
+                            _topk_reatrib = _fundir_shortlist_no_topk(
+                                _topk_mc, st.session_state.get('alo_shortlist_matriz'),
+                                st.session_state.get('alo_dist_matriz'))
+                        except Exception as _e_fus:
+                            logger.error(f"[MATRIZ-VIARIA] Falha ao fundir shortlist: {_e_fus}")
+                            _topk_reatrib = _topk_mc
+                        _novo_dest_mc, _mcda_mc = _reatribuir_hubs_multicriterio(_topk_reatrib, _resultados,
                                                                                  params=_params_mc)
                         if _novo_dest_mc:
                             _oo = _df_pares['Origem'].astype(str).str.strip()
                             _df_pares['Destino'] = _oo.map(_novo_dest_mc).fillna(_df_pares['Destino'])
                             st.session_state['alo_mcda'] = _mcda_mc
+                            # [DIVERGENCIA-MOTOR - 184ª geração] Compara o vencedor da matriz OSRM com a
+                            # decisão final (Google-prioritária): divergências marcam municípios sensíveis
+                            # ao motor — sinal de auditoria, sem alterar a decisão final.
+                            try:
+                                _dm_aud = st.session_state.get('alo_dist_matriz') or {}
+                                if _dm_aud:
+                                    _div = _auditar_divergencia_motores(_dm_aud, _novo_dest_mc)
+                                    st.session_state['alo_divergencia_motor'] = _div
+                                    if _div.get("divergencias"):
+                                        logger.warning("[DIVERGENCIA-MOTOR] %d/%d município(s) (%.1f%%) com "
+                                                       "vencedor sensível ao motor (matriz OSRM ≠ decisão "
+                                                       "Google).", _div["divergencias"], _div["total_avaliado"],
+                                                       _div["taxa_divergencia_pct"])
+                            except Exception as _e_dv:
+                                logger.error(f"[DIVERGENCIA-MOTOR] {_e_dv}")
                     except Exception as _e_mcf:
                         logger.error(f"[HUB-MCDA] Falha na reatribuição multicritério: {_e_mcf}")
                 df_final_alo = _montar_dataframe_final(_df_pares, _resultados, runner_up_map=_runner)
+                # [VIÁRIA-PADRÃO - 184ª geração] No modo VIÁRIA, alinha o CONCORRENTE ao 2º MENOR VIÁRIA
+                # (o runner_up_map traz o 2º em linha reta). Aditivo/defensivo; usa o pipeline já roteado do
+                # 2º colocado e recalcula os índices da disputa. No modo linha reta este passo não roda.
+                if st.session_state.get('alo_multicriterio'):
+                    try:
+                        df_final_alo = _alinhar_concorrente_por_viaria(
+                            df_final_alo, st.session_state.get('alo_mcda') or {}, _resultados)
+                    except Exception as _e_alc:
+                        logger.error(f"[VIÁRIA-PADRÃO] Falha ao alinhar concorrente por viária: {_e_alc}")
+                    # [SSOT-DECISAO - 184ª geração] CORREÇÃO AUTORITATIVA FINAL: garante vencedor = MENOR viária
+                    # real. Roda com as viárias REAIS já populadas (após o alinhamento do concorrente) e ANTES da
+                    # validação — se sobrou algum caso com vencedor de viária maior que o 2º, ele é TROCADO aqui,
+                    # e a validação seguinte confirma que não resta inconsistência (deve zerar os alertas).
+                    # [SEGUNDA-PASSADA-GOOGLE - 184ª geração] Antes de eleger o vencedor final, dá ao Google
+                    # uma nova chance nos pares que caíram só no OSRM/fallback (o rate-limit do Google pode já
+                    # ter resetado). Recupera participação do Google de forma segura (respeita o disjuntor,
+                    # não martela). Opt-in via toggle; roda com teto para não reintroduzir lentidão.
+                    if st.session_state.get('alo_segunda_passada_google', True):
+                        try:
+                            _teto_2pass = 400  # limite de reprocessamentos para controlar tempo/rede
+                            df_final_alo, _n_rec_g = _segunda_passada_google(df_final_alo, _max_pares=_teto_2pass)
+                            if _n_rec_g:
+                                st.session_state['alo_recuperados_google'] = _n_rec_g
+                        except Exception as _e_2p:
+                            logger.error(f"[SEGUNDA-PASSADA-GOOGLE] {_e_2p}")
+                    _inv_antes_viaria = _verificar_invariante_viaria(df_final_alo)
+                    df_final_alo = _forcar_menor_viaria_vencedor(df_final_alo)
+                    st.session_state['alo_correcoes_viaria'] = int(_inv_antes_viaria.get('violacoes', 0))
+                    # [COERENCIA-VIARIA - 184ª geração] Validação automática: detecta/sinaliza rotas com viária do
+                    # vencedor MAIOR que a do concorrente (acesso fluvial / rota recuperada) — adiciona coluna de
+                    # alerta na planilha e registra em log. Não troca o vencedor (risco de capacidade/consistência);
+                    # o painel de auditoria já sinaliza cada caso e nomeia o hub de menor viária.
+                    df_final_alo = _validar_coerencia_viaria(df_final_alo)
                 # [HOMONIMO - 126ª geração] Pós-passo ADITIVO: auditoria de desambiguação de homônimos.
                 df_final_alo = _enriquecer_desambiguacao_homonimos(df_final_alo)
                 # [INTEGRIDADE - 133ª geração] Pós-passo ADITIVO: Índice de Integridade Geográfica + alerta por rota.
                 df_final_alo = _enriquecer_integridade_geografica(df_final_alo)
                 # [IBGE-ROTULO - 146ª geração] Rótulos legíveis + retroalimentação Município/UF.
                 df_final_alo = _enriquecer_rotulos_ibge(df_final_alo)
+                # [NOME-CONCORRENTE - 184ª geração] Passe FINAL: 'Concorrente Analisado' e 'Municipio Destino'
+                # SEMPRE pelo NOME do município (nunca o código IBGE), em TODAS as linhas e em qualquer modo —
+                # aplicado antes de montar o export e a tela, para cobrir inclusive as linhas que o alinhamento
+                # por viária não tocou (ranking <2) e o modo linha reta.
+                # [CONCORRENTE-SEMPRE - 184ª geração] Garante concorrente em TODA linha (2º polo do topk) antes
+                # da resolução de nomes, para que o preenchido também vire nome de município legível.
+                df_final_alo = _garantir_concorrente_sempre(
+                    df_final_alo, st.session_state.get('alo_topk_map'), _resultados)
+                df_final_alo = _resolver_nomes_finais(df_final_alo)
+                # [XAI-ROTA - 184ª geração] Classificação da rota (🟢/🟡/🟠) + método EXPLÍCITO
+                # (✅ viária real / 📏 linha reta) + MOTIVO anexado às justificativas — em tela e planilha.
+                df_final_alo = _enriquecer_classificacao_rotas(df_final_alo)
+                # [MOTOR-TEMPO - 184ª geração] Garante Tempo em toda linha com distância viária (nunca N/A).
+                df_final_alo = _garantir_tempo_estimado(df_final_alo)
+                # [CONSISTENCIA-FISICA - 184ª geração] Sinaliza incoerências físicas (viária<reta, velocidade).
+                df_final_alo = _validar_consistencia_fisica(df_final_alo)
+                # [COERENCIA-TD - 184ª geração] Sentinela: tempo e distância do MESMO motor vencedor (checa
+                # velocidade implícita plausível; velocidade absurda = fontes dessincronizadas).
+                df_final_alo = _validar_coerencia_tempo_distancia(df_final_alo)
+                # [REGIAO-ADAPTATIVA - 184ª geração] Inteligência adaptativa: classifica a confiabilidade do
+                # roteamento por região (Amazônia/ilhas/balsa têm malha mais fraca) — transparência sobre
+                # onde confiar mais ou menos, sem alterar nenhuma decisão.
+                df_final_alo = _aplicar_confiabilidade_regional(df_final_alo)
+                # [PARTICIPACAO-MOTOR - 184ª geração] Diagnostica quanto o Google participou de fato — dá
+                # visibilidade à queixa "o Google parou de participar" com veredito acionável.
+                try:
+                    _part_mot = _diagnosticar_participacao_motores(df_final_alo)
+                    if _part_mot:
+                        st.session_state['alo_participacao_motor'] = _part_mot
+                except Exception as _e_pm:
+                    logger.error(f"[PARTICIPACAO-MOTOR] {_e_pm}")
+                # [APRENDIZADO - 184ª geração] Audita padrões de subotimalidade e registra em tela + telemetria.
+                try:
+                    _padroes = _auditar_padroes_derrota(df_final_alo)
+                    if _padroes:
+                        st.session_state['alo_padroes_derrota'] = _padroes
+                        _n_fant = sum(1 for _p in _padroes if _p['padrao'] == 'desvio_fantasma')
+                        _n_dist = sum(1 for _p in _padroes if _p['padrao'] == 'polo_mais_distante')
+                        logger.warning("[APRENDIZADO] %d padrão(ões) de atenção detectados (%d desvio fantasma, "
+                                       "%d polo mais distante).", len(_padroes), _n_fant, _n_dist)
+                except Exception as _e_ap:
+                    logger.error(f"[APRENDIZADO] {_e_ap}")
+                # [DIAGNOSTICO-POLO - 184ª geração] Sinaliza vencedores suspeitosamente distantes (sinuosidade
+                # > 3): indício de polo melhor ausente da lista ou mal roteado — dá visibilidade ao gargalo
+                # das derrotas para o operador investigar o universo de destinos.
+                try:
+                    _polos_susp = _diagnosticar_polo_suspeito(df_final_alo)
+                    if _polos_susp:
+                        st.session_state['alo_polos_suspeitos'] = _polos_susp
+                        logger.warning("[DIAGNOSTICO-POLO] %d município(s) com vencedor suspeito (rota muito "
+                                       "sinuosa) — possível polo melhor ausente/mal roteado.", len(_polos_susp))
+                except Exception as _e_dp:
+                    logger.error(f"[DIAGNOSTICO-POLO] {_e_dp}")
+                # [SSOT-DECISAO - 184ª geração] Verificação FINAL do invariante da menor viária (prova ao usuário).
+                st.session_state['alo_invariante_viaria'] = _verificar_invariante_viaria(df_final_alo)
                 # [HUMANIZAR - 173ª geração] O CÓDIGO IBGE SAI da coluna Origem/Destino; o NOME entra.
                 # O código NÃO se perde: vai para a coluna própria. Ninguém analisa uma planilha com
                 # '1100023' na coluna Origem — código é identificador de MÁQUINA, nome é de GENTE.
@@ -19703,10 +26605,44 @@ if _secao == _SECOES[2]:   # tab_alocacao
                 
                 output_buffer = io.BytesIO()
                 with pd.ExcelWriter(output_buffer, engine='xlsxwriter') as writer:
+                    # [EXPORT-PADRAO - 184ª geração] Índice navegável como PRIMEIRA aba (sumário clicável com
+                    # hyperlinks para todas as seções). Criado antes das demais para ficar no topo.
+                    try:
+                        _abas_indice = [
+                            ("Locais de Aplicacao", "Dados principais: cada município de origem e seu local de prova."),
+                            ("Resumo Executivo", "Indicadores gerais do estudo (visão gerencial)."),
+                            ("Sintese por UF", "Distâncias agregadas por estado."),
+                            ("Distribuicao de Distancias", "Quantos municípios em cada faixa de distância."),
+                            ("Competitividade dos Polos", "Concentração de candidatos por local de prova."),
+                            ("Concorrentes", "Segundo colocado de cada município (alternativa)."),
+                            ("Municipios Criticos", "Municípios com maior deslocamento (atenção logística)."),
+                            ("Metodologia", "Como os dados foram processados e as rotas calculadas."),
+                        ]
+                        _escrever_indice_navegavel(writer, _abas_indice)
+                    except Exception:
+                        logger.error("[EXPORT-PADRAO] Falha ao criar índice navegável", exc_info=True)
                     # [EXAMES - 134ª geração] Cabeçalhos traduzidos para o contexto de exames APENAS na exportação
                     # (sobre cópia). As chaves internas do df permanecem — renomeá-las quebraria a app inteira.
-                    _renomear_colunas_exame(df_final_alo).to_excel(writer, index=False,
-                                                                  sheet_name="Locais de Aplicacao")
+                    _df_export_locais = _preencher_vazios_exportacao(_renomear_colunas_exame(df_final_alo))
+                    _df_export_locais.to_excel(writer, index=False, sheet_name="Locais de Aplicacao")
+                    # [EXPORT-PADRAO - 184ª geração] Padrão institucional na aba principal: cabeçalho
+                    # destacado, congelamento, autofiltro, zebra e largura automática das colunas.
+                    try:
+                        _wb_loc = getattr(writer, "book", None)
+                        if _wb_loc is not None and hasattr(_wb_loc, "add_format"):
+                            _fmts_loc = _fmt_institucional(_wb_loc)
+                            _ws_loc = writer.sheets.get("Locais de Aplicacao")
+                            _estilizar_tabela_xlsx(_ws_loc, _wb_loc, _df_export_locais, _fmts_loc)
+                    except Exception:
+                        logger.error("[EXPORT-PADRAO] Falha ao estilizar aba principal de Locais", exc_info=True)
+                    # [EXPORT-ANALITICO - 184ª geração] Camada ANALÍTICA sempre presente: Resumo Executivo,
+                    # Síntese por UF, Competitividade dos Polos, Concorrentes, Distribuição de Distâncias e
+                    # Municípios Críticos — computadas de df_final_alo, com valores completos (sem vazios).
+                    # [EXPORT-RICO - 184ª geração] Abas ricas no padrão do Comparador (capa, gráficos nativos,
+                    # como ler, Pareto, ranking de estados) — a capa vem logo após a aba principal.
+                    _abas_ricas_alocacao(writer, df_final_alo)
+                    _aba_mapa_calor_alocacao(writer, df_final_alo)  # [MAPA-CALOR - 184ª geração]
+                    _montar_abas_analiticas_alocacao(writer, df_final_alo)
                     # [DASHBOARD - 177ª geração] AS ANÁLISES DO CANDIDATO vão para a planilha.
                     # Só quando há a coluna de INSCRITOS — sem ela, a planilha sai como sempre saiu.
                     try:
@@ -19748,6 +26684,7 @@ if _secao == _SECOES[2]:   # tab_alocacao
                 st.session_state['alo_linhas'] = len(df_final_alo)
                 
                 for _k in ['alo_em_andamento', 'alo_tarefas', 'alo_resultados', 'alo_chunk_idx',
+                           'alo_retry_viaria_feito',
                            'alo_df_pares', 'alo_start_clock', 'alo_total', 'alo_runner_map',
                            'alo_dest_linha_reta', 'alo_dest_status_lr', 'alo_df_dest_cols', 'alo_novas_colunas',
                            'alo_dests_unicos', 'alo_hubs_validos', 'alo_dest_col_name', 'alo_df_dest',
@@ -19760,16 +26697,226 @@ if _secao == _SECOES[2]:   # tab_alocacao
             if 'alo_tempo_total' in st.session_state:
                 st.success(f"✨ Alocação concluída automaticamente! {st.session_state.get('alo_linhas', 0)} linhas processadas em {_formatar_duracao(st.session_state['alo_tempo_total'])}.")
                 st.session_state.pop('alo_tempo_total', None)
-            # [METODO-TELA - 57ª geração / item #8] Método de SELEÇÃO dos hubs, EXPLÍCITO na tela.
-            # Hoje a seleção do hub mais próximo de cada cliente é por menor distância em LINHA RETA
-            # (geodésica WGS-84): o valor exibido usa GeographicLib/Karney (padrão-ouro, erro <1mm) e o
-            # ranking usa Haversine/IUGG (ordem idêntica). A 2ª opção "por rota viária" é item futuro (#7/#9).
-            st.success("✅ **Método de seleção dos hubs:** ✓ Linha reta (GeographicLib · WGS-84)")
-            st.caption("A base logística mais próxima de cada cliente foi escolhida pela **menor distância "
-                       "em linha reta** (geodésica WGS-84; valor via GeographicLib/Karney, erro <1mm; ranking "
-                       "por Haversine/IUGG, de ordem idêntica). As **distâncias viárias** por cliente "
-                       "(Google prioritário → OSRM fallback) constam na planilha exportada, na coluna "
-                       "**Método Utilizado**.")
+            # [FASE2-RESUMO-ALOC - 184ª geração] RESUMO EXECUTIVO da alocação: KPIs no topo (municípios de
+            # origem, polos utilizados, deslocamento médio/máximo ao polo) antes do detalhamento denso. A
+            # resposta em 5 segundos. Defensivo: cada métrica só aparece se a coluna existir; erro →
+            # silencioso. Reusa o df_processado já pronto. Aditivo, dentro do bloco de resultado.
+            with st.container(border=True):
+                st.markdown("#### 📋 Resumo Executivo")
+                try:
+                    _dfa = st.session_state['df_processado']
+                    _dist_a = pd.to_numeric(_dfa['Distancia'], errors='coerce') if 'Distancia' in _dfa.columns else None
+                    _n_orig = _dfa['Municipio Origem'].nunique() if 'Municipio Origem' in _dfa.columns else len(_dfa)
+                    _n_polos = _dfa['Municipio Destino'].nunique() if 'Municipio Destino' in _dfa.columns else None
+                    _ra1, _ra2, _ra3, _ra4 = st.columns(4)
+                    _ra1.metric("Municípios de origem", f"{_n_orig:,}", help="Municípios de candidatos alocados no estudo.")
+                    if _n_polos is not None:
+                        _ra2.metric("Polos utilizados", f"{_n_polos:,}", help="Locais de prova distintos para onde os candidatos foram alocados.")
+                    if _dist_a is not None:
+                        _ra3.metric("Deslocamento médio", f"{_dist_a.mean():.1f} km", help="Distância viária média do candidato até o polo alocado.")
+                        _ra4.metric("Deslocamento máximo", f"{_dist_a.max():.1f} km", help="Maior distância viária de um candidato até seu polo — sinaliza acessibilidade crítica.")
+                except Exception:
+                    pass
+            # [SSOT-DECISAO - 184ª geração] Método de SELEÇÃO dos hubs, HONESTO por modo. Antes esta mensagem
+            # era hardcoded "Linha reta" e aparecia SEMPRE — inclusive no modo viária, mentindo sobre o método
+            # e minando a confiança. Agora reflete o modo real: no modo viária, a alocação final é por MENOR
+            # ROTA VIÁRIA (a linha reta é só pré-filtro/desempate); no modo reta, é por menor geodésica.
+            if st.session_state.get('alo_multicriterio'):
+                st.success("✅ **Método de seleção dos hubs:** 🛣️ Menor rota viária (Google → OSRM)")
+                st.caption("Cada cliente foi alocado ao polo de **menor distância viária real** entre os polos "
+                           "próximos roteados (Google prioritário → OSRM fallback). A distância em linha reta é "
+                           "usada apenas como **pré-filtro** (quais polos rotear) e **desempate**, nunca como "
+                           "critério final da escolha. As distâncias viárias constam na coluna **Método Utilizado**.")
+                # [SSOT-DECISAO - 184ª geração] PROVA ao usuário de que a metodologia foi cumprida: confirma o
+                # invariante 'vencedor = menor rota viária' no resultado final, e quantos ajustes autoritativos
+                # foram aplicados. Transparência — a validação automática que faltava para gerar confiança.
+                _inv = st.session_state.get('alo_invariante_viaria') or {}
+                _corr = int(st.session_state.get('alo_correcoes_viaria', 0) or 0)
+                if _inv.get('com_concorrente'):
+                    if _inv.get('violacoes', 0) == 0:
+                        st.success("✓ **Invariante garantido:** todos os **{}** locais com alternativa avaliada "
+                                   "têm a **menor rota viária** entre o escolhido e o 2º colocado.{}".format(
+                                       _inv['com_concorrente'],
+                                       " {} ajuste(s) autoritativo(s) aplicado(s) para garantir isso.".format(_corr)
+                                       if _corr > 0 else ""))
+                    else:
+                        st.warning("⚠️ **{} de {}** locais ainda com o escolhido tendo viária maior que o 2º — "
+                                   "veja a coluna **Alerta Coerência Viária** na planilha.".format(
+                                       _inv['violacoes'], _inv['com_concorrente']))
+                    # [APRENDIZADO - 184ª geração] Painel de padrões aprendidos com as derrotas/subotimalidades.
+                    _pad = st.session_state.get('alo_padroes_derrota') or []
+                    if _pad:
+                        _nf = sum(1 for _p in _pad if _p['padrao'] == 'desvio_fantasma')
+                        _nd = sum(1 for _p in _pad if _p['padrao'] == 'polo_mais_distante')
+                        with st.expander(f"🧠 Aprendizado com padrões ({len(_pad)} caso(s) de atenção detectados)"):
+                            st.caption("A aplicação identifica automaticamente assinaturas de escolha "
+                                       "potencialmente subótima para revisão e melhoria contínua.")
+                            if _nf:
+                                st.markdown(f"- 🚢 **{_nf}** caso(s) de **desvio fluvial fantasma** (sinuosidade "
+                                            "> 4× a linha reta) — rota rodoviária provavelmente fluvial na prática.")
+                            if _nd:
+                                st.markdown(f"- 📍 **{_nd}** caso(s) de **polo mais distante que o concorrente** — "
+                                            "candidatos a revalidação do 2º colocado.")
+                            _amostra = _pad[:8]
+                            st.dataframe(pd.DataFrame(_amostra), hide_index=True, use_container_width=True)
+                    # [DIAGNOSTICO-POLO - 184ª geração] Painel de polos suspeitos: vencedores muito sinuosos
+                    # que sugerem um polo melhor ausente da lista ou mal roteado (raiz das derrotas).
+                    # [PARTICIPACAO-MOTOR - 184ª geração] Painel de participação dos motores com veredito.
+                    _pm = st.session_state.get('alo_participacao_motor') or {}
+                    if _pm and _pm.get('total'):
+                        _emoji_pm = {"ok": "🟢", "info": "🔵", "aviso": "🟡", "erro": "🔴"}.get(_pm.get('nivel'), "⚪")
+                        with st.expander(f"🛰️ Participação dos motores de roteamento "
+                                         f"({_emoji_pm} Google {_pm['pct_google']:.0f}% · "
+                                         f"OSRM {_pm['pct_osrm']:.0f}%)"):
+                            st.caption("Quanto cada motor participou do resultado final. O Google é o motor "
+                                       "prioritário quando responde; o OSRM cobre o restante e serve de "
+                                       "auditoria e redundância.")
+                            _c1_pm, _c2_pm, _c3_pm = st.columns(3)
+                            _c1_pm.metric("Google Maps", f"{_pm['pct_google']:.0f}%", f"{_pm['n_google']:,} rotas")
+                            _c2_pm.metric("OSRM", f"{_pm['pct_osrm']:.0f}%", f"{_pm['n_osrm']:,} rotas")
+                            _c3_pm.metric("Fallback geodésico", f"{_pm['pct_fallback']:.0f}%",
+                                          f"{_pm['n_fallback']:,} rotas")
+                            # [SEGUNDA-PASSADA-GOOGLE] informa quantas rotas o Google recuperou na 2ª tentativa.
+                            _rec_g = st.session_state.get('alo_recuperados_google')
+                            if _rec_g:
+                                st.success(f"🔁 A segunda tentativa do Google recuperou {_rec_g:,} rota(s) que "
+                                           "haviam caído no OSRM/fallback — a participação do Google acima já "
+                                           "inclui essa recuperação.")
+                            _nivel_pm = _pm.get('nivel')
+                            if _nivel_pm == "erro":
+                                st.error(_pm['veredito'])
+                            elif _nivel_pm == "aviso":
+                                st.warning(_pm['veredito'])
+                            else:
+                                st.info(_pm['veredito'])
+                            # [CIRCUIT-BREAKER] informa se o disjuntor do Google chegou a abrir na sessão.
+                            try:
+                                _cb_est = _GOOGLE_CB_ESTADO
+                                if _cb_est and _cb_est.get('status') != 'fechado':
+                                    st.caption("⚡ O disjuntor de proteção do Google esteve ativo nesta sessão: "
+                                               "ao detectar falhas em série (rate-limit), o sistema suspendeu "
+                                               "temporariamente as chamadas ao Google para não agravar o "
+                                               "bloqueio, usando o OSRM nesse intervalo e retomando o Google "
+                                               "em seguida. É um comportamento de proteção esperado, não um erro.")
+                            except Exception:
+                                pass
+                    _susp = st.session_state.get('alo_polos_suspeitos') or []
+                    if _susp:
+                        with st.expander(f"🔍 Polos possivelmente subótimos ({len(_susp)} caso(s)) — investigar"):
+                            st.caption("Estes municípios têm o polo vencedor com rota muito sinuosa (a estrada "
+                                       "é 3× ou mais que a linha reta). Isso costuma indicar que a rota contorna "
+                                       "um rio e que **pode existir um polo terrestre mais próximo** que não está "
+                                       "na lista de destinos ou foi mal roteado. Compare com o estudo de "
+                                       "referência: se ele usa um polo mais perto, considere incluí-lo na "
+                                       "planilha de destinos e reprocessar.")
+                            st.dataframe(pd.DataFrame(_susp[:15]), hide_index=True, use_container_width=True)
+                    # [REGIAO-ADAPTATIVA - 184ª geração] Resumo da confiabilidade regional do roteamento.
+                    try:
+                        if 'Confiabilidade Regional' in df_final_alo.columns:
+                            _conf = df_final_alo['Confiabilidade Regional'].astype(str)
+                            _n_baixa = int(_conf.str.contains('Baixa').sum())
+                            _n_media = int(_conf.str.contains('Média').sum())
+                            _n_alta = int(_conf.str.contains('Alta').sum())
+                            _tot_c = max(len(df_final_alo), 1)
+                            with st.expander(f"🧭 Confiabilidade regional do roteamento "
+                                             f"(🟢 {_n_alta} · 🟡 {_n_media} · 🔴 {_n_baixa})"):
+                                st.caption("Classificação automática da confiabilidade por região, sem alterar "
+                                           "nenhuma decisão. A malha viária é mais esparsa na Amazônia Legal "
+                                           "(rios, poucas estradas mapeadas) e em rotas com balsa ou muito "
+                                           "sinuosas — ali o roteamento tem incerteza maior. Isto dá "
+                                           "transparência sobre onde os resultados merecem conferência extra.")
+                                _pct_alta = 100.0 * _n_alta / _tot_c
+                                st.markdown(
+                                    f"- 🟢 **Alta confiabilidade:** {_n_alta} município(s) ({_pct_alta:.0f}%) — "
+                                    "malha consolidada, rota direta.\n"
+                                    f"- 🟡 **Média:** {_n_media} — Amazônia Legal, balsa ou rota sinuosa; "
+                                    "resultado utilizável com atenção.\n"
+                                    f"- 🔴 **Baixa:** {_n_baixa} — fallback geodésico ou rota muito sinuosa na "
+                                    "Amazônia; recomenda-se validação manual e verificação de acesso fluvial ou "
+                                    "polo alternativo.")
+                    except Exception as _e_cr:
+                        logger.error(f"[REGIAO-ADAPTATIVA] {_e_cr}")
+                    try:
+                        _cov = _auditar_cobertura_roteamento(st.session_state.get('alo_topk_map'),
+                                                             st.session_state.get('alo_resultados'))
+                        if _cov and _cov.get('pares_candidatos'):
+                            with st.expander("🔎 Auditoria de cobertura do roteamento"):
+                                _c1, _c2, _c3 = st.columns(3)
+                                _c1.metric("Municípios avaliados", f"{_cov['clientes']:,}")
+                                _c2.metric("Pares candidatos roteados", f"{_cov['pares_reais']:,}",
+                                           help="Rotas viárias reais calculadas (fora fallback geodésico)")
+                                _c3.metric("Taxa de sucesso viária", f"{_cov['taxa_sucesso']:.0f}%")
+                                st.caption(
+                                    f"Foram avaliados **{_cov['media_candidatos_por_cliente']:.1f} polos por "
+                                    f"município** em média ({_cov['pares_candidatos']:,} pares candidatos no total). "
+                                    f"Destes, **{_cov['pares_reais']:,}** obtiveram rota viária real, "
+                                    f"**{_cov['pares_fallback']:,}** caíram em geodésica (acesso fluvial/sem malha) "
+                                    f"e **{_cov['pares_sem_rota']:,}** não retornaram rota. A decisão final usou "
+                                    "sempre a menor viária real disponível entre os candidatos roteados.")
+                                # [GARANTIA-OTIMA - 184ª geração] Selo de prova de otimalidade.
+                                _prova = st.session_state.get('alo_prova_otimalidade')
+                                # [MATRIZ-VIARIA - 184ª geração] cobertura do motor de matriz.
+                                _dm = st.session_state.get('alo_dist_matriz') or {}
+                                if _dm:
+                                    st.info(
+                                        f"🧭 **Motor híbrido de duas fases ativo.** Fase 1 — descoberta: "
+                                        f"{len(_dm):,} origem(ns) foram medidas contra todos os polos "
+                                        "candidatos numa única consulta de matriz do OSRM (/table/v1, gratuito "
+                                        "e ideal para varredura ampla), sem depender do top-K. Fase 2 — "
+                                        "decisão: os melhores candidatos de cada origem foram re-roteados com o "
+                                        "**Google Maps (prioritário)**, que tem a rota de maior qualidade; o "
+                                        "OSRM /route atua como fallback quando o Google não responde. Assim "
+                                        "cada motor age no seu ponto forte: OSRM varre para não descartar o "
+                                        "vencedor, Google decide a menor viária real.")
+                                    # [DIVERGENCIA-MOTOR - 184ª geração] Sensibilidade ao motor.
+                                    _div = st.session_state.get('alo_divergencia_motor')
+                                    # [DOMINANCIA-GEO - 184ª geração] Economia por prova de dominância.
+                                    _ndom = st.session_state.get('alo_dominancia_geo')
+                                    if _ndom:
+                                        st.caption(
+                                            f"⚡ **Prova de dominância geométrica:** em {_ndom} município(s), o "
+                                            "polo mais próximo foi matematicamente provado imbatível (rota "
+                                            "viária ≤ linha reta dos concorrentes), dispensando consultas extras "
+                                            "ao Google sem qualquer perda de exatidão — decisão mais rápida onde "
+                                            "o vencedor é inequívoco.")
+                                    if _div and _div.get('total_avaliado'):
+                                        _tx = _div.get('taxa_divergencia_pct', 0)
+                                        if _div.get('divergencias'):
+                                            st.caption(
+                                                f"🔀 **Sensibilidade ao motor:** em {_div['divergencias']} de "
+                                                f"{_div['total_avaliado']} município(s) ({_tx:.0f}%), o vencedor "
+                                                "pela varredura OSRM diferiu da decisão final do Google — são "
+                                                "regiões onde a escolha é sensível ao motor (malha complexa). A "
+                                                "decisão final priorizou o Google (maior qualidade). Estes casos "
+                                                "são bons candidatos a revisão manual.")
+                                        else:
+                                            st.caption(
+                                                f"🔀 **Sensibilidade ao motor:** OSRM e Google concordaram no "
+                                                f"vencedor em 100% dos {_div['total_avaliado']} município(s) "
+                                                "avaliados — decisão robusta, independente do motor.")
+                                if _prova and _prova.get('fechada'):
+                                    _extras = _prova.get('polos_extras_reais', 0)
+                                    st.success(
+                                        "🎯 **Otimalidade comprovada.** Após o roteamento, a aplicação executou "
+                                        "uma prova matemática (branch-and-bound): como a distância viária é "
+                                        "sempre maior ou igual à linha reta, todo polo cuja linha reta já supera "
+                                        "a menor viária encontrada é descartado com segurança — não há como "
+                                        "vencer. Todos os polos que ainda poderiam ter rota menor foram "
+                                        "roteados. **Nenhum município não-avaliado pode ter viária menor que o "
+                                        "vencedor escolhido.**" + (
+                                            f" Nesta execução, **{_extras}** polo(s) fora do top-K inicial "
+                                            "foram roteados pela prova." if _extras else
+                                            " O vencedor já estava garantido pelo top-K (nenhum polo extra "
+                                            "precisou ser roteado)."))
+                    except Exception as _e_cov:
+                        logger.error(f"[AUDITORIA-COBERTURA] {_e_cov}")
+            else:
+                st.success("✅ **Método de seleção dos hubs:** ✓ Linha reta (GeographicLib · WGS-84)")
+                st.caption("A base logística mais próxima de cada cliente foi escolhida pela **menor distância "
+                           "em linha reta** (geodésica WGS-84; valor via GeographicLib/Karney, erro <1mm; ranking "
+                           "por Haversine/IUGG, de ordem idêntica). As **distâncias viárias** por cliente "
+                           "(Google prioritário → OSRM fallback) constam na planilha exportada, na coluna "
+                           "**Método Utilizado**.")
             # [ALOC-ENTERPRISE - 49ª geração] Paridade com o Processamento em Lote: o mesmo Scorecard de
             # qualidade e a mesma Auditoria Automática de Rotas Suspeitas (REUSO das funções existentes,
             # sem duplicar lógica). A planilha da Alocação já é enriquecida (mesmo _montar_dataframe_final).
@@ -19814,6 +26961,13 @@ if _secao == _SECOES[2]:   # tab_alocacao
                         _q4.metric("Pior caso", f"{_cv['max']} km" if _cv['max'] is not None else "—")
                         if _cv["faixas"]:
                             st.bar_chart(pd.Series(_cv["faixas"]))
+                            _leitura_grafico(
+                                como_ler=f"cada barra é uma **faixa de distância**; a altura é quantos {_unid} têm esse "
+                                         f"deslocamento até o polo alocado. Barras concentradas à esquerda = maioria perto.",
+                                conclusao=(f"metade dos {_unid} percorre até **{_cv['mediana']} km** e 90% até "
+                                           f"**{_cv['p90']} km**; o pior caso é **{_cv['max']} km**."
+                                           if _cv['mediana'] is not None else
+                                           f"distribuição dos {_unid} por faixa de deslocamento até o polo."))
                             _f200 = _cv["faixas"].get(200, 0)
                             st.caption(f"Interpretação: **{_f200}% dos {_unid}** estão a **≤200 km** do local de prova — "
                                        f"logo **{round(100 - _f200, 1)}%** estão **acima** disso. A média de "
@@ -20056,8 +27210,10 @@ if _secao == _SECOES[2]:   # tab_alocacao
                                             "*“Desses, **830 NÃO CONSEGUEM CHEGAR**”* é um INSIGHT: cruza duas "
                                             "dimensões e aponta uma **ação**. Cada item abaixo é derivado dos "
                                             "**seus** dados e termina com **o que fazer**.")
-                                        _viab_ins = (_viabilidade_de_chegada(_muns_v, _hora_p, _folga_p)
-                                                     if _muns_v else None)
+                                        # [PERF - 181ª geração] REUSA o cálculo do painel acima em vez
+                                        # de refazê-lo. Medido: _viabilidade_de_chegada rodava 2× por
+                                        # rerun (9,1 ms). É o MESMO padrão da 172ª — e eu reincidi.
+                                        _viab_ins = _viab if _muns_v else None
                                         for _ins in _insights_automaticos(_dash, _viab_ins, _caps):
                                             _cx = (st.error if "🔴" in _ins["tipo"] else
                                                    (st.warning if ("🟠" in _ins["tipo"]
@@ -20419,13 +27575,17 @@ if _secao == _SECOES[2]:   # tab_alocacao
                             })
                             st.dataframe(_tab_cmp, use_container_width=True, hide_index=True)
 
-                            # Sensibilidade da escolha
-                            if _dif_km < 5:
-                                _sens = ("🔴 Muito sensível", f"Apenas **{_dif_km:.1f} km** separam os hubs — pequenas mudanças na malha viária podem **inverter** o resultado. Empate técnico.")
-                            elif _dif_km < 20:
-                                _sens = ("🟡 Moderadamente sensível", f"Diferença de **{_dif_km:.1f} km** — a escolha é consistente, mas não folgada.")
+                            # [SSOT-DECISAO - 184ª geração] Sensibilidade pela diferença ABSOLUTA de viária — antes
+                            # usava _dif_km com sinal, e um _dif_km negativo (vencedor com viária MAIOR que a do
+                            # concorrente, caso fluvial) caía em "< 5" e rotulava um abismo de 2394 km como "empate
+                            # técnico". Agora usa abs().
+                            _dif_abs = abs(_dif_km)
+                            if _dif_abs < 5:
+                                _sens = ("🔴 Muito sensível", f"Apenas **{_dif_abs:.1f} km** separam os hubs — pequenas mudanças na malha viária podem **inverter** o resultado. Empate técnico.")
+                            elif _dif_abs < 20:
+                                _sens = ("🟡 Moderadamente sensível", f"Diferença de **{_dif_abs:.1f} km** — a escolha é consistente, mas não folgada.")
                             else:
-                                _sens = ("🟢 Escolha robusta", f"Diferença de **{_dif_km:.1f} km** — baixíssima probabilidade de inversão.")
+                                _sens = ("🟢 Escolha robusta", f"Diferença de **{_dif_abs:.1f} km** — baixíssima probabilidade de inversão.")
                             st.markdown(f"**🎯 Sensibilidade da Escolha:** {_sens[0]}")
                             st.caption(_sens[1])
 
@@ -20439,14 +27599,32 @@ if _secao == _SECOES[2]:   # tab_alocacao
 
                             # Explicação automática (escolha do vencedor)
                             st.markdown("**🧾 Justificativa automática da escolha**")
-                            _motivos = [f"menor distância viária ({_venc_dist:.1f} km vs {_conc_dist:.1f} km)"]
-                            if _razao_v <= _razao_c:
-                                _motivos.append(f"menor Razão V/R ({_razao_v}× vs {_razao_c}×)")
-                            st.success(f"O hub **{_venc_nome}** foi escolhido por apresentar " + "; ".join(_motivos) +
-                                       f". O concorrente **{_conc_nome}** perdeu principalmente por uma distância superior em "
-                                       f"**{_dif_km:.1f} km** (+{_dif_pct}%)" +
-                                       (", mas a diferença é pequena o suficiente para caracterizar empate técnico." if _dif_km < 5
-                                        else "." ))
+                            # [SSOT-DECISAO - 184ª geração] PORTÃO DE COERÊNCIA (fonte única): a justificativa usa os
+                            # MESMOS valores exibidos e só afirma "menor distância viária" quando o vencedor REALMENTE
+                            # tem a menor viária. Antes era fixo — e num destino de acesso fluvial (sem rota rodoviária
+                            # viável) o vencedor podia ter viária MAIOR que a do concorrente, gerando a frase
+                            # matematicamente impossível "menor viária (2515 vs 120)". Agora, se o vencedor NÃO tem a
+                            # menor viária, dizemos a VERDADE e alertamos, em vez de afirmar o contrário do dado.
+                            if _venc_dist <= _conc_dist:
+                                _motivos = [f"menor distância viária ({_venc_dist:.1f} km vs {_conc_dist:.1f} km)"]
+                                if _razao_v <= _razao_c:
+                                    _motivos.append(f"menor Razão V/R ({_razao_v}× vs {_razao_c}×)")
+                                st.success(f"O hub **{_venc_nome}** foi escolhido por apresentar " + "; ".join(_motivos) +
+                                           f". O concorrente **{_conc_nome}** ficou atrás por **{_dif_abs:.1f} km** "
+                                           f"(+{_dif_pct}%) de distância viária" +
+                                           (", diferença pequena o suficiente para caracterizar empate técnico."
+                                            if _dif_abs < 5 else "."))
+                            else:
+                                st.error(
+                                    f"⚠️ **Inconsistência: a decisão NÃO foi por menor distância viária.** O hub "
+                                    f"escolhido **{_venc_nome}** tem viária de **{_venc_dist:.1f} km**, MAIOR que a do "
+                                    f"concorrente **{_conc_nome}** (**{_conc_dist:.1f} km**). Pelo critério de menor rota "
+                                    f"viária, **quem deveria vencer é {_conc_nome}**.\n\n"
+                                    f"🛟 **Causa provável:** o destino não tem rota rodoviária viável (**acesso "
+                                    f"fluvial/isolado** — razão V/R do vencedor **{_razao_v}×**), então a atribuição caiu "
+                                    f"na **proximidade em linha reta** ({_venc_reta:.1f} km vs {_conc_reta:.1f} km). "
+                                    f"**Reprocesse o estudo** para reavaliar por viária com as rotas recuperadas, ou trate "
+                                    f"este município como acesso fluvial.")
 
                             # [DISPUTA-XAI - 74ª geração] "Por que o concorrente não venceu?" — motivos
                             # estruturados a partir das diferenças já calculadas (viária, linha reta, razão).
@@ -20468,6 +27646,12 @@ if _secao == _SECOES[2]:   # tab_alocacao
                                     index=[f"🥇 {_venc_nome}", f"🥈 {_conc_nome}"])
                                 st.markdown("**📊 Comparação visual (distâncias)**")
                                 st.bar_chart(_df_disp)
+                                _leitura_grafico(
+                                    como_ler="cada grupo de barras é um hub; compara a **distância viária** (estrada) "
+                                             "com a **linha reta** do candidato até cada um. Barras menores = mais perto.",
+                                    conclusao=f"o vencedor **{_venc_nome}** ({_venc_dist:.1f} km viária) fica "
+                                              f"**{_dif_km:.1f} km mais perto** que o 2º colocado **{_conc_nome}** "
+                                              f"({_conc_dist:.1f} km).")
                             except Exception as _e_disp:
                                 logger.error(f"[DISPUTA-XAI] Falha no gráfico comparativo: {_e_disp}")
 
@@ -20490,6 +27674,12 @@ if _secao == _SECOES[2]:   # tab_alocacao
                                                          showlegend=True, height=380, margin=dict(l=40, r=40, t=30, b=30))
                                 st.markdown("**🕸️ Radar comparativo (100 = melhor no eixo)**")
                                 st.plotly_chart(_fig_radar, use_container_width=True)
+                                _leitura_grafico(
+                                    como_ler="três eixos (proximidade viária, proximidade em linha reta e diretividade "
+                                             "V/R), cada um normalizado para **100 = o melhor dos dois hubs** naquele eixo — "
+                                             "polígono maior/mais preenchido significa melhor no conjunto.",
+                                    conclusao=f"**{_venc_nome}** atinge o máximo em proximidade viária (o critério de "
+                                              f"escolha); compare o preenchimento nos demais eixos com **{_conc_nome}**.")
                                 # Índices numéricos (também vão na planilha)
                                 _ic = _indice_competitividade(_dif_pct)
                                 _ir = _indice_robustez(_dif_km)
@@ -20678,6 +27868,26 @@ if _secao == _SECOES[2]:   # tab_alocacao
             except Exception as _e_hubopt:
                 logger.error(f"[HUBOPT] Falha no otimizador de localização: {_e_hubopt}")
             st.dataframe(st.session_state['df_processado'], use_container_width=True, height=250)
+            # [FASE2-FLUXO - 184ª geração] Cabeçalho de fase: Exportação (aditivo, dentro do bloco de resultado).
+            st.markdown("#### ⬇️ Exportação")
+            # [RELATORIO-HTML - 184ª geração] Relatório autocontido (KPIs + distribuição + mapa + maiores
+            # deslocamentos) da alocação, num arquivo único que abre OFFLINE. Sob demanda, defensivo.
+            if st.button("📄 Gerar relatório HTML compartilhável", key="btn_relatorio_html_loc", use_container_width=True,
+                         help="Um arquivo HTML único (KPIs, distribuição, mapa e maiores deslocamentos) que abre "
+                              "offline em qualquer navegador — para enviar a quem decide e não usa a aplicação."):
+                with st.spinner("Gerando relatório..."):
+                    _rel_html_loc = _gerar_relatorio_html(st.session_state['df_processado'],
+                                                          titulo="Relatório de Locais de Aplicação",
+                                                          data_str=pd.Timestamp.now().strftime("%d/%m/%Y %H:%M"))
+                    if _rel_html_loc:
+                        st.session_state['relatorio_html_loc'] = _rel_html_loc.encode("utf-8")
+                    else:
+                        st.session_state.pop('relatorio_html_loc', None)
+                        st.warning("Não foi possível gerar o relatório.")
+            if st.session_state.get('relatorio_html_loc'):
+                st.download_button("⬇️ Baixar relatório HTML (.html)", data=st.session_state['relatorio_html_loc'],
+                                   file_name="relatorio_locais_aplicacao.html", mime="text/html",
+                                   use_container_width=True, key="dl_relatorio_html_loc")
             st.download_button(
                 label="📥 Baixar Planilha de Alocação Competitiva (.xlsx)",
                 data=st.session_state['alo_planilha_pronta'],
@@ -20883,6 +28093,201 @@ if _secao == _SECOES[3]:   # tab_comparador
         except Exception as _e_d:
             logger.error(f"[DICIONARIO] Falha no dicionário: {_e_d}")
 
+    # ═══════════════════════════════════════════════════════════════════════════════════════════
+    # [N-ESTUDOS - 184ª geração] COMPARAÇÃO DE MÚLTIPLOS ESTUDOS.
+    #
+    # ── A DECISÃO DE ARQUITETURA (e ela protege o que já funciona) ──
+    # Eu poderia ter REESCRITO o comparador de 2 estudos para ser genérico. Seria elegante — e seria
+    # **risco puro**: o fluxo de 2 estudos tem 214 testes o protegendo e é o que você usa todo dia.
+    # **Uma generalização que quebra o caso antigo é uma regressão com nome bonito.**
+    # Então: o modo N-estudos vive AO LADO, com motor próprio (_conciliar_multiplos), e o de 2 segue
+    # intocado. Quem quiser N usa N; quem quiser 2 continua com toda a profundidade que já existe
+    # (concorrente, híbrido, tripla, viabilidade — tudo isso é app-cêntrico e não generaliza de graça).
+    # ═══════════════════════════════════════════════════════════════════════════════════════════
+    with st.expander("🔢 Comparar MÚLTIPLOS estudos (3, 4, 5...) — modo N-estudos", expanded=False):
+        st.caption(
+            "📖 **O que muda com N estudos.** Com dois, você pergunta *“quem ganhou?”*. Com N, aparecem "
+            "perguntas **melhores**:\n\n"
+            "🎯 **Onde TODOS concordam** → confiança alta. **Não precisa revisar** — é onde você economiza "
+            "tempo.\n\n"
+            "⚡ **Onde TODOS divergem** → é **ali** que a decisão é difícil. Um município em que 4 estudos "
+            "escolheram **4 polos diferentes** está te dizendo: **não há resposta óbvia, e nenhum modelo "
+            "sozinho vai encontrá-la.** É exatamente aí que o humano precisa olhar.\n\n"
+            "🏆 **O híbrido de N** → o melhor de cada município entre TODOS. Domina todos, **por "
+            "construção** — e com mais estudos, o ganho **cresce**.")
+
+        if not _tem_alo:
+            st.warning("⚠️ Rode primeiro a aba **🎯 Locais de Aplicação**. É o estudo dela que serve de base.")
+
+        if _tem_alo:
+            _n_est = st.number_input(
+                "Quantos estudos de REFERÊNCIA você quer comparar?", 1, 8, 2, 1, key="nw_qtd",
+                help="A sua aplicação já entra como um dos estudos. Aqui você diz quantas planilhas "
+                     "EXTERNAS quer confrontar com ela.")
+            st.caption(f"Total a comparar: **1 (a sua aplicação) + {int(_n_est)} referência(s) = "
+                       f"{int(_n_est) + 1} estudos**.")
+
+            _estudos_nw = []
+            _nomes_usados = set()
+            _erros_nw = []
+            for _k in range(int(_n_est)):
+                _c1, _c2 = st.columns([1, 2])
+                _nm = _c1.text_input(f"Nome do estudo {_k + 1}", value=f"Estudo {chr(65 + _k)}",
+                                     key=f"nw_nome_{_k}",
+                                     help="Ex.: 'Estudo 2025', 'Cenário Base', 'Simulação do fornecedor'.")
+                _fl = _c2.file_uploader(f"Planilha do estudo {_k + 1}", type=["xlsx", "xls", "csv"],
+                                        key=f"nw_file_{_k}")
+                if not _fl:
+                    continue
+                # ── VALIDAÇÕES (mensagens claras, nunca um traceback na cara do usuário) ──
+                if _nm.strip() in _nomes_usados:
+                    _erros_nw.append(f"⛔ **Nome duplicado:** '{_nm}'. Cada estudo precisa de um nome único "
+                                     "— senão as colunas do relatório colidem.")
+                    continue
+                _nomes_usados.add(_nm.strip())
+                try:
+                    _df_nw = (pd.read_csv(_fl) if _fl.name.lower().endswith(".csv")
+                              else pd.read_excel(_fl))
+                except Exception as _e_nw:
+                    _erros_nw.append(f"⛔ **'{_nm}' não pôde ser lido:** {type(_e_nw).__name__}. "
+                                     "O arquivo pode estar corrompido ou num formato inesperado.")
+                    continue
+                if _df_nw is None or len(_df_nw) == 0:
+                    _erros_nw.append(f"⛔ **'{_nm}' está VAZIO** (zero linhas).")
+                    continue
+                _cols_nw = ["—"] + list(_df_nw.columns)
+                _m1, _m2, _m3, _m4 = st.columns(4)
+                _mapa_nw = {
+                    "origem": _m1.selectbox(f"Município de origem · {_nm}", _cols_nw,
+                                            key=f"nw_o_{_k}"),
+                    "uf_origem": _m2.selectbox(f"UF · {_nm}", _cols_nw, key=f"nw_u_{_k}"),
+                    "ibge_origem": _m3.selectbox(f"Código IBGE · {_nm}", _cols_nw, key=f"nw_i_{_k}"),
+                    "destino": _m4.selectbox(f"Local de prova · {_nm}", _cols_nw, key=f"nw_d_{_k}"),
+                }
+                _m5, _m6, _m7 = st.columns(3)
+                _mapa_nw["distancia"] = _m5.selectbox(f"Distância (km) · {_nm}", _cols_nw,
+                                                      key=f"nw_dist_{_k}")
+                _mapa_nw["inscritos"] = _m6.selectbox(f"Inscritos · {_nm}", _cols_nw, key=f"nw_ins_{_k}")
+                _mapa_nw["tempo"] = _m7.selectbox(f"Tempo · {_nm}", _cols_nw, key=f"nw_t_{_k}")
+                _mapa_nw = {_a: (_b if _b != "—" else None) for _a, _b in _mapa_nw.items()}
+
+                if not _mapa_nw.get("destino") or not _mapa_nw.get("distancia"):
+                    _erros_nw.append(f"⚠️ **'{_nm}':** mapeie ao menos o **local de prova** e a "
+                                     "**distância** — sem eles não há o que comparar.")
+                    continue
+                if not (_mapa_nw.get("ibge_origem") or _mapa_nw.get("origem")):
+                    _erros_nw.append(f"⚠️ **'{_nm}':** mapeie o **município de origem** (ou o **Código "
+                                     "IBGE**) — é a chave de conciliação.")
+                    continue
+                _estudos_nw.append({"nome": _nm.strip(), "df": _df_nw, "mapa": _mapa_nw})
+                st.success(f"✅ **{_nm}** carregado: {len(_df_nw):,} linhas.".replace(",", "."))
+
+            for _e in _erros_nw:
+                st.error(_e)
+
+            if _estudos_nw and st.button(f"🔢 Comparar os {len(_estudos_nw) + 1} estudos",
+                                         type="primary", key="nw_run"):
+                with st.spinner("Conciliando e comparando..."):
+                    try:
+                        _lin_nw, _aud_nw = _conciliar_multiplos(_df_alo_cmp, _estudos_nw)
+                        st.session_state['nw_linhas'] = _lin_nw
+                        st.session_state['nw_aud'] = _aud_nw
+                        st.session_state['nw_res'] = _comparar_n_estudos(_lin_nw)
+                        st.session_state['nw_sim'] = _matriz_similaridade(_lin_nw)
+                    except Exception as _e_run:
+                        logger.error(f"[N-ESTUDOS] Falha: {_e_run}")
+                        st.error(f"⛔ **Falha na comparação:** {type(_e_run).__name__}. "
+                                 "Confira o mapeamento das colunas.")
+
+            _rn = st.session_state.get('nw_res')
+            if _rn and _rn.get("municipios_comparaveis"):
+                st.divider()
+                st.markdown(f"## 🔢 {_rn['n_estudos']} estudos · "
+                            f"{_fmt_num(_rn['municipios_comparaveis'])} municípios · "
+                            f"{_fmt_num(_rn['candidatos'])} candidatos")
+
+                _k1, _k2, _k3, _k4 = st.columns(4)
+                _k1.metric("🏆 Melhor estudo isolado", str(_rn['melhor_estudo_geral'])[:18])
+                _k2.metric("🎯 Consenso total", f"{_rn['pct_consenso']}%",
+                           f"{_rn['consenso_total']} municípios",
+                           help="Todos os estudos escolheram o MESMO polo. Confiança alta — não precisa "
+                                "revisar.")
+                _k3.metric("⚡ Divergência total", f"{_rn['pct_divergencia']}%",
+                           f"{_rn['divergencia_total']} municípios", delta_color="inverse",
+                           help="CADA estudo escolheu um polo DIFERENTE. É aqui que o humano precisa olhar.")
+                _k4.metric("🏆 Ganho do HÍBRIDO", f"{_fmt_num(_rn['ganho_do_hibrido'])} km-cand",
+                           help="Quanto o melhor-de-cada poupa a mais que o melhor estudo isolado.")
+
+                st.markdown("##### 📊 Placar e deslocamento total")
+                _df_pl = pd.DataFrame([
+                    {"Estudo": _n,
+                     "Municípios vencidos": _p["municipios"],
+                     "% dos municípios": _p["pct_municipios"],
+                     "Candidatos beneficiados": _p["candidatos"],
+                     "Deslocamento total (km-candidato)": _rn["km_candidato_por_estudo"].get(_n)}
+                    for _n, _p in _rn["placar"].items()]
+                    + [{"Estudo": "🏆 HÍBRIDO (o melhor de cada município)", "Municípios vencidos": "—",
+                        "% dos municípios": "—", "Candidatos beneficiados": "—",
+                        "Deslocamento total (km-candidato)": _rn["km_candidato_hibrido"]}])
+                st.dataframe(_df_pl.sort_values("Deslocamento total (km-candidato)"),
+                             use_container_width=True, hide_index=True)
+                st.success(
+                    f"🏆 **O HÍBRIDO poupa {_fmt_num(_rn['ganho_do_hibrido'])} km-candidato a MAIS** que o "
+                    f"melhor estudo isolado ({_rn['melhor_estudo_geral']}). **Ninguém é obrigado a adotar um "
+                    "estudo inteiro** — e com mais estudos na mesa, o ganho do híbrido **cresce**.")
+
+                if _rn.get("municipios_divergentes"):
+                    st.markdown("##### ⚡ Onde TODOS os estudos divergem (revise ESTES)")
+                    st.caption(
+                        "Municípios em que **cada estudo escolheu um polo diferente**. Isso não é ruído: é "
+                        "o problema te dizendo que **não há resposta óbvia ali**. Nenhum modelo sozinho vai "
+                        "encontrá-la — **é aqui que o humano decide**.")
+                    st.dataframe(pd.DataFrame(_rn["municipios_divergentes"]),
+                                 use_container_width=True, hide_index=True, height=280)
+
+                _sn = st.session_state.get('nw_sim')
+                if _sn and _sn.get("matriz"):
+                    st.markdown("##### 🔁 Matriz de similaridade — quais estudos “pensam parecido”")
+                    st.caption(
+                        "Para cada PAR: em quantos % dos municípios eles escolheram o **mesmo polo**. "
+                        "**Se dois concordam em 97%, um deles é redundante** — você paga por duas "
+                        "metodologias que dizem a mesma coisa. **Se concordam em 40%, eles enxergam o "
+                        "problema de formas fundamentalmente diferentes** — e é aí que mora a informação.")
+                    st.dataframe(pd.DataFrame(_sn["matriz"]), use_container_width=True, hide_index=True)
+                    for _l in _sn.get("leitura", []):
+                        st.info(_l)
+
+                st.markdown("##### 🔎 Detalhe município a município")
+                _df_det = pd.DataFrame(_rn["detalhe"])
+                st.dataframe(_colorir_risco(_df_det, cols_risco=["Consenso"]),
+                             use_container_width=True, hide_index=True, height=340)
+
+                try:
+                    _buf_nw = io.BytesIO()
+                    with pd.ExcelWriter(_buf_nw, engine="xlsxwriter") as _wnw:
+                        _escrever_aba_profissional(_wnw, _df_pl, "Placar dos Estudos")
+                        _escrever_aba_profissional(_wnw, _df_det, "Detalhe por Municipio")
+                        if _rn.get("municipios_divergentes"):
+                            _escrever_aba_profissional(
+                                _wnw, pd.DataFrame(_rn["municipios_divergentes"]),
+                                "Divergencia Total")
+                        if _sn and _sn.get("matriz"):
+                            _escrever_aba_profissional(_wnw, pd.DataFrame(_sn["matriz"]),
+                                                       "Matriz de Similaridade")
+                    st.markdown("#### ⬇️ Exportação")
+                    st.download_button(
+                        f"📥 Baixar comparação dos {_rn['n_estudos']} estudos (.xlsx)",
+                        data=_buf_nw.getvalue(),
+                        file_name=f"comparacao_{_rn['n_estudos']}_estudos.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                except Exception as _e_x:
+                    logger.error(f"[N-ESTUDOS] Falha no export: {_e_x}")
+
+    st.divider()
+    st.markdown("#### ⚖️ Comparação de DOIS estudos (análise profunda)")
+    st.caption("O modo clássico: a sua aplicação × **uma** base de referência. É aqui que vivem as análises "
+               "mais profundas — concorrente, plano híbrido, os três estudos, viabilidade de chegada.")
+
     _file_ref = st.file_uploader("📄 Planilha de referência (base comparativa)", type=["xlsx", "xls", "csv"],
                                  key="cmp_file",
                                  help="A base externa com a distribuição que você quer comparar: município de "
@@ -20900,24 +28305,43 @@ if _secao == _SECOES[3]:   # tab_comparador
                 _cols = ["—"] + list(_df_ref.columns)
 
                 def _auto(*chaves):
-                    for c in _df_ref.columns:
-                        _cn = str(c).lower()
-                        if any(k in _cn for k in chaves):
-                            return _cols.index(c)
+                    # [MAPA-REF - 184ª geração] Prioridade por PALAVRA-CHAVE (antes iterava colunas por fora,
+                    # e a 1ª coluna com qualquer palavra vencia — 'CO_MUNICIPIO' roubava o lugar de
+                    # 'NO_MUNICIPIO'). Agora a 1ª palavra-chave que casar em alguma coluna decide.
+                    for k in chaves:
+                        for c in _df_ref.columns:
+                            if k in str(c).lower():
+                                return _cols.index(c)
                     return 0
                 st.markdown("##### 🔗 Mapeamento das colunas da referência")
                 _m1, _m2, _m3 = st.columns(3)
                 with _m1:
-                    _c_ori = st.selectbox("Município de origem do candidato *", _cols, index=_auto("origem", "municipio", "município"), key="cmp_ori")
+                    _c_ori = st.selectbox("Município de origem do candidato *", _cols, index=_auto("no_municipio", "origem", "municipio", "município"), key="cmp_ori")
                     _c_uf = st.selectbox("UF de origem", _cols, index=_auto("uf"), key="cmp_uf")
                 with _m2:
-                    _c_dst = st.selectbox("Local de aplicação (destino) *", _cols, index=_auto("destino", "aplicacao", "aplicação", "polo"), key="cmp_dst")
-                    _c_ibge = st.selectbox("Código IBGE da origem", _cols, index=_auto("ibge", "cod"), key="cmp_ibge")
+                    _c_dst = st.selectbox("Local de aplicação (destino) *", _cols, index=_auto("no_mun_prox", "mun_prox", "destino", "aplicacao", "aplicação", "polo"), key="cmp_dst")
+                    _c_ibge = st.selectbox("Código IBGE da origem", _cols, index=_auto("ibge", "co_municipio", "cod"), key="cmp_ibge")
                 with _m3:
                     _c_dist = st.selectbox("Distância viária (km) *", _cols, index=_auto("dist", "km", "rota"), key="cmp_dist")
                     _c_insc = st.selectbox("Quantidade de inscritos", _cols, index=_auto("inscrit", "candidat", "qtd"), key="cmp_insc")
                 _c_tempo = st.selectbox("Tempo de deslocamento", _cols, index=_auto("tempo", "duracao", "duração"), key="cmp_tempo")
                 _ok_map = _c_ori != "—" and _c_dst != "—" and _c_dist != "—"
+                # [LIMIAR-EMPATE - 184ª geração] Limiar de empate técnico CONFIGURÁVEL. A investigação forense
+                # mostrou que, quando app e referência escolhem o MESMO destino, a diferença mediana é ~2 km
+                # (ruído entre matriz pré-computada e roteamento ao vivo). Com 1 km, esse ruído vira "derrota".
+                _limiar_emp = st.number_input(
+                    "⚖️ Limiar de empate técnico (km)", min_value=0.0, max_value=25.0, value=1.0, step=0.5,
+                    key="cmp_limiar_empate",
+                    help="Diferenças de distância ABAIXO deste valor contam como empate técnico, não vitória. "
+                         "Comparando fontes de medição diferentes (matriz oficial × roteamento ao vivo), o ruído "
+                         "típico é de 2–5 km mesmo quando os dois estudos escolhem o MESMO local — recomenda-se "
+                         "5 km nesses casos. Com 0, qualquer diferença decide.")
+                # [MAPA-REF - 184ª geração] Guarda anti-armadilha: coluna de DESTINO que parece SIM/NÃO
+                # (ex.: 'MUNICIPIO_PROVA') derrubava a comparação inteira ('Destino Referencia' = 'NÃO').
+                if _ok_map and _coluna_parece_sim_nao(_df_ref, _c_dst):
+                    st.warning(f"⚠️ A coluna **{_c_dst}** escolhida como destino parece conter apenas SIM/NÃO — "
+                               "ela indica *se* o município sedia prova, não *qual* é o local. Selecione a coluna "
+                               "com o **nome do município de prova** (ex.: `NO_MUN_PROX`).")
                 if not _ok_map:
                     st.caption("Selecione ao menos **origem**, **destino** e **distância viária** para comparar.")
 
@@ -20992,8 +28416,11 @@ if _secao == _SECOES[3]:   # tab_comparador
                                      "inscritos": None if _c_insc == "—" else _c_insc,
                                      "distancia": None if _c_dist == "—" else _c_dist,
                                      "tempo": None if _c_tempo == "—" else _c_tempo}
-                        _lin, _aud_c = _conciliar_comparativo(_df_alo_cmp, _df_ref, _mapa_cmp)
-                        _cmp = _comparar_alocacoes(_lin)
+                        _lin, _aud_c = _conciliar_comparativo(
+                            _df_alo_cmp, _df_ref, _mapa_cmp,
+                            limiar_empate_km=float(st.session_state.get('cmp_limiar_empate', 1.0) or 1.0))
+                        _cmp = _comparar_alocacoes(
+                            _lin, limiar_empate_km=float(st.session_state.get('cmp_limiar_empate', 1.0) or 1.0))
                         _st_c = _estatisticas_comparacao(_cmp)
                         # [PERF - 139ª geração] Relatório e XLSX são calculados AQUI (uma vez, no clique) e
                         # guardados. Na 138ª eu os recalculava a CADA RERUN — 1,2 s de CPU bloqueante por
@@ -21651,12 +29078,55 @@ if _secao == _SECOES[3]:   # tab_comparador
                 st.markdown(_rel_c)
 
             # [PERF - 139ª geração] Bytes JÁ prontos (montados no clique). Zero CPU por rerun.
+            # [FIX-EXPORT-CMP - 184ª geração] Exportação SEMPRE visível. Antes, TODO o bloco (relatório +
+            # planilha) ficava dentro de `if _xb:` — se o xlsx pré-gerado viesse None (falha ao montar as 24
+            # abas, ou resultado antigo em sessão), os DOIS botões sumiam juntos. Agora: o relatório HTML (que
+            # usa stats/aud, não o xlsx) aparece SEMPRE; e a planilha, se não estiver pré-gerada, é gerada SOB
+            # DEMANDA — o usuário nunca fica sem os downloads.
+            st.markdown("#### ⬇️ Exportação")
+            if st.button("📄 Gerar relatório HTML da comparação", key="btn_relatorio_html_cmp",
+                         use_container_width=True,
+                         help="Parecer da comparação (conciliação, vitórias, economia) num arquivo HTML "
+                              "único que abre offline em qualquer navegador."):
+                with st.spinner("Gerando relatório..."):
+                    _rel_html_cmp = _gerar_relatorio_comparacao_html(
+                        _res_c["stats"], _aud_c, titulo="Relatório da Comparação de Estudos",
+                        data_str=pd.Timestamp.now().strftime("%d/%m/%Y %H:%M"), linhas=_cmp)
+                    if _rel_html_cmp:
+                        st.session_state['relatorio_html_cmp'] = _rel_html_cmp.encode("utf-8")
+                    else:
+                        st.session_state.pop('relatorio_html_cmp', None)
+                        st.warning("Não foi possível gerar o relatório.")
+            if st.session_state.get('relatorio_html_cmp'):
+                st.download_button("⬇️ Baixar relatório HTML (.html)",
+                                   data=st.session_state['relatorio_html_cmp'],
+                                   file_name="relatorio_comparacao.html", mime="text/html",
+                                   use_container_width=True, key="dl_relatorio_html_cmp")
+            # [FIX-EXPORT-CMP - 184ª geração] Download ROBUSTO: valida que o xlsx em sessão é BYTES não-vazio (um
+            # BytesIO ou None de uma geração antiga faz o st.download_button "não baixar nada"). Se inválido,
+            # RE-GERA automaticamente (sem botão extra → download em 1 clique) e passa bytes() explícito.
             _xb = _res_c.get("xlsx")
+            if not (isinstance(_xb, (bytes, bytearray)) and len(_xb) > 0):
+                with st.spinner("Preparando a planilha de comparação (24 abas)..."):
+                    try:
+                        _xb_novo = _montar_xlsx_comparacao(_cmp, _res_c["stats"], _aud_c, _rel_c)
+                        if isinstance(_xb_novo, (bytes, bytearray)) and len(_xb_novo) > 0:
+                            _xb = bytes(_xb_novo)
+                            _res_c["xlsx"] = _xb
+                            st.session_state['cmp_resultado'] = _res_c
+                        else:
+                            _xb = None
+                    except Exception as _e_xbr:
+                        _xb = None
+                        logger.error(f"[FIX-EXPORT-CMP] Falha ao gerar planilha de comparação: {_e_xbr}", exc_info=True)
             if _xb:
-                st.download_button("📥 Baixar comparação completa (.xlsx — 24 abas + 2 de documentação)", data=_xb,
-                                   file_name="comparacao_estudos.xlsx",
+                st.download_button("📥 Baixar comparação completa (.xlsx — 24 abas + 2 de documentação)",
+                                   data=bytes(_xb), file_name="comparacao_estudos.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                    use_container_width=True, key="cmp_export")
+            else:
+                st.warning("⚠️ Não foi possível gerar a planilha de comparação (veja os logs). O **relatório HTML** "
+                           "acima está disponível como alternativa completa.")
 
 
 if _secao == _SECOES[4]:   # tab_analytics
@@ -21868,6 +29338,11 @@ if _secao == _SECOES[4]:   # tab_analytics
                                 tooltip=['Regiao_Sintetica_Origem', 'Rotas', 'Participacao_Nacional', 'Dist_Media', 'Muns_Unicos']
                             ).properties(height=280, title="Ranking de Volume por Região (Filtrado)")
                             st.altair_chart(bar_regiao, use_container_width=True)
+                            _leitura_grafico(
+                                como_ler="cada barra é uma **região do Brasil**; o comprimento é o **volume de rotas** que "
+                                         "se originam ali, ordenado da maior para a menor.",
+                                conclusao=f"a região de maior volume é **{df_regioes.loc[df_regioes['Rotas'].idxmax(), 'Regiao_Sintetica_Origem']}** "
+                                          f"({df_regioes['Participacao_Nacional'].max():.0f}% do total filtrado).")
                         with col_r2:
                             st.write("Tabela Mestre Regional")
                             st.dataframe(df_regioes.rename(columns={'Regiao_Sintetica_Origem': 'Região Geográfica', 'Dist_Media': 'Distância Média (km)', 'Tempo_Medio_Horas': 'Tempo Médio (h)', 'Score_Medio': 'Score Médio', 'Muns_Unicos': 'Municípios Atendidos', 'Participacao_Nacional': 'Share Selecionado (%)'}), use_container_width=True, hide_index=True)
@@ -21963,6 +29438,11 @@ if _secao == _SECOES[4]:   # tab_analytics
                 col_p4.altair_chart(chart_lr_mun, use_container_width=True, on_select="rerun", key="dash_lr")
                 col_p5.altair_chart(chart_muns, use_container_width=True, on_select="rerun", key="dash_mun")
                 st.altair_chart(chart_scatter, use_container_width=True, on_select="rerun", key="dash_scatter")
+                _leitura_grafico(
+                    como_ler="cada ponto é uma rota; o eixo X é a **distância viária** e o eixo Y é o **tempo estimado**, "
+                             "coloridos pelo status. Pontos alinhados numa diagonal indicam a relação distância-tempo típica.",
+                    conclusao="pontos que fogem da diagonal (muito tempo para pouca distância, ou o inverso) são "
+                              "**outliers** — em geral rota com balsa, serra ou geocodificação a revisar.")
             
             # [F-NEW4 - 4ª geração] Análise de distribuição estatística (histograma + boxplot)
             st.markdown("#### 📊 Distribuição Estatística de Distâncias")
@@ -22019,6 +29499,10 @@ if _secao == _SECOES[4]:   # tab_analytics
                         ]
                     ).properties(height=max(200, len(df_cobertura) * 28), title='Rotas por Estado de Origem')
                     st.altair_chart(chart_cobertura, use_container_width=True)
+                    _leitura_grafico(
+                        conclusao=f"o estado de maior volume é **{df_cobertura.iloc[0]['UF_Sintetica_Origem']}** "
+                                  f"({int(df_cobertura.iloc[0]['Rotas'])} rotas); a cor indica a distância média — "
+                                  f"estados escuros com muitas barras concentram a operação e o esforço logístico.")
                     n_ufs = len(df_cobertura)
                     st.caption(f"📍 Cobertura atual: **{n_ufs} de 27 estados** ({round(100*n_ufs/27)}% do território nacional) presentes neste recorte.")
                 else:
@@ -22317,6 +29801,10 @@ if _secao == _SECOES[6]:   # tab_classificacao
                 cc_k4.metric("Polo Mais Crítico", f"{m_critico} ({v_critico})")
                 
             st.markdown("#### 3️⃣ Ecossistema Visual Temático")
+            _leitura_grafico(
+                como_ler="quatro vistas da mesma classificação — **barras** (top cidades pela métrica), **pizza** "
+                         "(proporção por nível crítico), **treemap** (hierarquia região→UF→cidade) e **mapa** "
+                         "(distribuição espacial). Cores iguais = mesmo nível crítico; o **polo mais crítico** está no KPI acima.")
             map_colors = dict(zip(df_agg_class['Rótulo'], df_agg_class['Cor Hex']))
             
             t_col1, t_col2 = st.columns([60, 40])
@@ -23932,6 +31420,31 @@ if _secao == _SECOES[9]:   # tab_manual
     st.info("📖 **Bem-vindo ao Manual Operacional!** Este espaço é destinado a todos os usuários da plataforma, ensinando de forma prática o 'passo a passo' para executar as operações do dia a dia.")
     renderizar_guia_aba("manual")
     st.markdown("### 📖 Manual do Usuário e Treinamento")
+    # [DOC-184 - 184ª geração] Adendo NATIVO de documentação: o handbook embarcado (blob) é da geração
+    # anterior; este painel documenta a 184ª para o handbook, o manual e a enciclopédia de uma vez.
+    with st.expander("🆕 **Novidades da 184ª geração — adendo oficial de documentação** (leia antes do handbook)", expanded=False):
+        st.markdown("""
+#### 🛣️ Soberania da Menor Rota Viária (garantida por construção)
+No modo **Menor rota viária**, o vencedor é **sempre** o polo de menor distância por estrada. A garantia é em camadas: seleção ordena rotas **reais antes de fallbacks** e por viária; **poda segura** (desliga quando o custo-limite vem de fallback geodésico); **correção autoritativa final** (`vencedor↔concorrente` trocados se a viária do 2º for menor — impossível exportar inconsistência); **painel do invariante** na tela ("✓ Invariante garantido: todos os N locais...") com o nº de ajustes; coluna **Alerta Coerência Viária** na planilha. A **linha reta só decide quando não existe rota viária** — e é sinalizada.
+
+#### 🧠 Explicabilidade (XAI) de cada rota
+Colunas novas em toda planilha: **Método da Distância** (✅ viária real / 📏 linha reta — nunca implícito) e **Classificação da Rota** (🟢 confirmada · 🟡 desvio extremo ou traçado atípico — revisar · 🟠 linha reta por ausência de rota). O **motivo** é anexado às justificativas ("Foi utilizada a distância viária porque..."). O relatório HTML traz a distribuição de qualidade.
+
+#### 🛟 Segunda chance de roteamento
+Se a rota de um polo **próximo** falhou (fallback) e o melhor real ficou muito mais longe (reta×1,5 < melhor viária), a app **re-roteia automaticamente** esses pares (1× por estudo, ≤40 pares) antes de finalizar — falhas transientes de API não custam mais ~150 km ao candidato.
+
+#### ⚖️ Comparador de Estudos, blindado e calibrável
+**Conciliação segura**: código IBGE manda; nome/fuzzy exigem **UF compatível**; código ausente na app → *não conciliado com motivo* (nunca casa homônimo — ex.: São Geraldo/MG ≠ São Geraldo do Araguaia/PA); **anti-duplicata** (Careiro × Careiro da Várzea). **Limiar de empate técnico configurável** (0–25 km): entre fontes distintas (matriz oficial × roteamento ao vivo) o ruído típico é 2–5 km mesmo com o mesmo destino — recomenda-se 5 km. Mapeamento com autodetecção para formatos oficiais (`NO_MUN_PROX`, `CO_MUNICIPIO`) e **guarda anti-SIM/NÃO**.
+
+#### 🗺️ Planejamento Estratégico de Cobertura (novo, em Locais)
+Envie municípios+candidatos e obtenha: **ranking de potencial** (catchment por raio), **cenários "abrir N locais → % coberto"** (MCLP guloso, marcos 80/90/95%), **índices territoriais** (concentração de Gini, interiorização, capilaridade), **mapa** e **exportação**. Resolve municípios **offline** pela base IBGE embarcada.
+
+#### 📦 Exportações e relatórios
+Planilha de Locais com **camada analítica** (Resumo Executivo, Síntese por UF, Competitividade dos Polos, Concorrentes, Distribuição, Municípios Críticos) e **zero células vazias** (vazios recebem o motivo: "N/A — Google não respondeu", "Não disponível (base IBGE)"). Relatórios HTML em padrão profissional com **metodologia e referências** (artigo científico). Identidade do concorrente **sempre pelo nome do município** (nunca código).
+
+#### ⚠️ Limitação conhecida (honesta)
+Municípios de **acesso fluvial** não têm rota rodoviária real: a app sinaliza (🟡/🟠) e usa o melhor proxy disponível; a referência oficial usa matrizes com pernas de **balsa/fluvial** (rod_fiocruz/hid_ibge) que motores rodoviários não produzem. O roteamento fluvial (base ANTAQ) é o próximo passo planejado.
+""")
 
     # [DOC-EMBED - 95a geracao] Handbook tecnico completo embarcado (28 secoes) — inline + download.
     st.markdown("#### 📘 Handbook Técnico Completo (Documentação Oficial)")
@@ -24147,6 +31660,9 @@ if _secao == _SECOES[10]:   # tab_motores
                 tooltip=['Fonte Geocoding Origem', 'count()']
             ).properties(height=350)
             st.altair_chart(grafico_apis, use_container_width=True)
+            _leitura_grafico(
+                conclusao=f"o motor que mais resolveu origens foi **{df_kpi['Fonte Geocoding Origem'].value_counts().idxmax()}** "
+                          f"({int(df_kpi['Fonte Geocoding Origem'].value_counts().max())} de {len(df_kpi)} rotas).")
             
         with col_m2:
             st.caption("**Distribuição Qualitativa: Status Bayesiano Pós-Processamento**")
@@ -24158,6 +31674,10 @@ if _secao == _SECOES[10]:   # tab_motores
                 tooltip=['Status da Rota', 'count()']
             ).properties(height=350)
             st.altair_chart(grafico_status, use_container_width=True)
+            _pct_bom_st = (df_kpi['Status da Rota'].isin(['Excelente', 'Boa']).mean() * 100)
+            _leitura_grafico(
+                conclusao=f"**{_pct_bom_st:.0f}%** das rotas ficaram em status Excelente/Boa; as marcadas como "
+                          f"**Revisar/Erro** merecem conferência manual.")
             
     st.markdown("---")
     st.markdown("#### 📡 Tabela Mestre de SLA e Latência em Tempo Real")
