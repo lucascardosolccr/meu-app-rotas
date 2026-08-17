@@ -1,6 +1,6 @@
 # ==============================================================================
 # Motor Nacional de Inteligência Logística para Exames — Plataforma integrada
-# VERSÃO (rótulo): 3.46   ·   SELO INTERNO: _VERSAO_APP = "336"   ·   DATA: 2026-08
+# VERSÃO (rótulo): 3.48   ·   SELO INTERNO: _VERSAO_APP = "338"   ·   DATA: 2026-08
 # ------------------------------------------------------------------------------
 # HISTÓRICO DE VERSÕES completo → CHANGELOG.md
 #   [Melhoria 4 · §14] As ~5.094 linhas iniciais de histórico de changelog foram
@@ -31275,9 +31275,17 @@ def _simulacao_hub_indisponivel(hub_venc, conc, dist_v, dist_c):
 # orçamento; o que não concluir é adiado (cai no fallback geodésico e ainda ganha a 2ª passada de
 # recuperação na finalização). Generosos o bastante para NUNCA abandonar um chunk saudável — só disparam
 # em cenário patológico de Future preso.
-_CHUNK_WAIT_BASE_S = 25.0        # base fixa por chunk
+# [ANTI-CONGELAMENTO-UI - 337a geração] Os tetos foram calibrados para ~o tempo de conclusão do PIOR caso
+# real de uma tarefa (~40s: Google + OSRM/ORS/GraphHopper ~8s cada + motores rate-limited com .result
+# timeout=5). O teto anterior (90s) era 2-3x isso: quando a rede engasgava, UMA rerun bloqueava a UI por
+# até 90s (o orçamento de rerun de 8s só é checado APÓS o chunk inteiro) — sintoma de "travou em X%".
+# Baixar para ~45s mantém a UI respirando (atualiza com mais frequência) SEM abandonar tarefas saudáveis
+# (o pior caso real cabe em 45s) e sem saturar o EXECUTOR_GLOBAL (as abandonadas já estão quase prontas ao
+# expirar, liberando workers). O que ainda não concluir cai no fallback e é RE-ROTEADO pelo sweep de
+# recuperação (333a/334a) na finalização — completude e qualidade preservadas.
+_CHUNK_WAIT_BASE_S = 20.0        # base fixa por chunk (era 25)
 _CHUNK_WAIT_POR_TAREFA_S = 1.5   # folga adicional por tarefa no chunk
-_CHUNK_WAIT_MAX_S = 90.0         # teto absoluto (mesmo em chunks grandes)
+_CHUNK_WAIT_MAX_S = 45.0         # teto absoluto ~= pior caso de 1 tarefa (era 90 — UI congelava até 90s)
 
 
 def processar_chunk_rotas(tarefas_chunk, runner_up_map=None):
@@ -31304,6 +31312,8 @@ def processar_chunk_rotas(tarefas_chunk, runner_up_map=None):
     _n_fut = len(futuros)
     _deadline = min(_CHUNK_WAIT_MAX_S, _CHUNK_WAIT_BASE_S + _CHUNK_WAIT_POR_TAREFA_S * _n_fut)
     _concluidos = 0
+    _t0_chunk = time.time()
+    _timeout_hit = False
     try:
         for f in as_completed(futuros, timeout=_deadline):
             try:
@@ -31314,11 +31324,24 @@ def processar_chunk_rotas(tarefas_chunk, runner_up_map=None):
                 logger.error(f"[FIX-LOTE] Falha isolada em chunk: {e}")
     except (_FuturesTimeout, TimeoutError):
         # Orçamento estourado: entrega o que concluiu; o restante é adiado (fallback + 2ª passada).
-        _pend = _n_fut - _concluidos
-        logger.warning("[ANTI-TRAVA] Chunk excedeu %.0fs: %d/%d rotas concluídas, %d adiadas para "
-                       "fallback/2ª passada (evita travamento).", _deadline, _concluidos, _n_fut, _pend)
+        _timeout_hit = True
     except Exception as _e_chunk:
         logger.error("[ANTI-TRAVA] Erro inesperado ao aguardar o chunk (isolado): %s", _e_chunk)
+    # [CHUNK-PERF - 338a geração] Instrumentação por chunk (só log; não altera o fluxo): tempo de parede,
+    # rotas concluídas x ADIADAS e se o deadline foi atingido. A distribuição destes logs num estudo real
+    # revela o gargalo: se muitos chunks batem o deadline com poucas conclusões -> rede/motor lento
+    # (cruzar com o Scorecard por Motor) ou saturação do EXECUTOR_GLOBAL; se concluem rápido -> tudo bem.
+    # As adiadas caem no fallback e são re-roteadas pelo sweep de recuperação (333a/334a) na finalização.
+    _dt_chunk = time.time() - _t0_chunk
+    _pend = _n_fut - _concluidos
+    _taxa = (_concluidos / _dt_chunk) if _dt_chunk > 0 else 0.0
+    if _timeout_hit or _pend > 0:
+        logger.warning("[CHUNK-PERF] Chunk de %d rota(s): %d concluída(s), %d ADIADA(s) em %.1fs "
+                       "(deadline %.0fs atingido) — %.1f rotas/s. Adiadas -> fallback + sweep de recuperação.",
+                       _n_fut, _concluidos, _pend, _dt_chunk, _deadline, _taxa)
+    else:
+        logger.info("[CHUNK-PERF] Chunk de %d rota(s): %d concluída(s) em %.1fs (%.1f rotas/s; deadline "
+                    "%.0fs não atingido).", _n_fut, _concluidos, _dt_chunk, _taxa, _deadline)
     return resultados
 
 
@@ -34299,7 +34322,7 @@ _SECOES = [
 # versão antiga". **Essa impossibilidade de distinguir é falha de PROJETO minha** — e ela me fez
 # consertar o mesmo bug três vezes. Agora a versão está na tela: quando você reportar um problema,
 # nós dois sabemos exatamente o que está rodando.
-_VERSAO_APP = "336"
+_VERSAO_APP = "338"
 _VERSAO_SELO = f"v{_VERSAO_APP} · portão de exibição ativo"
 # [RESGATE-CIRCUIDADE - 238ª] liga/desliga o refinamento pós-alocação (reversível). False = comportamento 237.
 _RESGATE_CIRCUIDADE_ATIVO = True
