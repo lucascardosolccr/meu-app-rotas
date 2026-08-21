@@ -1,6 +1,6 @@
 # ==============================================================================
 # Motor Nacional de Inteligência Logística para Exames — Plataforma integrada
-# VERSÃO (rótulo): 3.48   ·   SELO INTERNO: _VERSAO_APP = "338"   ·   DATA: 2026-08
+# VERSÃO (rótulo): 3.71   ·   SELO INTERNO: _VERSAO_APP = "361"   ·   DATA: 2026-08
 # ------------------------------------------------------------------------------
 # HISTÓRICO DE VERSÕES completo → CHANGELOG.md
 #   [Melhoria 4 · §14] As ~5.094 linhas iniciais de histórico de changelog foram
@@ -7462,10 +7462,10 @@ def _geo_analise_dataset(df, ratio_suspeito=3.0, dist_longa=200.0):
             _tempo_disp, _tempo_min = _geo_tempo_par(r.get(c_tempo) if c_tempo else None, _geo_tempo_em_seg)
             _tempoc_disp, _tempoc_min = _geo_tempo_par(r.get(c_tempoconc) if c_tempoconc else None, False)
             rotas.append({
-                "origem": str(r.get(c_orig)) if c_orig else "—",
+                "origem": _resolver_nome_municipio(r.get(c_orig), lat_o, lon_o) if c_orig else "—",
                 "uf": str(r.get(c_uf)) if c_uf else "—",
                 "ibge": str(r.get(c_ibge)) if c_ibge else "—",
-                "destino": str(r.get(c_dest)) if c_dest else "—",
+                "destino": _resolver_nome_municipio(r.get(c_dest), lat_d, lon_d) if c_dest else "—",
                 "lat_o": lat_o, "lon_o": lon_o, "lat_d": lat_d, "lon_d": lon_d,
                 "dist_km": dist, "linha_reta_km": reta, "candidatos": cand,
                 "motor": motor, "balsa": balsa, "tem_geometria": tem_geom,
@@ -7508,8 +7508,15 @@ def _geo_analise_dataset(df, ratio_suspeito=3.0, dist_longa=200.0):
 # paleta acessível (ColorBrewer, segura para daltonismo)
 _GEO_AZUL, _GEO_VERM = "#1f78b4", "#e31a1c"
 _GEO_VIARIA, _GEO_ESTIM, _GEO_SEMROTA = "#1F8A70", "#E8A33D", "#C6553F"
+_GEO_FLUVIAL = "#0077BE"  # [FLUVIAL - 341a geração] azul-água p/ rotas que cruzam rio por balsa
+_GEO_TILE_OSM = "L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'© OpenStreetMap'}).addTo(map);"
+# [FLUVIAL - 342a geração] Camada de hidrografia: OpenTopoMap (keyless) realça rios/relevo. Controle de
+# camadas deixa alternar; se o CDN falhar, o usuário fica no OSM (que já mostra rios). Chaves literais.
+_GEO_TILE_FLUVIAL = ("var _osm=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'© OpenStreetMap'});"
+                     "var _topo=L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',{maxZoom:17,attribution:'© OpenTopoMap (CC-BY-SA)'});"
+                     "_osm.addTo(map);L.control.layers({'Padrão (OSM)':_osm,'Relevo/Água (OpenTopoMap)':_topo}).addTo(map);")
 
-def _geo_mapa_leaflet(rotas, altura=520, max_features=400, decode_fn=None):
+def _geo_mapa_leaflet(rotas, altura=520, max_features=400, decode_fn=None, fluvial=False):
     """HTML Leaflet autocontido a partir de rotas (lista de dicts). Cada rota pode ter geom_coords
     ([[lat,lon],...]) decodificada. Puro/defensivo. Retorna HTML (para components.html)."""
     try:
@@ -7529,7 +7536,9 @@ def _geo_mapa_leaflet(rotas, altura=520, max_features=400, decode_fn=None):
                             "dest": x.get("destino", "—"),
                             "dist": x.get("dist_km"), "tipo": x.get("tipo_rota", "—"),
                             "motor": x.get("motor", "—"), "fonte": x.get("fonte_coord", "—"), "tempo": x.get("tempo"),
-                            "alertas": x.get("alertas", []), "r": max(4, min(22, 4 + (_c ** 0.5)))})
+                            "alertas": x.get("alertas", []), "balsa": bool(x.get("balsa")),
+                            "conc": x.get("concorrente"), "dconc": x.get("dist_concorrente"),
+                            "r": max(4, min(22, 4 + (_c ** 0.5)))})
             pts.append([lo, ln])
             ld, nd = x.get("lat_d"), x.get("lon_d")
             if isinstance(ld, (int, float)) and isinstance(nd, (int, float)):
@@ -7544,12 +7553,12 @@ def _geo_mapa_leaflet(rotas, altura=520, max_features=400, decode_fn=None):
                     except Exception:
                         coords = None
                 if coords and len(coords) >= 2:
-                    linhas.append({"pts": coords, "cor": _GEO_VIARIA, "dash": None})
+                    linhas.append({"pts": coords, "cor": _GEO_VIARIA, "dash": None, "balsa": bool(x.get("balsa"))})
                     pts.extend(coords[:: max(1, len(coords) // 20)])
                 else:
                     cor = _GEO_ESTIM if tipo.startswith("📏") else (_GEO_SEMROTA if tipo.startswith("❌") else _GEO_VIARIA)
                     dash = "6,6" if not tipo.startswith("🛣️") else None
-                    linhas.append({"pts": [[lo, ln], [ld, nd]], "cor": cor, "dash": dash})
+                    linhas.append({"pts": [[lo, ln], [ld, nd]], "cor": cor, "dash": dash, "balsa": bool(x.get("balsa"))})
         if not pts:
             return ""
         payload = json.dumps({"origens": origens, "destinos": destinos, "linhas": linhas},
@@ -7567,30 +7576,37 @@ padding:8px 10px;border-radius:8px;box-shadow:0 1px 6px rgba(0,0,0,.2);font-size
 <span class="sw" style="background:__VERM__"></span>Destino (local de prova)<br>
 <span class="sw" style="background:__VIARIA__"></span>Rota viária (traçado real)<br>
 <span class="sw" style="background:__ESTIM__"></span>Estimada/linha reta<br>
-<span class="sw" style="background:__SEMROTA__"></span>Sem rota</div>
+<span class="sw" style="background:__SEMROTA__"></span>Sem rota<br>
+<span class="sw" style="background:__FLUVIAL__"></span>Rota com balsa (fluvial) ⛴️</div>
 <script>
 var D=__PAYLOAD__;
 var map=L.map('m',{scrollWheelZoom:false});
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'© OpenStreetMap'}).addTo(map);
+__TILELAYER__
 var b=[];
 D.linhas.forEach(function(l){var o={color:l.cor,weight:l.pts.length>2?4:2,opacity:.75};if(l.dash)o.dashArray=l.dash;
-L.polyline(l.pts,o).addTo(map);});
+if(l.balsa){o.color='__FLUVIAL__';o.weight=4;o.opacity=.95;o.dashArray='1,8';o.lineCap='round';}
+L.polyline(l.pts,o).addTo(map);
+if(l.balsa){var _m=l.pts[Math.floor(l.pts.length/2)];L.marker(_m,{icon:L.divIcon({className:'',html:'<div style="font-size:15px;line-height:15px">\u26f4\ufe0f</div>',iconSize:[18,18],iconAnchor:[9,9]})}).bindPopup('<b>\u26f4\ufe0f Travessia por balsa</b><br>Trecho fluvial: a rota cruza o rio por balsa.').addTo(map);}});
 D.destinos.forEach(function(d){L.circleMarker([d.lat,d.lng],{radius:7,color:'#fff',weight:1.5,fillColor:'__VERM__',fillOpacity:1})
 .bindPopup('<b>🔴 Destino</b><br>'+d.nome).addTo(map);b.push([d.lat,d.lng]);});
 D.origens.forEach(function(o){var al=(o.alertas&&o.alertas.length)?('<br><b>⚠️ '+o.alertas.join('<br>⚠️ ')+'</b>'):'';
 var cd=(o.cand!=null)?(o.cand+' candidato(s)'):'candidatos: n/d';
 var ds=(o.dist!=null)?(o.dist+' km'):'distância: n/d';
 var tp=(o.tempo)?('<br>\u23f1\ufe0f '+o.tempo):'';
+var bl=(o.balsa)?('<br>\u26f4\ufe0f <b>Travessia por balsa</b>'):'';
+var cc=(o.dconc!=null&&o.conc)?('<br>\U0001f948 2\u00ba colocado: '+o.conc+' ('+o.dconc+' km)'):'';
 L.circleMarker([o.lat,o.lng],{radius:o.r,color:'#fff',weight:1,fillColor:'__AZUL__',fillOpacity:.85})
-.bindPopup('<b>🔵 '+o.nome+'/'+o.uf+'</b><br>'+cd+'<br>→ '+o.dest+'<br>'+ds+tp+'<br>'+o.tipo+'<br><i>Motor: '+o.motor+'</i><br><i>Coord: '+o.fonte+'</i>'+al)
+.bindPopup('<b>🔵 '+o.nome+'/'+o.uf+'</b><br>'+cd+'<br>→ '+o.dest+'<br>'+ds+tp+'<br>'+o.tipo+bl+cc+'<br><i>Motor: '+o.motor+'</i><br><i>Coord: '+o.fonte+'</i>'+al)
 .addTo(map);b.push([o.lat,o.lng]);});
 if(b.length)map.fitBounds(b,{padding:[30,30]});else map.setView([-15.8,-47.9],4);
 </script></body></html>"""
+        _tilelayer = _GEO_TILE_FLUVIAL if fluvial else _GEO_TILE_OSM
         return (html.replace("__H__", str(int(altura)))
+                    .replace("__TILELAYER__", _tilelayer)
                     .replace("__PAYLOAD__", payload)
                     .replace("__AZUL__", _GEO_AZUL).replace("__VERM__", _GEO_VERM)
                     .replace("__VIARIA__", _GEO_VIARIA).replace("__ESTIM__", _GEO_ESTIM)
-                    .replace("__SEMROTA__", _GEO_SEMROTA))
+                    .replace("__SEMROTA__", _GEO_SEMROTA).replace("__FLUVIAL__", _GEO_FLUVIAL))
     except Exception:
         logger.error("[GEO-MAPA] Falha (isolada).", exc_info=True)
         return ""
@@ -8261,7 +8277,7 @@ def _geodiv_agregado(rows):
         logger.error("[GEODIV-AGG] Falha (isolada).", exc_info=True)
         return None
 
-def _geodiv_mapa(rows, altura=520, max_features=400):
+def _geodiv_mapa(rows, altura=520, max_features=400, destaque=False):
     """Mapa de divergências: origem + destino da aplicação (verde) + destino da referência (roxo),
     ligados por CONECTORES honestos (geometria das rotas não armazenada no comparativo). Puro. HTML."""
     try:
@@ -8325,9 +8341,11 @@ L.circleMarker([o.lat,o.lng],{radius:o.r,color:'#fff',weight:1,fillColor:'#1f78b
 +'<br>🟢 App: '+(o.ad||'—')+(o.adk!=null?(' ('+o.adk+' km)'):'')
 +'<br>🟣 Ref: '+(o.rd||'—')+(o.rdk!=null?(' ('+o.rdk+' km)'):'')+dif
 +dtp+'<br><i>'+(o.cat||'')+'</i>'+al).addTo(map);b.push([o.lat,o.lng]);});
-if(b.length)map.fitBounds(b,{padding:[30,30]});else map.setView([-15.8,-47.9],4);
+__HALO__if(b.length)map.fitBounds(b,{padding:[30,30]});else map.setView([-15.8,-47.9],4);
 </script></body></html>"""
-        return html.replace("__H__", str(int(altura))).replace("__PAYLOAD__", payload)
+        _halo = ("D.orig.forEach(function(o){L.circleMarker([o.lat,o.lng],{radius:(o.r+9),color:'#f59e0b',"
+                 "weight:2.5,fill:false,opacity:.95,dashArray:'5,4'}).addTo(map);});") if destaque else ""
+        return html.replace("__H__", str(int(altura))).replace("__HALO__", _halo).replace("__PAYLOAD__", payload)
     except Exception:
         logger.error("[GEODIV-MAPA] Falha (isolada).", exc_info=True)
         return ""
@@ -8568,9 +8586,61 @@ def _geo_html_locais(df):
                 '.gl-tab th{background:#0E2A3B;color:#fff}.gl-tab td.r{text-align:right}'
                 '.gl-tab tbody tr:nth-child(even){background:#f8fafc}'
                 '</style>')
+        # [FLUVIAL-EXPORT - 344a geração] Mapa fluvial (travessias por balsa) também no exportável HTML.
+        _mapa_fluv = ""
+        try:
+            _rows_fluv = [r for r in rows if r.get("balsa")]
+            if _rows_fluv and _mpf:
+                _mhf = _mpf(_rows_fluv, altura=440, max_features=400, decode_fn=_dec, fluvial=True)
+                if _mhf:
+                    _srcf = _he.escape(_mhf, quote=True)
+                    _kf = [r.get("dist_km") for r in _rows_fluv if isinstance(r.get("dist_km"), (int, float))]
+                    _mf = [r.get("tempo_min") for r in _rows_fluv if isinstance(r.get("tempo_min"), (int, float))]
+                    _resumo_fluv = ('<p class="gl-nota"><b>' + _he.escape(str(len(_rows_fluv))) + '</b> travessia(s)'
+                                    + ((' · total <b>' + ("%.0f" % sum(_kf)) + ' km</b>') if _kf else '')
+                                    + ((' · total <b>' + ("%.0f" % sum(_mf)) + ' min</b>') if _mf else '')
+                                    + ((' · mais longa <b>' + ("%.0f" % max(_kf)) + ' km</b>') if _kf else '') + '.</p>')
+                    _mapa_fluv = ('<h3 style="margin-top:14px">⛴️ Malha Fluvial — travessias por balsa</h3>' + _resumo_fluv
+                                  + '<iframe srcdoc="' + _srcf + '" style="width:100%;height:460px;border:1px solid '
+                                  '#e5e7eb;border-radius:10px" loading="lazy" referrerpolicy="no-referrer"></iframe>'
+                                  '<p class="gl-nota">⛴️ azul-água = trecho que cruza rio por balsa · ' +
+                                  _he.escape(str(len(_rows_fluv))) + ' travessia(s). Base alternável (OpenTopoMap) '
+                                  'no controle de camadas para ver a hidrografia.</p>')
+        except Exception:
+            _mapa_fluv = ""
+        # [REDE-EXPORT - 345a geração] Mapa da rede de atendimento (agregado) também no exportável HTML.
+        _mapa_rede = ""
+        try:
+            _clf = globals().get("_geo_clusters")
+            _mrf = globals().get("_geo_mapa_rede")
+            if _clf and _mrf and rows:
+                _clusters_x = _clf(rows, precision=(1 if len(rows) > 400 else 2))
+                _mhr = _mrf(_clusters_x, altura=440)
+                if _mhr:
+                    _srcr = _he.escape(_mhr, quote=True)
+                    _mapa_rede = ('<h3 style="margin-top:14px">🕸️ Rede de Atendimento (agregada)</h3>'
+                                  '<iframe srcdoc="' + _srcr + '" style="width:100%;height:460px;border:1px solid '
+                                  '#e5e7eb;border-radius:10px" loading="lazy" referrerpolicy="no-referrer"></iframe>'
+                                  '<p class="gl-nota">Agrupa origens/destinos próximos para revelar a malha de '
+                                  'atendimento (tamanho = volume). Interativo; requer internet para os blocos cartográficos.</p>')
+        except Exception:
+            _mapa_rede = ""
+        _narr_html = ""
+        try:
+            _nn = _geo_narrativa(rows)
+            if _nn:
+                import re as _re_narr
+                _lis = ""
+                for _ln in _nn:
+                    _esc = _re_narr.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", _he.escape(_ln))
+                    _lis += "<li style='margin:4px 0'>" + _esc + "</li>"
+                _narr_html = ('<h3 style="margin-top:14px">📝 Leitura dos dados</h3>'
+                              '<ul style="line-height:1.5">' + _lis + '</ul>')
+        except Exception:
+            _narr_html = ""
         return (_css + '<p class="lead">Visão territorial do estudo: de onde saem os candidatos, para onde vão e '
                 'como se distribuem os deslocamentos — a partir das coordenadas e rotas já calculadas.</p>'
-                + _kpis + _duelo + _mapa +
+                + _narr_html + _kpis + _duelo + _mapa + _mapa_fluv + _mapa_rede +
                 '<h3 style="margin-top:14px">Casos mais críticos (maiores distâncias)</h3>' + _tabela)
     except Exception:
         logger.error("[GEO-HTML-LOCAIS] Falha (isolada).", exc_info=True)
@@ -12972,6 +13042,40 @@ def _montar_planilha_lote_xlsx(df_final):
             _abas_cientificas_alocacao(_w, df_final)
         except Exception:
             logger.error("[EXPORT-DASHBOARD-LOTE] Falha ao anexar abas analíticas ao Lote", exc_info=True)
+    return _buf.getvalue()
+
+
+@st.cache_data(show_spinner=False)
+def _xlsx_travessias_bytes(df):
+    """[FLUVIAL-XLSX - 347a geração] Bytes de um .xlsx FORMATADO das travessias (cabeçalho institucional,
+    larguras por conteúdo, freeze + autofilter). Cacheado por conteúdo do df ⇒ bytes idênticos entre reruns
+    (zero churn de DOM nos download_button). Puro/defensivo: em falha, devolve bytes simples ou vazio."""
+    import io as _io
+    _buf = _io.BytesIO()
+    try:
+        with pd.ExcelWriter(_buf, engine="xlsxwriter") as _w:
+            df.to_excel(_w, index=False, sheet_name="Travessias")
+            _wb = _w.book
+            _ws = _w.sheets["Travessias"]
+            _hf = _wb.add_format({"bold": True, "bg_color": "#0E2A3B", "font_color": "#FFFFFF",
+                                  "border": 1, "align": "center", "valign": "vcenter"})
+            for _ci, _cn in enumerate(df.columns):
+                _ws.write(0, _ci, str(_cn), _hf)
+                try:
+                    _lc = int(df[_cn].astype(str).str.len().max()) if len(df) else 12
+                except Exception:
+                    _lc = 12
+                _ws.set_column(_ci, _ci, max(12, min(42, max(_lc, len(str(_cn))) + 2)))
+            _ws.freeze_panes(1, 0)
+            _ws.autofilter(0, 0, max(len(df), 1), max(len(df.columns) - 1, 0))
+    except Exception:
+        try:
+            _b2 = _io.BytesIO()
+            with pd.ExcelWriter(_b2, engine="xlsxwriter") as _w2:
+                df.to_excel(_w2, index=False, sheet_name="Travessias")
+            return _b2.getvalue()
+        except Exception:
+            return b""
     return _buf.getvalue()
 
 
@@ -27127,7 +27231,11 @@ def _motor_registrar(nome, sucesso, agora=None):
         with _LOCK_MOTOR_CB:
             _e = _MOTOR_CB_ESTADO.get(nome) or {"status": "fechado", "falhas_seguidas": 0, "aberto_ate": 0.0}
             _antes = _e.get("status", "fechado")
-            _e, _ = _circuit_breaker_google(_e, bool(sucesso), _now)
+            # [VELOCIDADE - 348a geração] Limiar 3 (era 5) SÓ para os motores secundários (não-Google): um motor
+            # que falha 3× seguidas está caído e não contribui para o consenso — pulá-lo ~16s antes acelera sem
+            # perder qualidade (os demais motores + fallback + sweep de recuperação cobrem; e o meio-aberto o
+            # reativa sozinho após o cooldown). O disjuntor do Google (limiar 5) permanece intocado.
+            _e, _ = _circuit_breaker_google(_e, bool(sucesso), _now, _limiar_falhas=3)
             _MOTOR_CB_ESTADO[nome] = _e
             _depois = _e.get("status", "fechado")
         if _antes != _depois:
@@ -33202,7 +33310,15 @@ if not st.session_state.get('_onboarding_dispensado', False):
 # Versão "home" = cartão resumido + link/QR + convite para a seção completa no menu.
 try:
     with st.expander("👨‍💻 Sobre o Desenvolvedor — conheça quem está por trás da plataforma", expanded=False):
-        _dev_render_streamlit(contexto="home")
+        # [DEV-ABOUT/fix-ordem - 340a geração] O módulo _dev (e _VERSAO_APP) é definido MAIS ABAIXO no
+        # arquivo; a home renderiza ANTES, então a função ainda não existe aqui e a chamada estourava
+        # NameError a cada rerun (capturado, mas poluindo o log e nunca exibindo o cartão). Agora só
+        # chamamos se já estiver definida; senão, apontamos para a seção completa do menu — sem erro e sem
+        # mover constantes de núcleo. A seção completa (aba do menu) segue funcionando normalmente.
+        if "_dev_render_streamlit" in globals():
+            _dev_render_streamlit(contexto="home")
+        else:
+            st.caption("A apresentação completa está na seção **👨‍💻 Sobre o Desenvolvedor** no menu lateral.")
 except Exception:
     logger.error("[DEV-ABOUT] Falha ao exibir apresentação na home — ignorada", exc_info=True)
 
@@ -34322,7 +34438,7 @@ _SECOES = [
 # versão antiga". **Essa impossibilidade de distinguir é falha de PROJETO minha** — e ela me fez
 # consertar o mesmo bug três vezes. Agora a versão está na tela: quando você reportar um problema,
 # nós dois sabemos exatamente o que está rodando.
-_VERSAO_APP = "338"
+_VERSAO_APP = "361"
 _VERSAO_SELO = f"v{_VERSAO_APP} · portão de exibição ativo"
 # [RESGATE-CIRCUIDADE - 238ª] liga/desliga o refinamento pós-alocação (reversível). False = comportamento 237.
 _RESGATE_CIRCUIDADE_ATIVO = True
@@ -35376,22 +35492,367 @@ def _ckpt_info_retomavel(slot, chave_total, chave_idx):
 
 
 # ===================== [GEO-TAB 295a] Análise Geográfica Visual (aba dedicada) =====================
+def _geo_mapa_calor(rotas, altura=520, por_candkm=False):
+    """[MAPA-CALOR - 360a geração] Mapa de CALOR (densidade) das origens, ponderado por candidatos (padrão)
+    ou por candidato-km (por_candkm=True) \u2014 revela onde se concentra o volume/impacto humano. Usa
+    leaflet-heat via CDN; HTML autocontido com degrada\u00e7\u00e3o offline. Chaves JS via .replace. Nunca levanta."""
+    try:
+        _pts = []
+        _maxw = 0.0
+        for x in rotas:
+            _lo, _ln = x.get("lat_o"), x.get("lon_o")
+            if not (isinstance(_lo, (int, float)) and isinstance(_ln, (int, float))):
+                continue
+            _c = x.get("candidatos")
+            if not isinstance(_c, (int, float)) or _c <= 0:
+                continue
+            _w = float(_c)
+            if por_candkm:
+                _dk = x.get("dist_km")
+                _w = float(_c) * float(_dk) if isinstance(_dk, (int, float)) and _dk > 0 else float(_c)
+            _pts.append([round(float(_lo), 5), round(float(_ln), 5), _w])
+            if _w > _maxw:
+                _maxw = _w
+        if not _pts:
+            return ""
+        if _maxw > 0:
+            for _p in _pts:
+                _p[2] = round(_p[2] / _maxw, 4)
+        payload = json.dumps({"pts": _pts}, ensure_ascii=False).replace("</", "<\\/")
+        html = '<!DOCTYPE html><html><head><meta charset="utf-8"/><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script><style>html,body,#m{margin:0;height:__H__px;width:100%}#m{position:relative}</style></head><body><div id="m"><div style="position:absolute;inset:0;z-index:0;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;text-align:center;font-family:system-ui,Arial,sans-serif;color:#0E2A3B;background:#f4f6f8;"><div><div style="font-size:1.7em;margin-bottom:6px;">🔥🗺️</div><div style="font-weight:600;margin-bottom:4px;">Mapa indisponível offline</div><div style="font-size:.9em;max-width:440px;">A biblioteca de mapas não pôde ser carregada (sem internet ou CDN bloqueado). Os <b>dados permanecem completos</b> nas tabelas e KPIs.</div></div></div></div><script>var D=__PAYLOAD__;try{var map=L.map("m").setView([-15.8,-47.9],4);L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:18,attribution:"© OpenStreetMap"}).addTo(map);var heat=L.heatLayer(D.pts,{radius:28,blur:20,maxZoom:11,minOpacity:.35,max:1.0}).addTo(map);if(D.pts.length){var b=D.pts.map(function(p){return [p[0],p[1]];});map.fitBounds(b,{padding:[30,30]});}}catch(e){}</script></body></html>'
+        return html.replace("__H__", str(int(altura))).replace("__PAYLOAD__", payload)
+    except Exception:
+        logger.error("[MAPA-CALOR] Falha (isolada).", exc_info=True)
+        return ""
+
+
+def _geo_cobertura(rotas):
+    """[COBERTURA - 361a geração] Curva de cobertura PONDERADA POR CANDIDATOS: para cada dist\u00e2ncia, a
+    fra\u00e7\u00e3o ACUMULADA de candidatos atendidos at\u00e9 ali. Responde \"quantos %% dos candidatos est\u00e3o
+    a at\u00e9 X km?\". Retorna dict {curva:[(km,pct)], limiares:{km:pct}, total} ou None. Pura/defensiva."""
+    try:
+        _pares = sorted((r["dist_km"], int(r["candidatos"])) for r in rotas
+                        if isinstance(r.get("dist_km"), (int, float)) and r["dist_km"] > 0
+                        and isinstance(r.get("candidatos"), (int, float)) and r["candidatos"] > 0)
+        if not _pares:
+            return None
+        _total = sum(_c for _, _c in _pares)
+        if _total <= 0:
+            return None
+        _acum = 0
+        _curva = []
+        for _km, _c in _pares:
+            _acum += _c
+            _curva.append((round(_km, 1), round(100.0 * _acum / _total, 2)))
+        _limiares = {}
+        for _lim in (30, 60, 100, 200):
+            _dentro = sum(_c for _km, _c in _pares if _km <= _lim)
+            _limiares[_lim] = round(100.0 * _dentro / _total, 1)
+        return {"curva": _curva, "limiares": _limiares, "total": _total}
+    except Exception:
+        logger.error("[COBERTURA] Falha (isolada).", exc_info=True)
+        return None
+
+
+def _geo_impacto_candidatos(rotas):
+    """[IMPACTO-CAND - 359a geração] Analisa o impacto em CANDIDATOS: quantos são atendidos pela rota da
+    Aplicação e o efeito de usar o 2º colocado (concorrente). Retorna dict com totais e candidato-km. Pura."""
+    try:
+        if not rotas:
+            return None
+        _tot = 0
+        _ckm_app = 0.0
+        _ckm_conc = 0.0
+        _com_conc = 0
+        _benef = 0
+        _extra = 0.0
+        for r in rotas:
+            _c = r.get("candidatos")
+            if not isinstance(_c, (int, float)) or _c <= 0:
+                continue
+            _c = int(_c)
+            _tot += _c
+            _dk = r.get("dist_km")
+            if isinstance(_dk, (int, float)) and _dk > 0:
+                _ckm_app += _c * _dk
+            _dc = r.get("dist_concorrente")
+            if isinstance(_dc, (int, float)) and _dc > 0 and isinstance(_dk, (int, float)) and _dk > 0:
+                _com_conc += _c
+                _ckm_conc += _c * _dc
+                if _dc > _dk:
+                    _benef += _c
+                    _extra += _c * (_dc - _dk)
+        return {"cand_total": _tot, "candkm_app": _ckm_app, "candkm_conc": _ckm_conc,
+                "cand_com_conc": _com_conc, "cand_beneficiados": _benef, "cand_extra_km": _extra}
+    except Exception:
+        logger.error("[IMPACTO-CAND] Falha (isolada).", exc_info=True)
+        return None
+
+
+def _geodiv_narrativa(rows):
+    """[NARRATIVA-DIV - 358a geração] Leitura DIDÁTICA das divergências (Aplicação x Referência): panorama,
+    tendência, impacto ponderado e maior divergência. Lista de strings markdown. Pura e defensiva."""
+    try:
+        if not rows:
+            return []
+        _out = []
+        _n = len(rows)
+        _app = sum(1 for r in rows if r.get("vencedor") == "Aplica\u00e7\u00e3o")
+        _ref = sum(1 for r in rows if r.get("vencedor") == "Refer\u00eancia")
+        _kmc = sum(int(r["km_candidato"]) for r in rows if isinstance(r.get("km_candidato"), (int, float)))
+        _out.append("**Panorama.** Foram comparados **%d munic\u00edpio(s)**. A Aplica\u00e7\u00e3o oferece rota "
+                    "melhor em **%d** e a Refer\u00eancia em **%d**." % (_n, _app, _ref))
+        if _ref > _app:
+            _out.append("**Aten\u00e7\u00e3o.** A Refer\u00eancia supera a Aplica\u00e7\u00e3o na maioria (%d x %d) "
+                        "\u2014 vale investigar se o estudo de refer\u00eancia tem polos melhor posicionados." % (_ref, _app))
+        elif _app > _ref:
+            _out.append("**Favor\u00e1vel.** A Aplica\u00e7\u00e3o vence na maioria (%d x %d) \u2014 o estudo atual "
+                        "tende a reduzir mais o deslocamento dos candidatos." % (_app, _ref))
+        if _kmc:
+            _out.append("**Impacto.** A soma do impacto ponderado \u00e9 **%s km\u00d7candidato** \u2014 a magnitude "
+                        "total da diverg\u00eancia entre os dois estudos." % ("{:,}".format(_kmc).replace(",", ".")))
+        _crit = [r for r in rows if isinstance(r.get("dif_km"), (int, float))]
+        if _crit:
+            _top = max(_crit, key=lambda r: abs(r["dif_km"]))
+            _out.append("**Maior diverg\u00eancia.** %s/%s: **%.0f km** de diferen\u00e7a entre os destinos "
+                        "concorrentes." % (_top.get("municipio", "\u2014"), _top.get("uf", "\u2014"), abs(_top["dif_km"])))
+        return _out
+    except Exception:
+        logger.error("[NARRATIVA-DIV] Falha (isolada).", exc_info=True)
+        return []
+
+
+def _geo_alertas(rotas):
+    """[ALERTAS - 358a geração] Alertas automáticos por LIMIAR sobre o conjunto de rotas. Devolve uma lista de
+    (severidade, texto) com severidade em {"erro","aviso"}. Pura e defensiva."""
+    try:
+        if not rotas:
+            return []
+        _out = []
+        _n = len(rotas)
+        _sem = sum(1 for r in rotas if any(_k in str(r.get("tipo_rota", "")).lower() for _k in ("sem", "erro")))
+        _pct_sem = 100.0 * _sem / _n if _n else 0.0
+        if _pct_sem > 5.0:
+            _out.append(("erro", "**%.0f%% das rotas ficaram sem roteamento** (%d de %d) \u2014 acima do limite de "
+                         "5%%. Verifique a cobertura de geocodifica\u00e7\u00e3o e dos motores." % (_pct_sem, _sem, _n)))
+        elif _sem:
+            _out.append(("aviso", "%d rota(s) sem roteamento (%.1f%%) \u2014 dentro do toler\u00e1vel, mas vale "
+                         "conferir." % (_sem, _pct_sem)))
+        _est = sum(1 for r in rotas if any(_k in str(r.get("tipo_rota", "")).lower() for _k in ("estim", "reta")))
+        if _n and 100.0 * _est / _n > 15.0:
+            _out.append(("aviso", "**%.0f%% das rotas s\u00e3o estimadas** (linha reta/fallback) \u2014 a precis\u00e3o "
+                         "das dist\u00e2ncias pode estar comprometida nessas." % (100.0 * _est / _n)))
+        _dv = sorted(r["dist_km"] for r in rotas if isinstance(r.get("dist_km"), (int, float)) and r["dist_km"] > 0)
+        if _dv:
+            _p90 = _dv[min(len(_dv) - 1, int(round(0.9 * (len(_dv) - 1))))]
+            if _p90 > 300:
+                _out.append(("aviso", "P90 de dist\u00e2ncia em **%.0f km**: h\u00e1 uma cauda longa de candidatos "
+                             "muito distantes \u2014 considere polos adicionais nessas regi\u00f5es." % _p90))
+        _al = sum(1 for r in rotas if r.get("alertas"))
+        if _n and 100.0 * _al / _n > 20.0:
+            _out.append(("aviso", "**%.0f%% das rotas t\u00eam alertas** de qualidade \u2014 revise as sinaliza\u00e7\u00f5es "
+                         "antes de decidir." % (100.0 * _al / _n)))
+        return _out
+    except Exception:
+        logger.error("[ALERTAS] Falha (isolada).", exc_info=True)
+        return []
+
+
+def _geo_narrativa(rotas):
+    """[NARRATIVA - 357a geração] Gera uma leitura DIDÁTICA, em texto, do conjunto de rotas: cobertura,
+    qualidade do roteamento, distâncias típicas (com explicação do que é mediana/P90), concentração por UF
+    e logística fluvial. Devolve uma lista de strings markdown. Pura e defensiva (em falha, lista vazia)."""
+    try:
+        if not rotas:
+            return []
+        def _mil(v):
+            return ("{:,}".format(int(v))).replace(",", ".")
+        _out = []
+        _n = len(rotas)
+        _dv = sorted(r["dist_km"] for r in rotas if isinstance(r.get("dist_km"), (int, float)) and r["dist_km"] > 0)
+        _cv = [r["candidatos"] for r in rotas if isinstance(r.get("candidatos"), (int, float)) and r["candidatos"] > 0]
+        _tot_cand = int(sum(_cv)) if _cv else 0
+        _real = sum(1 for r in rotas if "vi\u00e1r" in str(r.get("tipo_rota", "")).lower())
+        _prob = sum(1 for r in rotas if any(_k in str(r.get("tipo_rota", "")).lower() for _k in ("sem", "estim", "reta")))
+        _pct_real = (100.0 * _real / _n) if _n else 0.0
+        _out.append("**Cobertura.** O estudo re\u00fane **%d rota(s)**%s. Dessas, **%.0f%%** s\u00e3o rotas "
+                    "**vi\u00e1rias reais**%s." % (_n,
+                    (" atendendo **%s candidato(s)**" % _mil(_tot_cand)) if _tot_cand else "", _pct_real,
+                    (" e **%d** dependem de estimativa ou ficaram sem rota" % _prob) if _prob else ""))
+        if _dv:
+            _med = _dv[len(_dv) // 2]
+            _p90 = _dv[min(len(_dv) - 1, int(round(0.9 * (len(_dv) - 1))))]
+            _out.append("**Dist\u00e2ncias.** A **mediana** do deslocamento \u00e9 **%.0f km** \u2014 metade das rotas "
+                        "fica abaixo disso. O **P90 \u00e9 %.0f km**: 90%% das rotas ficam at\u00e9 a\u00ed, e os 10%% "
+                        "acima formam a **cauda cr\u00edtica** (os candidatos mais distantes do local de prova)." % (_med, _p90))
+        _uf_cand, _uf_dist = {}, {}
+        for r in rotas:
+            _u = str(r.get("uf") or "\u2014")
+            if _u == "\u2014":
+                continue
+            _c = r.get("candidatos")
+            if isinstance(_c, (int, float)):
+                _uf_cand[_u] = _uf_cand.get(_u, 0) + _c
+            _d = r.get("dist_km")
+            if isinstance(_d, (int, float)) and _d > 0:
+                _uf_dist.setdefault(_u, []).append(_d)
+        if _uf_cand:
+            _uft = max(_uf_cand, key=_uf_cand.get)
+            _out.append("**Concentra\u00e7\u00e3o.** A UF que mais concentra candidatos \u00e9 **%s** (%s). Priorizar "
+                        "essa regi\u00e3o tende a gerar o maior impacto log\u00edstico." % (_uft, _mil(_uf_cand[_uft])))
+        if _uf_dist:
+            def _meduf(u):
+                _ss = sorted(_uf_dist[u]); return _ss[len(_ss) // 2]
+            _ufp = max(_uf_dist, key=_meduf)
+            _out.append("**Acesso mais dif\u00edcil.** **%s** tem a maior dist\u00e2ncia mediana (**%.0f km**) \u2014 o "
+                        "estado onde o candidato t\u00edpico enfrenta o trajeto mais longo." % (_ufp, _meduf(_ufp)))
+        _nb = sum(1 for r in rotas if r.get("balsa"))
+        if _nb:
+            _out.append("**Log\u00edstica fluvial.** **%d travessia(s) por balsa** \u2014 trechos que cruzam rio e "
+                        "exigem aten\u00e7\u00e3o especial de tempo e disponibilidade da balsa." % _nb)
+        return _out
+    except Exception:
+        logger.error("[NARRATIVA] Falha ao gerar leitura (isolada).", exc_info=True)
+        return []
+
+
 if _secao == _SECOES[14]:   # tab_geografica
     st.header("🗺️ Análise Geográfica Visual")
     st.caption("Central de análise geográfica e logística dos candidatos: **origem → deslocamento → destino**, "
                "reaproveitando as coordenadas, geometrias e distâncias já calculadas (não refaz roteamento).")
     try:
+        # [GEO-FONTE - 350a geração] Seletor de fonte: a aba serve Locais de Aplicação, Lote E o Comparador de
+        # estudos (análise de divergências Aplicação × Referência). Cada fonte disponível vira uma opção.
+        _fontes = []
+        _alo_df = st.session_state.get("alo_resultados")
+        _dfp_df = st.session_state.get("df_processado")
+        _lote_df = st.session_state.get("lote_resultados")
+        _cmp_div = st.session_state.get("cmp_diag_divergencias")
+        if isinstance(_alo_df, pd.DataFrame) and not _alo_df.empty:
+            _fontes.append(("🎯 Locais de Aplicação", "alo_resultados", "rotas"))
+        elif isinstance(_dfp_df, pd.DataFrame) and not _dfp_df.empty:
+            _fontes.append(("🎯 Locais de Aplicação", "df_processado", "rotas"))
+        if isinstance(_lote_df, pd.DataFrame) and not _lote_df.empty:
+            _fontes.append(("📦 Lote", "lote_resultados", "rotas"))
+        if isinstance(_cmp_div, dict) and (_cmp_div.get("analises")):
+            _fontes.append(("⚖️ Comparador de estudos", "cmp_diag_divergencias", "divergencia"))
         _geo_ds = None
-        for _gk in ("df_processado", "alo_resultados", "lote_resultados", "cmp_resultado"):
-            _gcand = st.session_state.get(_gk)
-            if isinstance(_gcand, pd.DataFrame):
-                _gtry = _geo_analise_dataset(_gcand)
-                if _gtry and _gtry.get("rotas"):
-                    _geo_ds = _gtry
-                    break
-        if not (_geo_ds and _geo_ds.get("rotas")):
-            st.info("ℹ️ Processe uma alocação (ou lote) com coordenadas de origem para habilitar a análise geográfica. "
-                    "Esta aba reaproveita os resultados já calculados — ela aparece assim que houver rotas com coordenadas.")
+        _geo_render_div = False
+        if not _fontes:
+            st.info("ℹ️ Processe uma **alocação** (🎯 Locais de Aplicação), um **lote**, ou rode o **Comparador de "
+                    "estudos** para habilitar a análise. Esta aba reaproveita os resultados já calculados.")
+        else:
+            if len(_fontes) > 1:
+                _flabels = [_f[0] for _f in _fontes]
+                _fsel = st.radio("🔎 Fonte da análise", _flabels, horizontal=True, key="geo_fonte_analise")
+                _fchosen = _fontes[_flabels.index(_fsel)]
+            else:
+                _fchosen = _fontes[0]
+                st.caption("Fonte da análise: **%s**." % _fchosen[0])
+            _fkey, _ftipo = _fchosen[1], _fchosen[2]
+            if _ftipo == "divergencia":
+                _geo_render_div = True
+                try:
+                    _divrows = _geodiv_dataset((_cmp_div or {}).get("analises") or [])
+                    if not _divrows:
+                        st.info("O Comparador não possui divergências com coordenadas para mapear.")
+                    else:
+                        st.markdown("#### ⚖️ Divergências geográficas — Aplicação × Referência")
+                        # [GEO-DIV-FILTRO - 351a geração] (#1) filtros por UF, vencedor e Δ mínimo (km).
+                        _ufs_d = sorted({r.get("uf", "—") for r in _divrows if r.get("uf") and r.get("uf") != "—"})
+                        _fc = st.columns(3)
+                        _uf_d = _fc[0].selectbox("UF", ["(todas)"] + _ufs_d, key="gdiv_uf")
+                        _venc_d = _fc[1].selectbox("Vencedor", ["(todos)", "Aplicação", "Referência", "Empate"], key="gdiv_venc")
+                        _difs = [abs(r["dif_km"]) for r in _divrows if isinstance(r.get("dif_km"), (int, float))]
+                        _dmax = int(max(_difs)) + 1 if _difs else 0
+                        _dmin_sel = _fc[2].slider("Δ mínimo (km)", 0, _dmax, 0, key="gdiv_dmin") if _dmax > 0 else 0
+                        _divrows_f = list(_divrows)
+                        if _uf_d != "(todas)":
+                            _divrows_f = [r for r in _divrows_f if r.get("uf") == _uf_d]
+                        if _venc_d != "(todos)":
+                            _divrows_f = [r for r in _divrows_f if r.get("vencedor") == _venc_d]
+                        if _dmin_sel > 0:
+                            _divrows_f = [r for r in _divrows_f
+                                          if isinstance(r.get("dif_km"), (int, float)) and abs(r["dif_km"]) >= _dmin_sel]
+                        _agg = _geodiv_agregado(_divrows_f) or {}
+                        _gd = st.columns(4)
+                        _gd[0].metric("Municípios", _agg.get("n", len(_divrows_f)))
+                        _gd[1].metric("Aplicação superior", _agg.get("n_app_superior", "—"))
+                        _gd[2].metric("Referência superior", _agg.get("n_ref_superior", "—"))
+                        _gd[3].metric("km×candidato", "{:,}".format(_agg.get("km_candidato_total", 0)).replace(",", "."))
+                        st.caption("%d de %d divergências após o filtro." % (len(_divrows_f), len(_divrows)))
+                        # [NARRATIVA-DIV - 358a geração] leitura em texto das divergências filtradas.
+                        _nd = _geodiv_narrativa(_divrows_f)
+                        if _nd:
+                            with st.expander("📝 Leitura das divergências (análise em texto)", expanded=True):
+                                for _ld in _nd:
+                                    st.markdown("- " + _ld)
+                        if _agg.get("dif_tempo_media_ponderada") is not None:
+                            st.caption("Δ tempo médio ponderado: **%s min** · impacto: **%s** min×candidato."
+                                       % (_agg.get("dif_tempo_media_ponderada"),
+                                          "{:,}".format(_agg.get("min_candidato_total", 0)).replace(",", ".")))
+                        # [GEO-DIV-ORD - 352a geração] (#1) ordenação reusando _geodiv_ordenar/_GEODIV_ORD.
+                        _ord_opts = ["(padrão)"] + list(_GEODIV_ORD.keys())
+                        _ord_sel = st.selectbox("Ordenar por", _ord_opts, key="gdiv_ord")
+                        if _ord_sel != "(padrão)":
+                            _divrows_f = _geodiv_ordenar(_divrows_f, _ord_sel)
+                        # [GEO-DIV-SEL - 351a geração] (#3) isola UMA origem (Aplicação × Referência lado a lado).
+                        _lbls_d = ["(todas as origens)"] + [
+                            "%d. %s/%s" % (_i + 1, _r.get("municipio", "—"), _r.get("uf", "—"))
+                            for _i, _r in enumerate(_divrows_f)]
+                        _sel_d = st.selectbox("🔍 Ver uma origem específica (destino da Aplicação × da Referência)",
+                                              _lbls_d, key="gdiv_sel")
+                        _rows_map = _divrows_f
+                        if _sel_d != "(todas as origens)":
+                            _ixd = _lbls_d.index(_sel_d) - 1
+                            if 0 <= _ixd < len(_divrows_f):
+                                _rows_map = [_divrows_f[_ixd]]
+                        _dmapa = _geodiv_mapa(_rows_map, altura=540,
+                                              destaque=(_sel_d != "(todas as origens)"))
+                        if _dmapa:
+                            components.html(_dmapa, height=560, scrolling=False)
+                            st.caption("As linhas ligam a origem aos dois destinos concorrentes (Aplicação × "
+                                       "Referência). Selecione uma origem acima para vê-la isolada lado a lado.")
+                        # [GEO-DIV-EXPORT - 351a geração] (#2) export das divergências filtradas (CSV + Excel).
+                        try:
+                            _tab_div = [{"Município": r.get("municipio", "—"), "UF": r.get("uf", "—"),
+                                         "Destino Aplicação": r.get("app_destino", "—"), "Dist. Aplic. (km)": r.get("app_dist"),
+                                         "Destino Referência": r.get("ref_destino", "—"), "Dist. Ref. (km)": r.get("ref_dist"),
+                                         "Δ (km)": r.get("dif_km"), "km×candidato": r.get("km_candidato"),
+                                         "Vencedor": r.get("vencedor", "—"), "Categoria": r.get("categoria", "—")}
+                                        for r in _divrows_f]
+                            if _tab_div:
+                                _df_div = pd.DataFrame(_tab_div)
+                                st.markdown("##### 📋 Divergências (linha a linha)")
+                                st.dataframe(_df_div, use_container_width=True, hide_index=True)
+                                _dc = st.columns(2)
+                                _dc[0].download_button("⬇️ Divergências (CSV)",
+                                                       data=_df_div.to_csv(index=False).encode("utf-8-sig"),
+                                                       file_name="divergencias.csv", mime="text/csv", key="gdiv_csv")
+                                try:
+                                    _xbd = _xlsx_bytes(_df_div, "Divergencias")
+                                    if _xbd:
+                                        _dc[1].download_button("⬇️ Divergências (Excel)", data=_xbd,
+                                                               file_name="divergencias.xlsx",
+                                                               mime=("application/vnd.openxmlformats-officedocument."
+                                                                     "spreadsheetml.sheet"), key="gdiv_xlsx")
+                                except Exception:
+                                    logger.error("[GEO-DIV-XLSX] Falha ao gerar xlsx (isolada).", exc_info=True)
+                        except Exception:
+                            logger.error("[GEO-DIV-EXPORT] Falha no export de divergências (isolada).", exc_info=True)
+                except Exception:
+                    logger.error("[GEO-DIVERGENCIA] Falha ao renderizar divergências do Comparador (isolada).", exc_info=True)
+                    st.warning("Não foi possível montar a análise de divergências do Comparador nesta rodada.")
+            else:
+                _gcand = st.session_state.get(_fkey)
+                if isinstance(_gcand, pd.DataFrame):
+                    _gtry = _geo_analise_dataset(_gcand)
+                    if _gtry and _gtry.get("rotas"):
+                        _geo_ds = _gtry
+        if _geo_render_div:
+            pass
+        elif not (_geo_ds and _geo_ds.get("rotas")):
+            st.info("ℹ️ A fonte selecionada não tem rotas com coordenadas para mapear nesta aba.")
         else:
             _rotas_all = _geo_ds["rotas"]
             _polo_coords = _geo_polo_coords(_rotas_all)
@@ -35442,6 +35903,159 @@ if _secao == _SECOES[14]:   # tab_geografica
                 _k2[1].metric("Maior distância", (f"{max(_dvals):.1f} km" if _dvals else "n/d"))
                 _k2[2].metric("Com balsa", sum(1 for x in _rotas if x.get("balsa")))
                 _k2[3].metric("Com alerta", sum(1 for x in _rotas if x.get("alertas")))
+                # [NARRATIVA - 357a geração] Leitura automática, didática, em texto, do conjunto filtrado.
+                _narr = _geo_narrativa(_rotas)
+                if _narr:
+                    with st.expander("📝 Leitura automática dos dados (análise em texto)", expanded=True):
+                        for _linha in _narr:
+                            st.markdown("- " + _linha)
+                        st.caption("Texto gerado automaticamente a partir das rotas filtradas — leitura de apoio, "
+                                   "não substitui a análise humana.")
+                # [ALERTAS - 358a geração] alertas automáticos por limiar sobre o conjunto filtrado.
+                for _sev, _msg in _geo_alertas(_rotas):
+                    if _sev == "erro":
+                        st.error("🚨 " + _msg)
+                    else:
+                        st.warning("⚠️ " + _msg)
+                # [IMPACTO-CAND - 359a geração] análise visual de candidatos: Aplicação × 2º colocado × Comparador.
+                _imp = _geo_impacto_candidatos(_rotas)
+                if _imp and _imp.get("cand_total"):
+                    def _milc(v):
+                        return ("{:,}".format(int(v))).replace(",", ".")
+                    with st.expander("👥 Impacto em candidatos (Aplicação × 2º colocado)", expanded=True):
+                        _ic = st.columns(3)
+                        _ic[0].metric("Candidatos atendidos", _milc(_imp["cand_total"]))
+                        _ic[1].metric("Candidato-km (Aplicação)", _milc(_imp["candkm_app"]))
+                        if _imp.get("cand_com_conc"):
+                            _ic[2].metric("Candidato-km (2º colocado)", _milc(_imp["candkm_conc"]),
+                                          delta=_milc(_imp["candkm_app"] - _imp["candkm_conc"]) + " vs Aplicação",
+                                          delta_color="inverse")
+                        if _imp.get("cand_beneficiados"):
+                            st.markdown("- **%s candidato(s)** são melhor atendidos pela rota da Aplicação do que pelo "
+                                        "2º colocado. Se todos fossem ao 2º colocado, o deslocamento total cresceria em "
+                                        "**%s candidato-km**." % (_milc(_imp["cand_beneficiados"]), _milc(_imp["cand_extra_km"])))
+                        if _imp.get("cand_com_conc"):
+                            _dfic = pd.DataFrame({"Candidato-km": [int(_imp["candkm_app"]), int(_imp["candkm_conc"])]},
+                                                 index=["Rota da Aplicação", "Rota do 2º colocado"])
+                            st.markdown("**Candidato-km: Aplicação × 2º colocado** (menor é melhor)")
+                            st.bar_chart(_dfic)
+                        # [RANKING-CANDKM - 360a geração] top rotas por candidato-km (maior peso no deslocamento).
+                        try:
+                            _rk = [(x.get("origem", "—"), x.get("destino", "—"), x.get("uf", "—"),
+                                    int(x.get("candidatos") or 0), float(x.get("dist_km") or 0),
+                                    int(x.get("candidatos") or 0) * float(x.get("dist_km") or 0))
+                                   for x in _rotas
+                                   if isinstance(x.get("candidatos"), (int, float)) and x.get("candidatos") > 0
+                                   and isinstance(x.get("dist_km"), (int, float)) and x.get("dist_km") > 0]
+                            if _rk:
+                                _rk.sort(key=lambda t: t[5], reverse=True)
+                                _dfrk = pd.DataFrame(_rk[:15], columns=["Origem", "Destino", "UF", "Candidatos",
+                                                                        "Distância (km)", "Candidato-km"])
+                                _dfrk["Candidato-km"] = _dfrk["Candidato-km"].round(0).astype(int)
+                                st.markdown("**🔝 Top rotas por candidato-km** (as que mais pesam no deslocamento total)")
+                                st.dataframe(_dfrk, use_container_width=True, hide_index=True)
+                        except Exception:
+                            logger.error("[RANKING-CANDKM] Falha (isolada).", exc_info=True)
+                        _cmp_i = st.session_state.get("cmp_diag_divergencias")
+                        if isinstance(_cmp_i, dict) and _cmp_i.get("analises") and "_geodiv_dataset" in globals():
+                            try:
+                                _rows_i = _geodiv_dataset(_cmp_i.get("analises") or [])
+                                _ref_m = sum(int(r.get("inscritos") or 0) for r in _rows_i if r.get("vencedor") == "Referência")
+                                _app_m = sum(int(r.get("inscritos") or 0) for r in _rows_i if r.get("vencedor") == "Aplicação")
+                                if _ref_m or _app_m:
+                                    st.markdown("**Comparador de estudos:** **%s candidato(s)** teriam rota melhor pela "
+                                                "**Referência** e **%s** pela **Aplicação** — quem seria afetado ao trocar "
+                                                "de estudo." % (_milc(_ref_m), _milc(_app_m)))
+                                    _dfcmp = pd.DataFrame({"Candidatos": [_app_m, _ref_m]},
+                                                          index=["Melhor pela Aplicação", "Melhor pela Referência"])
+                                    st.bar_chart(_dfcmp)
+                            except Exception:
+                                logger.error("[IMPACTO-CAND/cmp] Falha (isolada).", exc_info=True)
+                # [GEO-DISTRIB - 355a geração] Distribuições visuais do conjunto filtrado: distância, UF, motor.
+                with st.expander("📊 Distribuições (distância · candidatos por UF · rotas por motor)", expanded=False):
+                    try:
+                        if len(_dvals) >= 3:
+                            _sd = pd.Series(_dvals)
+                            _nb = min(10, max(3, len(_dvals) // 5))
+                            _vc = pd.cut(_sd, bins=_nb).value_counts().sort_index()
+                            _dfd = pd.DataFrame({"Rotas": _vc.values}, index=[str(_iv) for _iv in _vc.index])
+                            st.markdown("**Distribuição das distâncias (km)**")
+                            st.bar_chart(_dfd)
+                        _uf_cand = {}
+                        for _x in _rotas:
+                            _u = str(_x.get("uf") or "—")
+                            _cc = _x.get("candidatos")
+                            _uf_cand[_u] = _uf_cand.get(_u, 0) + (int(_cc) if isinstance(_cc, (int, float)) else 0)
+                        _uf_cand.pop("—", None)
+                        if _uf_cand:
+                            _dfu = pd.DataFrame({"Candidatos": list(_uf_cand.values())},
+                                                index=list(_uf_cand.keys())).sort_values("Candidatos", ascending=False)
+                            st.markdown("**Candidatos por UF de origem**")
+                            st.bar_chart(_dfu)
+                        _mot = {}
+                        for _x in _rotas:
+                            _m = str(_x.get("motor") or "—")
+                            _mot[_m] = _mot.get(_m, 0) + 1
+                        if _mot:
+                            _dfm = pd.DataFrame({"Rotas": list(_mot.values())},
+                                                index=list(_mot.keys())).sort_values("Rotas", ascending=False)
+                            st.markdown("**Rotas por motor de roteamento**")
+                            st.bar_chart(_dfm)
+                        # [GEO-DISTRIB2 - 356a geração] dispersão dist×cand · percentis por UF · tipo de rota.
+                        _sc_pts = [(_x.get("dist_km"), _x.get("candidatos")) for _x in _rotas
+                                   if isinstance(_x.get("dist_km"), (int, float)) and _x.get("dist_km") > 0
+                                   and isinstance(_x.get("candidatos"), (int, float)) and _x.get("candidatos") > 0]
+                        if len(_sc_pts) >= 3:
+                            _dfs = pd.DataFrame(_sc_pts, columns=["Distância (km)", "Candidatos"])
+                            st.markdown("**Dispersão: distância × candidatos** (rotas longas que afetam muita gente)")
+                            try:
+                                st.scatter_chart(_dfs, x="Distância (km)", y="Candidatos")
+                            except Exception:
+                                st.scatter_chart(_dfs)
+                        _uf_dist = {}
+                        for _x in _rotas:
+                            _d = _x.get("dist_km")
+                            if isinstance(_d, (int, float)) and _d > 0:
+                                _uf_dist.setdefault(str(_x.get("uf") or "—"), []).append(_d)
+                        _uf_dist.pop("—", None)
+                        if _uf_dist:
+                            _rows_uf = []
+                            for _u, _ds in _uf_dist.items():
+                                _sser = pd.Series(_ds)
+                                _rows_uf.append({"UF": _u, "Rotas": len(_ds),
+                                                 "Mediana (km)": round(float(_sser.median()), 1),
+                                                 "P90 (km)": round(float(_sser.quantile(0.9)), 1),
+                                                 "Máx (km)": round(float(_sser.max()), 1)})
+                            _dfpu = pd.DataFrame(_rows_uf).sort_values("P90 (km)", ascending=False)
+                            st.markdown("**Dispersão de distâncias por UF** (mediana · P90 · máximo)")
+                            st.dataframe(_dfpu, use_container_width=True, hide_index=True)
+                        _tipo_c = {}
+                        for _x in _rotas:
+                            _t = str(_x.get("tipo_rota") or "—")
+                            _tipo_c[_t] = _tipo_c.get(_t, 0) + 1
+                        if _tipo_c:
+                            _dft = pd.DataFrame({"Rotas": list(_tipo_c.values())},
+                                                index=list(_tipo_c.keys())).sort_values("Rotas", ascending=False)
+                            st.markdown("**Rotas por tipo** (qualidade do roteamento: viária real × estimada × sem rota)")
+                            st.bar_chart(_dft)
+                    except Exception:
+                        logger.error("[GEO-DISTRIB] Falha ao montar distribuições (isolada).", exc_info=True)
+                # [COBERTURA - 361a geração] curva de cobertura ponderada por candidatos (SLA de acesso).
+                _cob = _geo_cobertura(_rotas)
+                if _cob:
+                    with st.expander("📈 Curva de cobertura por distância (quantos % dos candidatos até X km)",
+                                     expanded=False):
+                        _lm = _cob["limiares"]
+                        _lc = st.columns(4)
+                        _lc[0].metric("Até 30 km", "%.0f%%" % _lm.get(30, 0))
+                        _lc[1].metric("Até 60 km", "%.0f%%" % _lm.get(60, 0))
+                        _lc[2].metric("Até 100 km", "%.0f%%" % _lm.get(100, 0))
+                        _lc[3].metric("Até 200 km", "%.0f%%" % _lm.get(200, 0))
+                        _dfcob = pd.DataFrame(_cob["curva"], columns=["km", "% candidatos atendidos"]).set_index("km")
+                        st.line_chart(_dfcob)
+                        st.caption("Leitura: no eixo horizontal a distância; no vertical, a fração **acumulada** de "
+                                   "candidatos atendidos até aquela distância. Útil para definir metas de acesso "
+                                   "(ex.: '90%% dos candidatos a até 60 km').")
                 _kx = _geo_kpis_extra(_rotas)
                 if _kx:
                     if _kx.get("media_ponderada_tempo") is not None:
@@ -35468,14 +36082,134 @@ if _secao == _SECOES[14]:   # tab_geografica
                             st.caption("💡 O candidato **típico** percorre **mais** que a média por município sugere — "
                                        "a carga se concentra em origens **distantes e populosas**. Priorize-as na decisão.")
                 st.markdown("#### 🗺️ Mapa")
-                _radio_map = st.radio("Exibição do mapa", ["Todas as rotas filtradas", "Somente a rota selecionada", "Rede de atendimento (agregada)"],
+                _radio_map = st.radio("Exibição do mapa", ["Todas as rotas filtradas", "Somente a rota selecionada", "Rede de atendimento (agregada)", "🌊 Malha fluvial (travessias por balsa)", "🔥 Densidade de candidatos"],
                                       horizontal=True, key="geo_map_mode")
                 _sel_idx = None
                 _labels = [_geo_rota_label(r, i) for i, r in enumerate(_rotas)]
                 _sel_label = st.selectbox("🔍 Selecionar rota para análise detalhada", ["(nenhuma)"] + _labels, key="geo_sel_rota")
                 if _sel_label != "(nenhuma)":
                     _sel_idx = _labels.index(_sel_label)
-                if _radio_map.startswith("Rede"):
+                if _radio_map.startswith("🌊"):
+                    # [FLUVIAL - 342a geração] Mapa dedicado isolando as travessias por balsa (malha fluvial),
+                    # com camada OpenTopoMap (relevo/hidrografia) no controle de camadas.
+                    _rotas_fluv = [r for r in _rotas if r.get("balsa")]
+                    if _rotas_fluv:
+                        # [FLUVIAL-SUMARIO - 346a geração] sumário executivo no topo (visão geral de TODAS as
+                        # travessias, antes do filtro): totais e extremos. Defensivo.
+                        _kms_all = [r.get("dist_km") for r in _rotas_fluv if isinstance(r.get("dist_km"), (int, float))]
+                        _min_all = [r.get("tempo_min") for r in _rotas_fluv if isinstance(r.get("tempo_min"), (int, float))]
+                        _ms1, _ms2, _ms3, _ms4 = st.columns(4)
+                        _ms1.metric("⛴️ Travessias", len(_rotas_fluv))
+                        _ms2.metric("Distância total", ("%.0f km" % sum(_kms_all)) if _kms_all else "n/d")
+                        _ms3.metric("Tempo total", ("%.0f min" % sum(_min_all)) if _min_all else "n/d")
+                        _ms4.metric("Travessia mais longa", ("%.0f km" % max(_kms_all)) if _kms_all else "n/d")
+                        try:
+                            _extremos = []
+                            if _kms_all:
+                                _rl = max((r for r in _rotas_fluv if isinstance(r.get("dist_km"), (int, float))),
+                                          key=lambda r: r.get("dist_km"))
+                                _extremos.append("mais longa: **%s → %s** (%.0f km)"
+                                                 % (_rl.get("origem", "—"), _rl.get("destino", "—"), _rl.get("dist_km")))
+                            if _min_all:
+                                _rt = max((r for r in _rotas_fluv if isinstance(r.get("tempo_min"), (int, float))),
+                                          key=lambda r: r.get("tempo_min"))
+                                _extremos.append("mais demorada: **%s → %s** (%.0f min)"
+                                                 % (_rt.get("origem", "—"), _rt.get("destino", "—"), _rt.get("tempo_min")))
+                            if _extremos:
+                                st.caption("⛴️ Travessia " + " · ".join(_extremos) + ".")
+                        except Exception:
+                            logger.error("[FLUVIAL-SUMARIO] Falha ao montar o sumário (isolada).", exc_info=True)
+                        # [FLUVIAL-FILTRO/RESUMO - 343a geração] (#1) filtro cruzado por distância/tempo da
+                        # travessia + (#3) resumo tabular. tempo_min/dist_km já existem em cada rota.
+                        _kms_f = [r.get("dist_km") for r in _rotas_fluv if isinstance(r.get("dist_km"), (int, float))]
+                        _min_f = [r.get("tempo_min") for r in _rotas_fluv if isinstance(r.get("tempo_min"), (int, float))]
+                        _km_teto = int(max(_kms_f)) + 1 if _kms_f else 0
+                        _tm_teto = int(max(_min_f)) + 1 if _min_f else 0
+                        _cf1, _cf2 = st.columns(2)
+                        with _cf1:
+                            _km_min = st.slider("Distância mínima da travessia (km)", 0, _km_teto, 0,
+                                                key="fluv_km_min") if _km_teto > 0 else 0
+                        with _cf2:
+                            _tm_min = st.slider("Tempo mínimo da travessia (min)", 0, _tm_teto, 0,
+                                                key="fluv_tm_min") if _tm_teto > 0 else 0
+                        _rotas_fluv_f = [r for r in _rotas_fluv
+                                         if (not isinstance(r.get("dist_km"), (int, float)) or r.get("dist_km") >= _km_min)
+                                         and (not isinstance(r.get("tempo_min"), (int, float)) or r.get("tempo_min") >= _tm_min)]
+                        # [FLUVIAL-SEL - 344a geração] permite ver UMA travessia específica (rótulos únicos por índice).
+                        _fluv_labels = ["(todas as travessias)"] + [
+                            "%d. %s → %s" % (_i + 1, _r.get("origem", "—"), _r.get("destino", "—"))
+                            for _i, _r in enumerate(_rotas_fluv_f)]
+                        _fluv_sel = st.selectbox("🔍 Ver uma travessia específica", _fluv_labels, key="fluv_sel_rota")
+                        if _fluv_sel != "(todas as travessias)":
+                            _ixsel = _fluv_labels.index(_fluv_sel) - 1
+                            if 0 <= _ixsel < len(_rotas_fluv_f):
+                                _rotas_fluv_f = [_rotas_fluv_f[_ixsel]]
+                        st.caption("⛴️ **%d travessia(s) por balsa** (de %d rota(s); **%d** após o filtro). Alterne a "
+                                   "base para **Relevo/Água (OpenTopoMap)** no controle de camadas para ver a "
+                                   "hidrografia." % (len(_rotas_fluv), len(_rotas), len(_rotas_fluv_f)))
+                        try:
+                            _tab_rows = [{"Origem": r.get("origem", "—"), "Destino": r.get("destino", "—"),
+                                          "Distância (km)": r.get("dist_km"), "Tempo (min)": r.get("tempo_min"),
+                                          "Motor": r.get("motor", "—")} for r in _rotas_fluv_f]
+                            if _tab_rows:
+                                _df_fluv = pd.DataFrame(_tab_rows)
+                                if "Distância (km)" in _df_fluv.columns:
+                                    _df_fluv = _df_fluv.sort_values("Distância (km)", ascending=False, na_position="last")
+                                st.markdown("##### ⛴️ Resumo das travessias fluviais")
+                                st.dataframe(_df_fluv, use_container_width=True, hide_index=True)
+                                # [FLUVIAL-CSV - 345a geração] download do resumo das travessias.
+                                try:
+                                    _csv_fluv = _df_fluv.to_csv(index=False).encode("utf-8-sig")
+                                    st.download_button("⬇️ Baixar resumo das travessias (CSV)", data=_csv_fluv,
+                                                       file_name="travessias_fluviais.csv", mime="text/csv",
+                                                       key="fluv_csv_dl")
+                                except Exception:
+                                    logger.error("[FLUVIAL-CSV] Falha ao gerar CSV (isolada).", exc_info=True)
+                                # [FLUVIAL-XLSX - 347a geração] xlsx FORMATADO e CACHEADO (sem churn de DOM).
+                                try:
+                                    _xb = _xlsx_travessias_bytes(_df_fluv)
+                                    if _xb:
+                                        st.download_button("⬇️ Baixar resumo das travessias (Excel)", data=_xb,
+                                                           file_name="travessias_fluviais.xlsx",
+                                                           mime=("application/vnd.openxmlformats-officedocument."
+                                                                 "spreadsheetml.sheet"), key="fluv_xlsx_dl")
+                                except Exception:
+                                    logger.error("[FLUVIAL-XLSX] Falha ao gerar xlsx (isolada).", exc_info=True)
+                                # [FLUVIAL-HIST - 347a geração] (#2) distribuição das distâncias das travessias.
+                                try:
+                                    _kmv = [r.get("dist_km") for r in _rotas_fluv_f
+                                            if isinstance(r.get("dist_km"), (int, float))]
+                                    if len(_kmv) >= 3:
+                                        _sh = pd.Series(_kmv)
+                                        _nb = min(8, max(3, len(_kmv) // 2))
+                                        _cut = pd.cut(_sh, bins=_nb)
+                                        _vc = _cut.value_counts().sort_index()
+                                        _dfh = pd.DataFrame({"Travessias": _vc.values},
+                                                            index=[str(_iv) for _iv in _vc.index])
+                                        st.markdown("##### 📊 Distribuição das distâncias das travessias (km)")
+                                        st.bar_chart(_dfh)
+                                except Exception:
+                                    logger.error("[FLUVIAL-HIST] Falha no histograma (isolada).", exc_info=True)
+                        except Exception:
+                            logger.error("[FLUVIAL-RESUMO] Falha ao montar o resumo (isolada).", exc_info=True)
+                        _gmapa = (_geo_mapa_leaflet(_rotas_fluv_f, altura=540, max_features=400,
+                                                    decode_fn=globals().get("_decodificar_polyline"), fluvial=True)
+                                  if _rotas_fluv_f else "")
+                        _map_cap = ("⛴️ azul-água = trecho que cruza rio por balsa · 🔵 origem · 🔴 destino. "
+                                    "Base alternável: OpenTopoMap realça rios e relevo.")
+                    else:
+                        st.info("Nenhuma rota com travessia por balsa neste conjunto — a malha fluvial aparece "
+                                "quando há rotas marcadas com balsa (ex.: destinos amazônicos por rio).")
+                        _gmapa = ""
+                        _map_cap = ""
+                elif _radio_map.startswith("🔥"):
+                    # [MAPA-CALOR - 360a geração] densidade de candidatos (ou candidato-km) por origem.
+                    _peso = st.radio("Peso do calor", ["Candidatos", "Candidato-km (impacto)"],
+                                     horizontal=True, key="geo_calor_peso")
+                    _gmapa = _geo_mapa_calor(_rotas, altura=540, por_candkm=_peso.startswith("Candidato-km"))
+                    _map_cap = ("🔥 Áreas quentes = maior %s. Revela onde o volume humano se concentra "
+                                "no território." % ("impacto (candidato-km)" if _peso.startswith("Candidato-km") else "nº de candidatos"))
+                elif _radio_map.startswith("Rede"):
                     _clusters = _geo_clusters(_rotas, precision=(1 if len(_rotas) > 400 else 2))
                     _gmapa = _geo_mapa_rede(_clusters, altura=540)
                     _map_cap = ("🔵 cluster de origens (tamanho = candidatos) · 🔴 destino · linha teal = fluxo cluster → destino "
@@ -43988,6 +44722,59 @@ if _secao == _SECOES[4]:   # tab_analytics
     else:
         st.warning("Aguardando processamento de planilha corporativa na aba de Lotes (⚙️) para ativar e renderizar o Enterprise Data Analytics Engine.")
 
+# [CF-FONTE - 354a geração] Auto-suficiência das abas Calculadora/Classificação: montam a base a partir de
+# qualquer resultado (alocação/lote/processado) e expõem um seletor de fonte explícito. Aditivo, defensivo.
+def _cf_master_de(df):
+    """Constrói uma base compatível com Calculadora/Classificação a partir de um resultado bruto
+    (alocação/lote/processado): adiciona as colunas sintéticas de UF/Região se faltarem. Em falha, devolve o df."""
+    try:
+        _d = df.copy()
+        if "UF_Sintetica_Origem" not in _d.columns and "Endereco Oficial Origem" in _d.columns:
+            _d["UF_Sintetica_Origem"] = _d["Endereco Oficial Origem"].apply(extrair_uf_precisa)
+        if "Regiao_Sintetica_Origem" not in _d.columns and "UF_Sintetica_Origem" in _d.columns:
+            _d["Regiao_Sintetica_Origem"] = _d["UF_Sintetica_Origem"].map(_UF_PARA_REGIAO).fillna("Indefinido")
+        return _d
+    except Exception:
+        logger.error("[CF-MASTER-DE] Falha ao montar base compatível (isolada).", exc_info=True)
+        return df
+
+
+def _cf_fonte_selector(prefix):
+    """Seletor de fonte para Calculadora/Classificação. Reúne as fontes disponíveis (Painel filtrado,
+    Locais de Aplicação, Lote, último processamento), mostra um seletor quando há mais de uma e devolve o
+    DataFrame-base já compatível (colunas sintéticas). Retorna None se não houver fonte. Nunca levanta."""
+    try:
+        _opts = []
+        _cfm = st.session_state.get("df_cf_master")
+        if isinstance(_cfm, pd.DataFrame) and not _cfm.empty:
+            _opts.append(("📊 Painel Estratégico (filtrado)", "df_cf_master"))
+        _alo = st.session_state.get("alo_resultados")
+        if isinstance(_alo, pd.DataFrame) and not _alo.empty:
+            _opts.append(("🎯 Locais de Aplicação", "alo_resultados"))
+        _lote = st.session_state.get("lote_resultados")
+        if isinstance(_lote, pd.DataFrame) and not _lote.empty:
+            _opts.append(("⚙️ Estudo em Lote", "lote_resultados"))
+        _dfp = st.session_state.get("df_processado")
+        if isinstance(_dfp, pd.DataFrame) and not _dfp.empty and "df_cf_master" not in [k for _, k in _opts]:
+            _opts.append(("🧾 Último processamento", "df_processado"))
+        if not _opts:
+            return None
+        if len(_opts) > 1:
+            _labels = [oo[0] for oo in _opts]
+            _sel = st.selectbox("🔎 Fonte de dados desta aba", _labels, key=prefix + "_cf_fonte")
+            _key = _opts[_labels.index(_sel)][1]
+        else:
+            _key = _opts[0][1]
+            st.caption("Fonte de dados: **%s**." % _opts[0][0])
+        _df = st.session_state.get(_key)
+        if not isinstance(_df, pd.DataFrame) or _df.empty:
+            return None
+        return _df.copy() if _key == "df_cf_master" else _cf_master_de(_df)
+    except Exception:
+        logger.error("[CF-FONTE] Falha no seletor de fonte (isolada).", exc_info=True)
+        return None
+
+
 if _secao == _SECOES[5]:   # tab_calculadora
     st.info("🧮 **Objetivo desta aba:** Autoatendimento analítico. Crie tabelas dinâmicas e extrações próprias sobre a base de deslocamentos já validada — por UF, por polo de aplicação, por faixa de distância do candidato.")
     renderizar_guia_aba("calculadora")
@@ -43995,8 +44782,9 @@ if _secao == _SECOES[5]:   # tab_calculadora
     with col_c_title: 
         st.markdown("### 🧮 Calculadora Analítica Corporativa")
         
-    if 'df_cf_master' in st.session_state and not st.session_state['df_cf_master'].empty:
-        df_base_calc = st.session_state['df_cf_master'].copy()
+    _cf_src_calc = _cf_fonte_selector("calc")
+    if _cf_src_calc is not None and not _cf_src_calc.empty:
+        df_base_calc = _cf_src_calc.copy()
         
         st.markdown("#### 🎛️ Painel de Filtros da Calculadora (Cascata Local)")
         with st.container(border=True):
@@ -44115,13 +44903,46 @@ if _secao == _SECOES[5]:   # tab_calculadora
     else:
         st.warning("Os dados ainda não foram processados ou o filtro global está muito restrito. Processe um lote na Aba 'Processamento em Lote'.")
 
+    # [CALC-COMPARADOR - 353a geração] Cruzamento com o Comparador de Estudos: calculadora de agregações
+    # sobre as divergências (Aplicação × Referência). Aditivo, isolado, aparece só se houver comparação.
+    _cmp_div_c = st.session_state.get("cmp_diag_divergencias")
+    if isinstance(_cmp_div_c, dict) and _cmp_div_c.get("analises") and "_geodiv_dataset" in globals():
+        with st.expander("⚖️ Calcular sobre o Comparador de Estudos (Aplicação × Referência)", expanded=False):
+            try:
+                _rows_cc = _geodiv_dataset(_cmp_div_c.get("analises") or [])
+                if _rows_cc:
+                    _dfcc = pd.DataFrame(_rows_cc)
+                    _grp = st.selectbox("Agrupar por", ["UF", "Vencedor", "Categoria"], key="calc_cmp_grp")
+                    _col = {"UF": "uf", "Vencedor": "vencedor", "Categoria": "categoria"}[_grp]
+                    if _col in _dfcc.columns:
+                        _agg_cc = _dfcc.groupby(_col).agg(
+                            Municipios=("municipio", "count"),
+                            Aplic_media=("app_dist", lambda x: round(x.dropna().mean(), 1) if x.dropna().size else 0.0),
+                            Refer_media=("ref_dist", lambda x: round(x.dropna().mean(), 1) if x.dropna().size else 0.0),
+                            Delta_medio_km=("dif_km", lambda x: round(x.dropna().abs().mean(), 1) if x.dropna().size else 0.0),
+                            km_candidato=("km_candidato", lambda x: int(x.dropna().sum()))).reset_index()
+                        _agg_cc = _agg_cc.rename(columns={_col: _grp, "Aplic_media": "Aplicação méd. (km)",
+                                                          "Refer_media": "Referência méd. (km)",
+                                                          "Delta_medio_km": "Δ médio (km)"})
+                        st.dataframe(_agg_cc, use_container_width=True, hide_index=True)
+                        st.download_button("⬇️ Exportar agregação (CSV)",
+                                           data=_agg_cc.to_csv(index=False).encode("utf-8-sig"),
+                                           file_name="calc_comparador.csv", mime="text/csv", key="calc_cmp_csv")
+                    else:
+                        st.info("A coluna escolhida não está disponível nesta comparação.")
+                else:
+                    st.info("O Comparador não tem divergências com dados para calcular.")
+            except Exception:
+                logger.error("[CALC-COMPARADOR] Falha ao calcular sobre o Comparador (isolada).", exc_info=True)
+
 if _secao == _SECOES[6]:   # tab_classificacao
     st.info("🗂️ **Objetivo desta aba:** Segmentar os municípios por faixas de deslocamento dos candidatos e rotular os polos de aplicação. Use o Editor de Faixas para configurar os limites e identificar os municípios com acesso mais crítico ao local de prova.")
     renderizar_guia_aba("classificacao")
     st.markdown("### 🗂️ Classificação Territorial de Ocorrências Municipais")
     
-    if 'df_cf_master' in st.session_state and not st.session_state['df_cf_master'].empty:
-        df_base_class = st.session_state['df_cf_master'].copy()
+    _cf_src_class = _cf_fonte_selector("class")
+    if _cf_src_class is not None and not _cf_src_class.empty:
+        df_base_class = _cf_src_class.copy()
         
         st.markdown("#### ⚙️ Parâmetro Base de Classificação")
         metrica_classificacao = st.radio(
@@ -44356,6 +45177,42 @@ if _secao == _SECOES[6]:   # tab_classificacao
                        "geográficos. Combine o critério principal com o de desempate para rankings compostos.")
     else:
         st.warning("O conjunto de dados base global está vazio. Por favor, processe seu Lote para alimentar este módulo espacial.")
+
+    # [CLASS-COMPARADOR - 353a geração] Cruzamento com o Comparador: classifica os municípios pela MAGNITUDE
+    # da divergência (Δ km) entre Aplicação e Referência. Aditivo, isolado, gated na existência da comparação.
+    _cmp_div_k = st.session_state.get("cmp_diag_divergencias")
+    if isinstance(_cmp_div_k, dict) and _cmp_div_k.get("analises") and "_geodiv_dataset" in globals():
+        with st.expander("⚖️ Classificar pela divergência (Comparador de Estudos)", expanded=False):
+            try:
+                _rows_ck = _geodiv_dataset(_cmp_div_k.get("analises") or [])
+                _difs_k = [abs(r["dif_km"]) for r in _rows_ck if isinstance(r.get("dif_km"), (int, float))]
+                if _difs_k:
+                    _cka, _ckb = st.columns(2)
+                    _lim1 = _cka.slider("Teto de 'empate técnico' (km)", 0.0, 20.0, 2.0, 0.5, key="class_cmp_l1")
+                    _lim2 = _ckb.slider("Piso de 'divergência crítica' (km)", 5.0, 200.0, 50.0, 5.0, key="class_cmp_l2")
+                    def _faixa_div(_d, _l1=_lim1, _l2=_lim2):
+                        _a = abs(_d)
+                        if _a <= _l1:
+                            return "1. Empate técnico"
+                        if _a >= _l2:
+                            return "3. Divergência crítica"
+                        return "2. Divergência moderada"
+                    _cont_k = {}
+                    for _r in _rows_ck:
+                        if isinstance(_r.get("dif_km"), (int, float)):
+                            _f = _faixa_div(_r["dif_km"])
+                            _cont_k[_f] = _cont_k.get(_f, 0) + 1
+                    _dfk = pd.DataFrame({"Faixa": sorted(_cont_k.keys()),
+                                         "Municípios": [_cont_k[_k] for _k in sorted(_cont_k.keys())]})
+                    st.dataframe(_dfk, use_container_width=True, hide_index=True)
+                    st.bar_chart(_dfk.set_index("Faixa"))
+                    st.download_button("⬇️ Exportar classificação (CSV)",
+                                       data=_dfk.to_csv(index=False).encode("utf-8-sig"),
+                                       file_name="class_comparador.csv", mime="text/csv", key="class_cmp_csv")
+                else:
+                    st.info("O Comparador não tem divergências com Δ (km) para classificar.")
+            except Exception:
+                logger.error("[CLASS-COMPARADOR] Falha ao classificar divergências (isolada).", exc_info=True)
 
 if _secao == _SECOES[7]:   # tab_proximidade
     renderizar_guia_aba("proximidade")
@@ -46204,7 +47061,7 @@ if _secao == _SECOES[10]:   # tab_motores
         col_m1, col_m2 = st.columns(2)
         with col_m1:
             st.caption("**Volume de Requisições de Resolução por Motor (Market Share Base)**")
-            grafico_apis = alt.Chart(df_kpi).mark_arc(innerRadius=60).encode(
+            grafico_apis = alt.Chart(df_kpi[["Fonte Geocoding Origem"]].astype(str)).mark_arc(innerRadius=60).encode(
                 theta=alt.Theta(field="Fonte Geocoding Origem", aggregate="count"),
                 color=alt.Color(field="Fonte Geocoding Origem", type="nominal", legend=alt.Legend(title="Motores", orient='bottom')),
                 tooltip=['Fonte Geocoding Origem', 'count()']
@@ -46217,7 +47074,7 @@ if _secao == _SECOES[10]:   # tab_motores
         with col_m2:
             st.caption("**Distribuição Qualitativa: Status Bayesiano Pós-Processamento**")
             status_palette_bar = alt.Scale(domain=['Excelente', 'Boa', 'Aceitável', 'Revisar', 'Erro'], range=['#2ECC71', '#3498DB', '#F1C40F', '#E67E22', '#E74C3C'])
-            grafico_status = alt.Chart(df_kpi).mark_bar().encode(
+            grafico_status = alt.Chart(df_kpi[["Status da Rota"]].astype(str)).mark_bar().encode(
                 x=alt.X('Status da Rota:N', title='Classificação de Confiança e Exatidão'),
                 y=alt.Y('count():Q', title='Volume de Requisições'),
                 color=alt.Color('Status da Rota:N', scale=status_palette_bar, legend=None),
